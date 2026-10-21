@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,6 +17,14 @@ impl StressFormat {
             Self::PlusBeforeVowel => "+ перед гласной (з+амок) [Drama3 / Silero]",
             Self::AcuteAccent => "Ударение Юникода (за́мок) [U+0301]",
             Self::CleanYoOnly => "Без ударений — только Ё (замок)",
+        }
+    }
+
+    pub fn short_label(&self) -> &'static str {
+        match self {
+            Self::PlusBeforeVowel => "+ перед гласной",
+            Self::AcuteAccent => "Ударение Юникода",
+            Self::CleanYoOnly => "Только Ё",
         }
     }
 }
@@ -107,6 +115,7 @@ pub struct DictionaryMeta {
     pub enabled: bool,
     pub rule_count: usize,
     pub encoding: &'static str,
+    pub warnings: Vec<String>,
     pub last_ms: Option<u128>,
     pub last_replacements: Option<usize>,
 }
@@ -154,14 +163,18 @@ pub struct BookDocument {
 }
 
 #[derive(Debug, Clone)]
+pub struct PipelineResult {
+    pub raw_text: String,
+    pub processed_text: String,
+    pub chunks: Vec<String>,
+    pub report: PipelineReport,
+}
+
+#[derive(Debug, Clone)]
 pub enum PipelineProgress {
     StepStarted { index: usize, total: usize, name: String },
     StepFinished(StepReport),
-    Completed {
-        processed_text: String,
-        chunks: Vec<String>,
-        report: PipelineReport,
-    },
+    Completed(PipelineResult),
     Error(String),
 }
 
@@ -170,7 +183,6 @@ pub struct AppSettings {
     pub ui_font_size: f32,
     pub editor_font_size: f32,
     pub dark_mode: bool,
-    pub word_wrap: bool,
     pub stress_format: StressFormat,
     pub chunk_config: ChunkConfig,
     pub dic_folder: PathBuf,
@@ -187,7 +199,6 @@ impl Default for AppSettings {
             ui_font_size: 16.0,
             editor_font_size: 19.0,
             dark_mode: true,
-            word_wrap: true,
             stress_format: StressFormat::PlusBeforeVowel,
             chunk_config: ChunkConfig::default(),
             dic_folder: PathBuf::from("dic"),
@@ -410,9 +421,4 @@ pub fn describe_dictionary(name: &str, content: &str) -> (DictionaryTag, String,
             false,
         )
     }
-}
-
-#[allow(dead_code)]
-pub fn is_valid_dir(p: &Path) -> bool {
-    p.is_dir()
 }

@@ -13,7 +13,12 @@ pub struct CompiledDictionary {
     pub processor: Arc<dyn TextProcessor>,
 }
 
-pub fn load_dictionaries_parallel(dir: &Path) -> Result<Vec<CompiledDictionary>, String> {
+pub struct DictionaryLoadReport {
+    pub compiled: Vec<CompiledDictionary>,
+    pub errors: Vec<String>,
+}
+
+pub fn load_dictionaries_parallel(dir: &Path) -> Result<DictionaryLoadReport, String> {
     let entries = std::fs::read_dir(dir)
         .map_err(|e| format!("Не удалось открыть папку словарей {}: {e}", dir.display()))?;
 
@@ -33,12 +38,29 @@ pub fn load_dictionaries_parallel(dir: &Path) -> Result<Vec<CompiledDictionary>,
 
     paths.sort_by_key(|p| pipeline_sort_key(p));
 
-    let compiled: Vec<CompiledDictionary> = paths
+    let results: Vec<Result<CompiledDictionary, String>> = paths
         .par_iter()
-        .filter_map(|path| compile_single_dictionary(path).ok())
+        .map(|path| {
+            compile_single_dictionary(path).map_err(|err| {
+                let name = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("<unknown>");
+                format!("{name}: {err}")
+            })
+        })
         .collect();
 
-    Ok(compiled)
+    let mut compiled = Vec::with_capacity(results.len());
+    let mut errors = Vec::new();
+    for result in results {
+        match result {
+            Ok(dictionary) => compiled.push(dictionary),
+            Err(err) => errors.push(err),
+        }
+    }
+
+    Ok(DictionaryLoadReport { compiled, errors })
 }
 
 pub fn compile_single_dictionary(path: &Path) -> Result<CompiledDictionary, String> {
@@ -57,10 +79,14 @@ pub fn compile_single_dictionary(path: &Path) -> Result<CompiledDictionary, Stri
         .and_then(|s| s.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("rex"));
 
-    let processor: Arc<dyn TextProcessor> = if is_rex {
-        Arc::new(RexProcessor::compile(name.clone(), &content, encoding))
+    let (processor, warnings): (Arc<dyn TextProcessor>, Vec<String>) = if is_rex {
+        let rex = RexProcessor::compile(name.clone(), &content, encoding);
+        let warnings = rex.compile_warnings().to_vec();
+        (Arc::new(rex), warnings)
     } else {
-        Arc::new(DicProcessor::compile(name.clone(), &content, encoding))
+        let dic = DicProcessor::compile(name.clone(), &content, encoding);
+        let warnings = dic.compile_warnings().to_vec();
+        (Arc::new(dic), warnings)
     };
 
     let meta = DictionaryMeta {
@@ -73,6 +99,7 @@ pub fn compile_single_dictionary(path: &Path) -> Result<CompiledDictionary, Stri
         enabled: true,
         rule_count: processor.rule_count(),
         encoding,
+        warnings,
         last_ms: None,
         last_replacements: None,
     };

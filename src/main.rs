@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::domain::{ChunkConfig, StressFormat};
-use crate::engine::loader::load_dictionaries_parallel;
+use crate::engine::loader::{load_dictionaries_parallel, DictionaryLoadReport};
 use crate::io::book_reader::CompositeBookReader;
 use crate::ports::DocumentReader;
 use crate::services::chunker::SentenceAwareChunker;
@@ -47,7 +47,11 @@ fn run_cli_or_bench(args: &[String]) {
     let dic_folder = locate_default_dic_folder();
     println!("Загрузка словарей из {}...", dic_folder.display());
     let t0 = Instant::now();
-    let compiled = load_dictionaries_parallel(&dic_folder).expect("Ошибка загрузки словарей");
+    let report = load_dictionaries_parallel(&dic_folder).expect("Ошибка загрузки словарей");
+    let DictionaryLoadReport { compiled, errors } = report;
+    for err in &errors {
+        eprintln!("Пропущен словарь: {err}");
+    }
     let total_rules: usize = compiled.iter().map(|c| c.meta.rule_count).sum();
     println!(
         "Скомпилировано {} словарей ({} правил) за {} мс",
@@ -77,17 +81,17 @@ fn run_cli_or_bench(args: &[String]) {
         Arc::new(SentenceAwareChunker),
     );
 
-    let (processed, chunks, report) = pipeline.execute(
+    let result = pipeline.execute(
         &doc.raw_text,
         &processors,
         StressFormat::PlusBeforeVowel,
         &ChunkConfig::default(),
-        false,
+        args.iter().any(|a| a == "--diff"),
         None,
     );
 
     println!("------------------------------------------------------------");
-    for s in &report.steps {
+    for s in &result.report.steps {
         println!(
             "{:42} | {:10} | {:8} правил | {:5} мс | {:6} замен",
             s.dictionary_name,
@@ -100,17 +104,31 @@ fn run_cli_or_bench(args: &[String]) {
     println!("------------------------------------------------------------");
     println!(
         "ИТОГО: {} мс | Всего замен: {} | Чанков для Drama3: {}",
-        report.total_ms,
-        report.total_replacements,
-        chunks.len()
+        result.report.total_ms,
+        result.report.total_replacements,
+        result.chunks.len()
     );
+
+    if !result.report.events.is_empty() {
+        println!("--- Журнал замен ---");
+        for ev in &result.report.events {
+            println!(
+                "{} | {} | {} -> {}",
+                ev.dictionary_name,
+                ev.rule_summary,
+                ev.before_snippet,
+                ev.after_snippet
+            );
+        }
+    }
 
     if let Some(out_path) = args
         .windows(2)
         .find(|w| w[0] == "--output" || w[0] == "-o")
         .map(|w| PathBuf::from(&w[1]))
     {
-        std::fs::write(&out_path, &processed).expect("Не удалось записать выходной файл");
+        std::fs::write(&out_path, &result.processed_text)
+            .expect("Не удалось записать выходной файл");
         println!("Результат сохранён в {}", out_path.display());
     }
 }

@@ -8,7 +8,7 @@ use crate::domain::{
     AppSettings, BookDocument, DictionaryMeta, DictionaryTag, PipelineProgress,
     PipelineReport, StressFormat,
 };
-use crate::engine::loader::{load_dictionaries_parallel, CompiledDictionary};
+use crate::engine::loader::{load_dictionaries_parallel, CompiledDictionary, DictionaryLoadReport};
 use crate::io::book_reader::CompositeBookReader;
 use crate::ports::{DocumentReader, StressFormatter, TextChunker, TextProcessor};
 use crate::services::chunker::SentenceAwareChunker;
@@ -28,7 +28,6 @@ pub struct DemagogApp {
     settings: AppSettings,
     dictionaries: Vec<DictionaryMeta>,
     processors: Vec<Arc<dyn TextProcessor>>,
-    book_reader: CompositeBookReader,
     document: BookDocument,
     raw_pipeline_output: String,
     active_tab: ActiveTab,
@@ -41,13 +40,16 @@ pub struct DemagogApp {
     dic_search_filter: String,
     last_copied_chunk: Option<usize>,
     capture_diff_on_run: bool,
+    dic_load_errors: Vec<String>,
 }
 
 enum WorkerMessage {
     DictionariesCompiled {
         compiled: Vec<CompiledDictionary>,
+        errors: Vec<String>,
         elapsed_ms: u128,
     },
+    BookLoaded(Result<BookDocument, String>),
     Pipeline(PipelineProgress),
 }
 
@@ -69,7 +71,6 @@ impl DemagogApp {
             settings,
             dictionaries: Vec::new(),
             processors: Vec::new(),
-            book_reader: CompositeBookReader::new(),
             document: BookDocument {
                 title: "Пример текста".to_string(),
                 source_path: None,
@@ -88,6 +89,7 @@ impl DemagogApp {
             dic_search_filter: String::new(),
             last_copied_chunk: None,
             capture_diff_on_run: false,
+            dic_load_errors: Vec::new(),
         };
 
         app.reload_dictionaries_async(cc.egui_ctx.clone());
@@ -100,6 +102,7 @@ impl DemagogApp {
         }
         self.is_busy = true;
         self.progress_ratio = 0.1;
+        self.dic_load_errors.clear();
         self.status_line = format!(
             "Параллельная компиляция словарей из {}...",
             self.settings.dic_folder.display()
@@ -112,10 +115,12 @@ impl DemagogApp {
         std::thread::spawn(move || {
             let start = Instant::now();
             match load_dictionaries_parallel(&folder) {
-                Ok(compiled) => {
+                Ok(report) => {
+                    let DictionaryLoadReport { compiled, errors } = report;
                     let elapsed_ms = start.elapsed().as_millis();
                     let _ = tx.send(WorkerMessage::DictionariesCompiled {
                         compiled,
+                        errors,
                         elapsed_ms,
                     });
                 }
@@ -192,110 +197,171 @@ impl DemagogApp {
 
     fn poll_worker(&mut self) {
         let mut finished = false;
+        let mut disconnected = false;
+
         if let Some(rx) = &self.rx {
-            while let Ok(msg) = rx.try_recv() {
-                match msg {
-                    WorkerMessage::DictionariesCompiled {
-                        compiled,
-                        elapsed_ms,
-                    } => {
-                        let total_rules: usize = compiled.iter().map(|c| c.meta.rule_count).sum();
-                        self.dictionaries = compiled
-                            .iter()
-                            .map(|c| {
-                                let mut m = c.meta.clone();
-                                m.enabled = self.settings.is_dic_enabled(&m.name);
-                                m
-                            })
-                            .collect();
-                        self.processors = compiled.into_iter().map(|c| c.processor).collect();
-                        self.status_line = format!(
-                            "Готово: загружено {} словарей ({} правил) за {} мс",
-                            self.dictionaries.len(),
-                            format_num(total_rules),
-                            elapsed_ms
-                        );
-                        self.is_busy = false;
-                        self.progress_ratio = 1.0;
-                        finished = true;
+            loop {
+                match rx.try_recv() {
+                    Ok(msg) => {
+                        match msg {
+                            WorkerMessage::DictionariesCompiled {
+                                compiled,
+                                errors,
+                                elapsed_ms,
+                            } => {
+                                let total_rules: usize =
+                                    compiled.iter().map(|c| c.meta.rule_count).sum();
+                                self.dictionaries = compiled
+                                    .iter()
+                                    .map(|c| {
+                                        let mut m = c.meta.clone();
+                                        m.enabled = self.settings.is_dic_enabled(&m.name);
+                                        m
+                                    })
+                                    .collect();
+                                self.processors =
+                                    compiled.into_iter().map(|c| c.processor).collect();
+                                let mut status = format!(
+                                    "Готово: загружено {} словарей ({} правил) за {} мс",
+                                    self.dictionaries.len(),
+                                    format_num(total_rules),
+                                    elapsed_ms
+                                );
+                                if !errors.is_empty() {
+                                    status.push_str(&format!(
+                                        " | пропущено с ошибкой: {}",
+                                        errors.len()
+                                    ));
+                                }
+                                self.status_line = status;
+                                self.dic_load_errors = errors;
+                                self.is_busy = false;
+                                self.progress_ratio = 1.0;
+                                finished = true;
+                            }
+                            WorkerMessage::BookLoaded(result) => {
+                                match result {
+                                    Ok(doc) => {
+                                        let chars = doc.raw_text.chars().count();
+                                        self.status_line = format!(
+                                            "Открыта книга «{}» ({} символов)",
+                                            doc.title,
+                                            format_num(chars)
+                                        );
+                                        self.document = doc;
+                                        self.raw_pipeline_output.clear();
+                                        self.active_tab = ActiveTab::RawText;
+                                        self.last_copied_chunk = None;
+                                        self.report = PipelineReport::default();
+                                        for d in &mut self.dictionaries {
+                                            d.last_ms = None;
+                                            d.last_replacements = None;
+                                        }
+                                    }
+                                    Err(err) => {
+                                        self.status_line = err;
+                                    }
+                                }
+                                self.is_busy = false;
+                                self.progress_ratio = 0.0;
+                                finished = true;
+                            }
+                            WorkerMessage::Pipeline(progress) => match progress {
+                                PipelineProgress::StepStarted { index, total, name } => {
+                                    self.progress_ratio =
+                                        index as f32 / total.max(1) as f32;
+                                    self.status_line =
+                                        format!("[{index}/{total}] Обработка: {name}...");
+                                }
+                                PipelineProgress::StepFinished(step) => {
+                                    if let Some(d) = self
+                                        .dictionaries
+                                        .iter_mut()
+                                        .find(|d| d.name == step.dictionary_name)
+                                    {
+                                        d.last_ms = Some(step.elapsed_ms);
+                                        d.last_replacements =
+                                            Some(step.replacements_count);
+                                    }
+                                }
+                                PipelineProgress::Completed(result) => {
+                                    self.status_line = format!(
+                                        "Обработано за {} мс | Замен: {} | Чанков для Drama3: {}",
+                                        result.report.total_ms,
+                                        format_num(result.report.total_replacements),
+                                        result.chunks.len()
+                                    );
+                                    self.raw_pipeline_output = result.raw_text;
+                                    self.document.processed_text = result.processed_text;
+                                    self.document.chunks = result.chunks;
+                                    let had_events = !result.report.events.is_empty();
+                                    self.report = result.report;
+                                    self.is_busy = false;
+                                    self.progress_ratio = 1.0;
+                                    if had_events && self.capture_diff_on_run {
+                                        self.active_tab = ActiveTab::DiffAndStats;
+                                    } else if self.active_tab == ActiveTab::RawText {
+                                        self.active_tab = ActiveTab::ProcessedText;
+                                    }
+                                    finished = true;
+                                }
+                                PipelineProgress::Error(err) => {
+                                    self.status_line = format!("Ошибка: {err}");
+                                    self.is_busy = false;
+                                    self.progress_ratio = 0.0;
+                                    finished = true;
+                                }
+                            },
+                        }
+
+                        if finished {
+                            break;
+                        }
                     }
-                    WorkerMessage::Pipeline(progress) => match progress {
-                        PipelineProgress::StepStarted { index, total, name } => {
-                            self.progress_ratio = index as f32 / total.max(1) as f32;
-                            self.status_line = format!("[{index}/{total}] Обработка: {name}...");
-                        }
-                        PipelineProgress::StepFinished(step) => {
-                            if let Some(d) = self
-                                .dictionaries
-                                .iter_mut()
-                                .find(|d| d.name == step.dictionary_name)
-                            {
-                                d.last_ms = Some(step.elapsed_ms);
-                                d.last_replacements = Some(step.replacements_count);
-                            }
-                        }
-                        PipelineProgress::Completed {
-                            processed_text,
-                            chunks,
-                            report,
-                        } => {
-                            self.status_line = format!(
-                                "Обработано за {} мс | Замен: {} | Чанков для Drama3: {}",
-                                report.total_ms,
-                                format_num(report.total_replacements),
-                                chunks.len()
-                            );
-                            self.raw_pipeline_output = processed_text.clone();
-                            self.document.processed_text = processed_text;
-                            self.document.chunks = chunks;
-                            let had_events = !report.events.is_empty();
-                            self.report = report;
-                            self.is_busy = false;
-                            self.progress_ratio = 1.0;
-                            if had_events && self.capture_diff_on_run {
-                                self.active_tab = ActiveTab::DiffAndStats;
-                            } else if self.active_tab == ActiveTab::RawText {
-                                self.active_tab = ActiveTab::ProcessedText;
-                            }
-                            finished = true;
-                        }
-                        PipelineProgress::Error(err) => {
-                            self.status_line = format!("Ошибка: {err}");
-                            self.is_busy = false;
-                            finished = true;
-                        }
-                    },
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
                 }
             }
         }
-        if finished {
+
+        if finished || disconnected {
+            if disconnected && !finished {
+                self.status_line =
+                    "Рабочий поток завершился неожиданно — попробуйте ещё раз".to_string();
+                self.is_busy = false;
+                self.progress_ratio = 0.0;
+            }
             self.rx = None;
         }
     }
 
-    fn open_book_dialog(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
+    fn open_book_dialog(&mut self, ctx: egui::Context) {
+        if self.is_busy {
+            return;
+        }
+
+        let Some(path) = rfd::FileDialog::new()
             .add_filter("Книги и текст", &["txt", "fb2", "epub", "docx", "zip", "md"])
             .pick_file()
-        {
-            match self.book_reader.read_document(&path) {
-                Ok(doc) => {
-                    let chars = doc.raw_text.chars().count();
-                    self.status_line = format!(
-                        "Открыта книга «{}» ({} символов)",
-                        doc.title,
-                        format_num(chars)
-                    );
-                    self.document = doc;
-                    self.raw_pipeline_output.clear();
-                    self.active_tab = ActiveTab::RawText;
-                    self.last_copied_chunk = None;
-                }
-                Err(e) => {
-                    self.status_line = e;
-                }
-            }
-        }
+        else {
+            return;
+        };
+
+        self.is_busy = true;
+        self.progress_ratio = 0.0;
+        self.status_line = format!("Чтение «{}»...", path.display());
+
+        let (tx, rx) = mpsc::channel();
+        self.rx = Some(rx);
+        std::thread::spawn(move || {
+            let reader = CompositeBookReader::new();
+            let result = reader.read_document(&path);
+            let _ = tx.send(WorkerMessage::BookLoaded(result));
+            ctx.request_repaint();
+        });
     }
 
     fn save_processed_txt(&mut self) {
@@ -393,7 +459,7 @@ impl eframe::App for DemagogApp {
                     .on_hover_text("Открыть TXT, FB2, FB2.ZIP, EPUB или DOCX")
                     .clicked()
                 {
-                    self.open_book_dialog();
+                    self.open_book_dialog(ctx.clone());
                 }
 
                 let run_btn = egui::Button::new(
@@ -424,7 +490,7 @@ impl eframe::App for DemagogApp {
                 ui.label("Формат выхода:");
                 let prev_fmt = self.settings.stress_format;
                 egui::ComboBox::from_id_salt("stress_format_combo")
-                    .selected_text(self.settings.stress_format.label())
+                    .selected_text(self.settings.stress_format.short_label())
                     .show_ui(ui, |ui| {
                         for fmt in [
                             StressFormat::PlusBeforeVowel,
@@ -506,7 +572,10 @@ impl eframe::App for DemagogApp {
                             .show_percentage(),
                     );
                 }
-                ui.label(&self.status_line);
+                let status = ui.label(&self.status_line);
+                if !self.dic_load_errors.is_empty() {
+                    status.on_hover_text(self.dic_load_errors.join("\n"));
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let active_count = self.dictionaries.iter().filter(|d| d.enabled).count();
                     let active_rules: usize = self
@@ -839,6 +908,7 @@ impl eframe::App for DemagogApp {
                         }
                         if ui.button("🔄 Перенести результат в исходник").clicked() {
                             self.document.raw_text = self.document.processed_text.clone();
+                            self.raw_pipeline_output.clear();
                         }
                     });
                     ui.add_space(4.0);
@@ -1167,7 +1237,7 @@ fn dictionary_card(ui: &mut egui::Ui, d: &mut DictionaryMeta, changed_any: &mut 
 
             ui.label(RichText::new(&d.description).weak());
 
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(
                     RichText::new(format!(
                         "{} • {} правил • {}",
@@ -1178,6 +1248,15 @@ fn dictionary_card(ui: &mut egui::Ui, d: &mut DictionaryMeta, changed_any: &mut 
                     .small()
                     .weak(),
                 );
+                if !d.warnings.is_empty() {
+                    ui.label(
+                        RichText::new(format!("⚠ пропущено правил: {}", d.warnings.len()))
+                            .small()
+                            .color(Color32::from_rgb(255, 180, 70))
+                            .strong(),
+                    )
+                    .on_hover_text(d.warnings.join("\n"));
+                }
                 if let (Some(ms), Some(repl)) = (d.last_ms, d.last_replacements) {
                     let col = if repl > 0 {
                         Color32::from_rgb(100, 225, 135)

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::domain::{
-    ChunkConfig, PipelineProgress, PipelineReport, StepReport, StressFormat,
+    ChunkConfig, PipelineProgress, PipelineReport, PipelineResult, StepReport, StressFormat,
 };
 use crate::ports::{StressFormatter, TextChunker, TextProcessor};
 
@@ -31,7 +31,7 @@ impl ProcessingPipeline {
         chunk_config: &ChunkConfig,
         capture_diff: bool,
         progress_tx: Option<&Sender<PipelineProgress>>,
-    ) -> (String, Vec<String>, PipelineReport) {
+    ) -> PipelineResult {
         let total_start = Instant::now();
         let mut current = input_text.to_string();
         let mut report = PipelineReport::default();
@@ -70,18 +70,80 @@ impl ProcessingPipeline {
             current = out.text;
         }
 
-        let formatted = self.stress_formatter.format_stress(&current, stress_format);
-        let chunks = self.chunker.split_into_chunks(&formatted, chunk_config);
+        let raw_text = current;
+        let processed_text = self.stress_formatter.format_stress(&raw_text, stress_format);
+        let chunks = self.chunker.split_into_chunks(&processed_text, chunk_config);
         report.total_ms = total_start.elapsed().as_millis();
 
+        let result = PipelineResult {
+            raw_text,
+            processed_text,
+            chunks,
+            report,
+        };
+
         if let Some(tx) = progress_tx {
-            let _ = tx.send(PipelineProgress::Completed {
-                processed_text: formatted.clone(),
-                chunks: chunks.clone(),
-                report: report.clone(),
-            });
+            let _ = tx.send(PipelineProgress::Completed(result.clone()));
         }
 
-        (formatted, chunks, report)
+        result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{DictionaryKind, ProcessOutput};
+    use crate::ports::TextProcessor;
+    use crate::services::chunker::SentenceAwareChunker;
+    use crate::services::stress::RussianStressFormatter;
+
+    struct StressAddingProcessor;
+
+    impl TextProcessor for StressAddingProcessor {
+        fn name(&self) -> &str {
+            "dummy"
+        }
+
+        fn kind(&self) -> DictionaryKind {
+            DictionaryKind::RegexStandard
+        }
+
+        fn rule_count(&self) -> usize {
+            1
+        }
+
+        fn process(&self, _text: &str, _capture_diff: bool) -> ProcessOutput {
+            ProcessOutput {
+                text: "з+амок".to_string(),
+                replacements_count: 1,
+                events: Vec::new(),
+            }
+        }
+    }
+
+    #[test]
+    fn keeps_raw_text_for_later_reformatting() {
+        let pipeline = ProcessingPipeline::new(
+            Arc::new(RussianStressFormatter),
+            Arc::new(SentenceAwareChunker),
+        );
+        let processors: Vec<Arc<dyn TextProcessor>> = vec![Arc::new(StressAddingProcessor)];
+
+        let result = pipeline.execute(
+            "замок",
+            &processors,
+            StressFormat::CleanYoOnly,
+            &ChunkConfig::default(),
+            false,
+            None,
+        );
+
+        assert_eq!(result.raw_text, "з+амок");
+        assert_eq!(result.processed_text, "замок");
+        assert_eq!(
+            RussianStressFormatter.format_stress(&result.raw_text, StressFormat::AcuteAccent),
+            "за\u{0301}мок"
+        );
     }
 }
