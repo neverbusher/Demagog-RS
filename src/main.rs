@@ -30,7 +30,7 @@ fn main() -> eframe::Result<()> {
     let dic_folder = locate_default_dic_folder();
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Demagog-RS — Турбо-процессор текста и словарей для TTS (FishAudio Drama3 / ComfyUI)")
+            .with_title("Demagog-RS")
             .with_inner_size([1440.0, 900.0])
             .with_min_inner_size([1000.0, 640.0]),
         ..Default::default()

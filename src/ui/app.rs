@@ -478,6 +478,19 @@ impl eframe::App for DemagogApp {
                     apply_style_settings(ctx, &self.settings);
                     self.settings.save();
                 }
+
+                ui.separator();
+
+                let (theme_icon, theme_hint) = if self.settings.dark_mode {
+                    ("☀", "Переключить на светлую тему")
+                } else {
+                    ("🌙", "Переключить на тёмную тему")
+                };
+                if ui.button(theme_icon).on_hover_text(theme_hint).clicked() {
+                    self.settings.dark_mode = !self.settings.dark_mode;
+                    apply_style_settings(ctx, &self.settings);
+                    self.settings.save();
+                }
             });
             ui.add_space(4.0);
         });
@@ -597,6 +610,21 @@ impl eframe::App for DemagogApp {
                 });
 
                 ui.horizontal(|ui| {
+                    if ui
+                        .checkbox(
+                            &mut self.settings.group_dictionaries_by_type,
+                            "Группировать по типу",
+                        )
+                        .on_hover_text(
+                            "Меняет только отображение: порядок обработки остаётся по нумерации файлов конвейера",
+                        )
+                        .changed()
+                    {
+                        self.settings.save();
+                    }
+                });
+
+                ui.horizontal(|ui| {
                     ui.label("Фильтр:");
                     ui.text_edit_singleline(&mut self.dic_search_filter);
                     if !self.dic_search_filter.is_empty() && ui.small_button("✖").clicked() {
@@ -608,80 +636,124 @@ impl eframe::App for DemagogApp {
 
                 let filter_low = self.dic_search_filter.to_lowercase();
                 let mut changed_any = false;
+                let visible: Vec<usize> = self
+                    .dictionaries
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, d)| {
+                        filter_low.is_empty()
+                            || d.name.to_lowercase().contains(&filter_low)
+                            || d.description.to_lowercase().contains(&filter_low)
+                            || d.tag.label().to_lowercase().contains(&filter_low)
+                    })
+                    .map(|(idx, _)| idx)
+                    .collect();
 
                 ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        for d in &mut self.dictionaries {
-                            if !filter_low.is_empty()
-                                && !d.name.to_lowercase().contains(&filter_low)
-                                && !d.description.to_lowercase().contains(&filter_low)
-                                && !d.tag.label().to_lowercase().contains(&filter_low)
-                            {
-                                continue;
-                            }
-
-                            egui::Frame::group(ui.style())
-                                .inner_margin(egui::Margin::symmetric(10, 8))
-                                .show(ui, |ui| {
-                                    // Force equal card width: otherwise the frame shrinks
-                                    // to the longest wrapped line and the right edge is ragged.
-                                    ui.set_width(ui.available_width());
-                                    ui.horizontal_wrapped(|ui| {
-                                        if ui.checkbox(&mut d.enabled, "").changed() {
-                                            changed_any = true;
-                                        }
-
-                                        let tag_col = tag_color(d.tag);
-                                        ui.label(
-                                            RichText::new(format!("[{}]", d.tag.label()))
-                                                .color(tag_col)
-                                                .strong(),
-                                        );
-
-                                        if d.outputs_plus_stress {
-                                            ui.label(
-                                                RichText::new("[ставит +]")
-                                                    .color(Color32::from_rgb(255, 175, 70))
-                                                    .strong(),
-                                            );
-                                        }
-
-                                        ui.label(RichText::new(&d.name).strong());
-                                    });
-
-                                    // Clear explanation of what this dictionary does
-                                    ui.label(RichText::new(&d.description).weak());
-
-                                    ui.horizontal(|ui| {
-                                        ui.label(
-                                            RichText::new(format!(
-                                                "{} • {} правил • {}",
-                                                d.kind.badge(),
-                                                format_num(d.rule_count),
-                                                d.encoding
-                                            ))
-                                            .small()
-                                            .weak(),
-                                        );
-                                        if let (Some(ms), Some(repl)) =
-                                            (d.last_ms, d.last_replacements)
-                                        {
-                                            let col = if repl > 0 {
-                                                Color32::from_rgb(100, 225, 135)
-                                            } else {
-                                                Color32::GRAY
-                                            };
-                                            ui.label(
-                                                RichText::new(format!("• {ms} мс ({repl} замен)"))
-                                                    .small()
-                                                    .color(col)
-                                                    .strong(),
-                                            );
-                                        }
-                                    });
+                        if self.settings.group_dictionaries_by_type {
+                            for tag in DictionaryTag::ALL {
+                                let mut indices: Vec<usize> = visible
+                                    .iter()
+                                    .copied()
+                                    .filter(|&i| self.dictionaries[i].tag == tag)
+                                    .collect();
+                                if indices.is_empty() {
+                                    continue;
+                                }
+                                indices.sort_by_cached_key(|&i| {
+                                    dictionary_display_key(&self.dictionaries[i].name)
                                 });
-                            ui.add_space(3.0);
+
+                                let total = indices.len();
+                                let active = indices
+                                    .iter()
+                                    .filter(|&&i| self.dictionaries[i].enabled)
+                                    .count();
+                                let group_key = tag.label();
+                                let collapsed = self
+                                    .settings
+                                    .collapsed_dictionary_groups
+                                    .iter()
+                                    .any(|g| g == group_key);
+                                let desired_open = !filter_low.is_empty() || !collapsed;
+                                let group_id = ui.make_persistent_id(("dic_group", group_key));
+                                let mut state =
+                                    egui::collapsing_header::CollapsingState::load_with_default_open(
+                                        ui.ctx(),
+                                        group_id,
+                                        desired_open,
+                                    );
+                                state.set_open(desired_open);
+
+                                let header = state.show_header(ui, |ui| {
+                                    let mut group_on = active > 0;
+                                    if ui
+                                        .checkbox(&mut group_on, "")
+                                        .on_hover_text("Включить или отключить всю группу")
+                                        .changed()
+                                    {
+                                        for &i in &indices {
+                                            self.dictionaries[i].enabled = group_on;
+                                        }
+                                        changed_any = true;
+                                    }
+                                    ui.add_space(4.0);
+                                    ui.label(
+                                        RichText::new(format!("[{}]", group_key))
+                                            .color(tag_color(tag))
+                                            .strong(),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.label(
+                                                RichText::new(format!("{active}/{total}"))
+                                                    .small()
+                                                    .weak(),
+                                            );
+                                        },
+                                    );
+                                });
+
+                                let (toggle_response, _header, _body) =
+                                    header.body_unindented(|ui| {
+                                        ui.add_space(2.0);
+                                        for idx in indices {
+                                            dictionary_card(
+                                                ui,
+                                                &mut self.dictionaries[idx],
+                                                &mut changed_any,
+                                            );
+                                        }
+                                        ui.add_space(4.0);
+                                    });
+
+                                if filter_low.is_empty() && toggle_response.clicked() {
+                                    if desired_open {
+                                        if !self
+                                            .settings
+                                            .collapsed_dictionary_groups
+                                            .iter()
+                                            .any(|g| g == group_key)
+                                        {
+                                            self.settings
+                                                .collapsed_dictionary_groups
+                                                .push(group_key.to_string());
+                                        }
+                                    } else {
+                                        self.settings
+                                            .collapsed_dictionary_groups
+                                            .retain(|g| g != group_key);
+                                    }
+                                    self.settings.save();
+                                }
+                            }
+                        } else {
+                            for idx in &visible {
+                                dictionary_card(ui, &mut self.dictionaries[*idx], &mut changed_any);
+                            }
                         }
                     });
 
@@ -1064,6 +1136,66 @@ impl eframe::App for DemagogApp {
     }
 }
 
+fn dictionary_card(ui: &mut egui::Ui, d: &mut DictionaryMeta, changed_any: &mut bool) {
+    egui::Frame::group(ui.style())
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            // Force equal card width: otherwise the frame shrinks
+            // to the longest wrapped line and the right edge is ragged.
+            ui.set_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                if ui.checkbox(&mut d.enabled, "").changed() {
+                    *changed_any = true;
+                }
+
+                ui.label(
+                    RichText::new(format!("[{}]", d.tag.label()))
+                        .color(tag_color(d.tag))
+                        .strong(),
+                );
+
+                if d.outputs_plus_stress {
+                    ui.label(
+                        RichText::new("[ставит +]")
+                            .color(Color32::from_rgb(255, 175, 70))
+                            .strong(),
+                    );
+                }
+
+                ui.label(RichText::new(&d.name).strong());
+            });
+
+            ui.label(RichText::new(&d.description).weak());
+
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "{} • {} правил • {}",
+                        d.kind.badge(),
+                        format_num(d.rule_count),
+                        d.encoding
+                    ))
+                    .small()
+                    .weak(),
+                );
+                if let (Some(ms), Some(repl)) = (d.last_ms, d.last_replacements) {
+                    let col = if repl > 0 {
+                        Color32::from_rgb(100, 225, 135)
+                    } else {
+                        Color32::GRAY
+                    };
+                    ui.label(
+                        RichText::new(format!("• {ms} мс ({repl} замен)"))
+                            .small()
+                            .color(col)
+                            .strong(),
+                    );
+                }
+            });
+        });
+    ui.add_space(4.0);
+}
+
 fn tag_color(tag: DictionaryTag) -> Color32 {
     match tag {
         DictionaryTag::NumbersAndDates => Color32::from_rgb(90, 175, 250),
@@ -1077,35 +1209,38 @@ fn tag_color(tag: DictionaryTag) -> Color32 {
 }
 
 fn apply_style_settings(ctx: &egui::Context, settings: &AppSettings) {
-    if settings.dark_mode {
-        ctx.set_visuals(egui::Visuals::dark());
+    let theme = if settings.dark_mode {
+        egui::Theme::Dark
     } else {
-        ctx.set_visuals(egui::Visuals::light());
-    }
+        egui::Theme::Light
+    };
+    ctx.set_theme(theme);
+    ctx.set_visuals_of(egui::Theme::Dark, egui::Visuals::dark());
+    ctx.set_visuals_of(egui::Theme::Light, egui::Visuals::light());
 
     let base = settings.ui_font_size;
-    let mut style = (*ctx.style()).clone();
-    style.text_styles.insert(
-        TextStyle::Heading,
-        FontId::new(base + 4.0, FontFamily::Proportional),
-    );
-    style.text_styles.insert(
-        TextStyle::Body,
-        FontId::new(base, FontFamily::Proportional),
-    );
-    style.text_styles.insert(
-        TextStyle::Button,
-        FontId::new(base, FontFamily::Proportional),
-    );
-    style.text_styles.insert(
-        TextStyle::Small,
-        FontId::new((base - 2.5).max(11.0), FontFamily::Proportional),
-    );
-    style.text_styles.insert(
-        TextStyle::Monospace,
-        FontId::new(settings.editor_font_size, FontFamily::Monospace),
-    );
-    ctx.set_style(style);
+    ctx.all_styles_mut(|style| {
+        style.text_styles.insert(
+            TextStyle::Heading,
+            FontId::new(base + 4.0, FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            TextStyle::Body,
+            FontId::new(base, FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            TextStyle::Button,
+            FontId::new(base, FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            TextStyle::Small,
+            FontId::new((base - 2.5).max(11.0), FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            TextStyle::Monospace,
+            FontId::new(settings.editor_font_size, FontFamily::Monospace),
+        );
+    });
 }
 
 fn configure_cyrillic_fonts(ctx: &egui::Context) {
@@ -1148,6 +1283,16 @@ fn configure_cyrillic_fonts(ctx: &egui::Context) {
         }
     }
     ctx.set_fonts(fonts);
+}
+
+fn dictionary_display_key(name: &str) -> (u32, String) {
+    let leading_num: u32 = name
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .unwrap_or(u32::MAX);
+    (leading_num, name.to_lowercase())
 }
 
 fn format_num(n: usize) -> String {

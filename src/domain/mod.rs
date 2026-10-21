@@ -67,6 +67,17 @@ pub enum DictionaryTag {
 }
 
 impl DictionaryTag {
+    /// Display order of tag groups in the sidebar.
+    pub const ALL: [Self; 7] = [
+        Self::NumbersAndDates,
+        Self::YoFication,
+        Self::HomographsCap,
+        Self::CapToPlusConverter,
+        Self::PlusStressWords,
+        Self::PlusStressOrthoepy,
+        Self::CleanupAndTranslit,
+    ];
+
     pub fn label(&self) -> &'static str {
         match self {
             Self::NumbersAndDates => "ЧИСЛА И ДАТЫ",
@@ -78,6 +89,10 @@ impl DictionaryTag {
             Self::CleanupAndTranslit => "ЧИСТКА / ТРАНСЛИТ",
         }
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone)]
@@ -160,6 +175,10 @@ pub struct AppSettings {
     pub chunk_config: ChunkConfig,
     pub dic_folder: PathBuf,
     pub disabled_dictionaries: Vec<String>,
+    #[serde(default = "default_true")]
+    pub group_dictionaries_by_type: bool,
+    #[serde(default)]
+    pub collapsed_dictionary_groups: Vec<String>,
 }
 
 impl Default for AppSettings {
@@ -173,6 +192,8 @@ impl Default for AppSettings {
             chunk_config: ChunkConfig::default(),
             dic_folder: PathBuf::from("dic"),
             disabled_dictionaries: Vec::new(),
+            group_dictionaries_by_type: true,
+            collapsed_dictionary_groups: Vec::new(),
         }
     }
 }
