@@ -56,7 +56,10 @@ fn main() -> eframe::Result<()> {
             .set_description(format!(
                 "Не удалось открыть окно Demagog-RS.\n\n{err}\n\n\
                  Обновите драйвер видеокарты. Если рядом лежит Demagog-RS-wgpu.exe, \
-                 попробуйте запустить его: он использует DirectX вместо OpenGL."
+                 попробуйте его: он использует DirectX вместо OpenGL.\n\n\
+                 Для старых видеокарт с OpenGL 1.1 (например, Intel HD 3000) \
+                 используйте Mesa-аддон из Releases: положите opengl32.dll и \
+                 libgallium_wgl.dll рядом с exe."
             ))
             .show();
     }
