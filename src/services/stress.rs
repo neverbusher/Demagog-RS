@@ -87,3 +87,24 @@ fn is_lower_cyrillic(c: char) -> bool {
 fn is_upper_cyrillic_vowel(c: char) -> bool {
     matches!(c, 'А' | 'Е' | 'Ё' | 'И' | 'О' | 'У' | 'Ы' | 'Э' | 'Ю' | 'Я')
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clean_yo_strips_stress_marks() {
+        let formatted = RussianStressFormatter.format_stress(
+            "з+амок зАмок",
+            StressFormat::CleanYoOnly,
+        );
+        assert_eq!(formatted, "замок замок");
+    }
+
+    #[test]
+    fn acute_converts_plus_and_capital_marks() {
+        let formatted =
+            RussianStressFormatter.format_stress("з+амок зАмок", StressFormat::AcuteAccent);
+        assert_eq!(formatted, "за\u{0301}мок за\u{0301}мок");
+    }
+}

@@ -58,3 +58,24 @@ pub fn normalize_line_endings(mut s: String) -> String {
     }
     s
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_cp1251() {
+        let bytes = [0xCF, 0xF0, 0xE8, 0xE2, 0xE5, 0xF2];
+        let (text, encoding) = decode_text_bytes(&bytes);
+        assert_eq!(text, "Привет");
+        assert_eq!(encoding, "CP1251");
+    }
+
+    #[test]
+    fn strips_utf8_bom_and_normalizes_line_endings() {
+        let bytes = b"\xEF\xBB\xBFone\r\ntwo\rthree";
+        let (text, encoding) = decode_text_bytes(bytes);
+        assert_eq!(text, "one\ntwo\nthree");
+        assert_eq!(encoding, "UTF-8 BOM");
+    }
+}
