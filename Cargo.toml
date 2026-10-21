@@ -3,7 +3,7 @@ name = "demagog-rs"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "High-performance SOLID text preprocessor & dictionary engine for TTS (FishAudio Drama3 / ComfyUI)"
+description = "Text and dictionary processor for TTS (FishAudio Drama3 / ComfyUI)"
 
 [dependencies]
 eframe = "0.31"
