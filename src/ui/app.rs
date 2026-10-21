@@ -54,10 +54,15 @@ enum WorkerMessage {
 }
 
 impl DemagogApp {
+    #[cfg(not(feature = "sw"))]
     pub fn new(cc: &eframe::CreationContext<'_>, initial_dic_folder: PathBuf) -> Self {
-        configure_cyrillic_fonts(&cc.egui_ctx);
+        Self::init(cc.egui_ctx.clone(), initial_dic_folder)
+    }
+
+    pub fn init(egui_ctx: egui::Context, initial_dic_folder: PathBuf) -> Self {
+        configure_cyrillic_fonts(&egui_ctx);
         let settings = AppSettings::load(initial_dic_folder);
-        apply_style_settings(&cc.egui_ctx, &settings);
+        apply_style_settings(&egui_ctx, &settings);
 
         let sample_text = concat!(
             "В 1995 году в замке у ворот города стояли все свои. ",
@@ -92,7 +97,7 @@ impl DemagogApp {
             dic_load_errors: Vec::new(),
         };
 
-        app.reload_dictionaries_async(cc.egui_ctx.clone());
+        app.reload_dictionaries_async(egui_ctx);
         app
     }
 
@@ -437,6 +442,16 @@ impl DemagogApp {
 
 impl eframe::App for DemagogApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.shutdown();
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.update_ui(ui.ctx());
+    }
+}
+
+impl DemagogApp {
+    pub(crate) fn shutdown(&mut self) {
         self.settings.sync_disabled_from_metas(&self.dictionaries);
         self.settings.save();
         // Exit immediately so Windows reclaims the ~6.6M heap-allocated dictionary strings
@@ -444,7 +459,7 @@ impl eframe::App for DemagogApp {
         std::process::exit(0);
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    pub(crate) fn update_ui(&mut self, ctx: &egui::Context) {
         self.poll_worker();
 
         // Top toolbar
