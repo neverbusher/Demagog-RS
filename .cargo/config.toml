@@ -1,0 +1,3 @@
+# Link the MSVC CRT statically so the distributed exe does not require VC++ Redistributable.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -1405,5 +1405,5 @@ pub fn locate_default_dic_folder() -> PathBuf {
     if local.is_dir() {
         return local.to_path_buf();
     }
-    PathBuf::from(r"F:\AI\Demagog-RS\dic")
+    PathBuf::from("dic")
 }
