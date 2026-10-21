@@ -18,11 +18,17 @@ use crate::ports::DocumentReader;
 use crate::services::chunker::SentenceAwareChunker;
 use crate::services::pipeline::ProcessingPipeline;
 use crate::services::stress::RussianStressFormatter;
-#[cfg(not(feature = "sw"))]
+#[cfg(not(any(feature = "eframe-backend", feature = "sw")))]
+compile_error!("Enable either the `eframe-backend` or `sw` feature");
+
+#[cfg(all(feature = "sw", feature = "eframe-backend"))]
+compile_error!("Build either the default eframe backend or `--no-default-features --features sw`");
+
+#[cfg(feature = "eframe-backend")]
 use crate::ui::app::DemagogApp;
 use crate::ui::app::locate_default_dic_folder;
 
-fn main() -> eframe::Result<()> {
+fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--bench" || a == "--cli") {
         run_cli_or_bench(&args);
@@ -31,35 +37,45 @@ fn main() -> eframe::Result<()> {
 
     let dic_folder = locate_default_dic_folder();
 
-    // CPU-only software rendering: no OpenGL, DirectX or GPU required.
     #[cfg(feature = "sw")]
     {
         if let Err(err) = ui::sw::run(dic_folder) {
-            let _ = rfd::MessageDialog::new()
-                .set_title("Demagog-RS")
-                .set_level(rfd::MessageLevel::Error)
-                .set_buttons(rfd::MessageButtons::Ok)
-                .set_description(format!(
-                    "Не удалось открыть окно Demagog-RS (программный рендер).\n\n{err}"
-                ))
-                .show();
+            show_startup_error(format!(
+                "Не удалось открыть окно Demagog-RS (программный рендер).\n\n{err}"
+            ));
         }
-        return Ok(());
+        return;
     }
 
-    #[cfg(not(feature = "sw"))]
-    return run_eframe(dic_folder);
+    #[cfg(all(feature = "eframe-backend", not(feature = "sw")))]
+    {
+        if let Err(err) = run_eframe(dic_folder) {
+            show_startup_error(format!(
+                "Не удалось открыть окно Demagog-RS.\n\n{err}\n\n\
+                 Обновите драйвер видеокарты или запустите Demagog-RS-cpu.exe: \
+                 он использует программный рендер и не требует OpenGL."
+            ));
+        }
+        return;
+    }
+
+    #[cfg(not(any(feature = "sw", feature = "eframe-backend")))]
+    compile_error!("Enable either the `eframe-backend` or `sw` feature");
 }
 
-#[cfg(not(feature = "sw"))]
-fn run_eframe(dic_folder: PathBuf) -> eframe::Result<()> {
-    #[cfg(feature = "wgpu")]
-    let renderer = eframe::Renderer::Wgpu;
-    #[cfg(not(feature = "wgpu"))]
-    let renderer = eframe::Renderer::Glow;
+fn show_startup_error(description: String) {
+    let _ = rfd::MessageDialog::new()
+        .set_title("Demagog-RS")
+        .set_level(rfd::MessageLevel::Error)
+        .set_buttons(rfd::MessageButtons::Ok)
+        .set_description(description)
+        .show();
+}
 
+#[cfg(feature = "eframe-backend")]
+fn run_eframe(dic_folder: PathBuf) -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
-        renderer,
+        renderer: eframe::Renderer::Glow,
         viewport: egui::ViewportBuilder::default()
             .with_title("Demagog-RS")
             .with_inner_size([1440.0, 900.0])
@@ -67,29 +83,11 @@ fn run_eframe(dic_folder: PathBuf) -> eframe::Result<()> {
         ..Default::default()
     };
 
-    let result = eframe::run_native(
+    eframe::run_native(
         "Demagog-RS",
         native_options,
         Box::new(move |cc| Ok(Box::new(DemagogApp::new(cc, dic_folder)))),
-    );
-
-    if let Err(err) = &result {
-        let _ = rfd::MessageDialog::new()
-            .set_title("Demagog-RS")
-            .set_level(rfd::MessageLevel::Error)
-            .set_buttons(rfd::MessageButtons::Ok)
-            .set_description(format!(
-                "Не удалось открыть окно Demagog-RS.\n\n{err}\n\n\
-                 Обновите драйвер видеокарты. Если рядом лежит Demagog-RS-wgpu.exe, \
-                 попробуйте его: он использует DirectX вместо OpenGL.\n\n\
-                 Для старых видеокарт с OpenGL 1.1 (например, Intel HD 3000) \
-                 используйте Mesa-аддон из Releases: положите opengl32.dll и \
-                 libgallium_wgl.dll рядом с exe."
-            ))
-            .show();
-    }
-
-    result
+    )
 }
 
 fn run_cli_or_bench(args: &[String]) {
