@@ -104,3 +104,22 @@ pub fn normalize_rex_replacement(raw: &str) -> String {
 
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wraps_numeric_groups_before_cyrillic() {
+        assert_eq!(normalize_rex_replacement("$1гОловы"), "${1}гОловы");
+        assert_eq!(normalize_rex_replacement("$2X$1"), "${2}X${1}");
+        assert_eq!(normalize_rex_replacement("$$1"), "$$1");
+    }
+
+    #[test]
+    fn keeps_at_prefix_as_case_sensitive_marker() {
+        let (pattern, case_sensitive) = normalize_rex_pattern("@Слово");
+        assert_eq!(pattern, "Слово");
+        assert!(case_sensitive);
+    }
+}

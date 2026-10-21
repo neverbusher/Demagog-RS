@@ -29,6 +29,7 @@ pub struct RexProcessor {
     rule_count: usize,
     collapse_spaces_at_end: bool,
     cleanup_yo_tags: bool,
+    compile_warnings: Vec<String>,
 }
 
 impl RexProcessor {
@@ -39,6 +40,7 @@ impl RexProcessor {
         let mut current_block_rules: Vec<CompiledRexRule> = Vec::new();
         let mut collapse_spaces_at_end = false;
         let cleanup_yo_tags = content.contains("<:yo:>") || content.contains("<:ye:>");
+        let mut compile_warnings = Vec::new();
 
         for raw_line in content.lines() {
             let trimmed = raw_line.trim().trim_start_matches('\u{feff}');
@@ -90,6 +92,12 @@ impl RexProcessor {
                 .unicode(true)
                 .build();
 
+            if let Err(err) = &compiled {
+                if compile_warnings.len() < 50 {
+                    compile_warnings.push(format!("{} → {err}", trimmed));
+                }
+            }
+
             if let Ok(regex) = compiled {
                 let (needs_digit, required_sub) = analyze_pattern_prefilter(&pat_str);
                 let rule = CompiledRexRule {
@@ -138,10 +146,19 @@ impl RexProcessor {
             rule_count,
             collapse_spaces_at_end,
             cleanup_yo_tags,
+            compile_warnings,
         }
     }
 
-    fn process_chunk_indexed(&self, chunk: &str) -> (String, usize) {
+    pub fn compile_warnings(&self) -> &[String] {
+        &self.compile_warnings
+    }
+
+    fn process_chunk(
+        &self,
+        chunk: &str,
+        mut events: Option<&mut Vec<ReplacementEvent>>,
+    ) -> (String, usize) {
         let mut words = FxHashSet::default();
         if !self.indexed_blocks.is_empty() {
             for w in chunk.split(|c: char| !c.is_alphabetic()) {
@@ -157,35 +174,27 @@ impl RexProcessor {
         let mut count = 0usize;
 
         for rule in &self.unindexed_rules {
-            if rule.needs_digit && !has_digit {
-                continue;
-            }
-            if let Some(sub) = &rule.required_sub {
-                if !current_lower.contains(sub.as_str()) {
-                    continue;
-                }
-            }
-            if rule.regex.is_match(&current) {
-                let next = rule.regex.replace_all(&current, rule.replacement.as_str());
-                if next != current {
-                    count += 1;
-                    current = next.into_owned();
-                    current_lower = current.to_lowercase();
-                    has_digit = current.bytes().any(|b| b.is_ascii_digit());
-                }
-            }
+            self.apply_rule(
+                rule,
+                &mut current,
+                &mut current_lower,
+                &mut has_digit,
+                &mut count,
+                &mut events,
+            );
         }
 
         for block in &self.indexed_blocks {
             if block.keywords.iter().any(|kw| words.contains(kw)) {
                 for rule in &block.rules {
-                    if rule.regex.is_match(&current) {
-                        let next = rule.regex.replace_all(&current, rule.replacement.as_str());
-                        if next != current {
-                            count += 1;
-                            current = next.into_owned();
-                        }
-                    }
+                    self.apply_rule(
+                        rule,
+                        &mut current,
+                        &mut current_lower,
+                        &mut has_digit,
+                        &mut count,
+                        &mut events,
+                    );
                 }
             }
         }
@@ -218,6 +227,57 @@ impl RexProcessor {
 
         (current, count)
     }
+
+    fn apply_rule(
+        &self,
+        rule: &CompiledRexRule,
+        current: &mut String,
+        current_lower: &mut String,
+        has_digit: &mut bool,
+        count: &mut usize,
+        events: &mut Option<&mut Vec<ReplacementEvent>>,
+    ) {
+        if rule.needs_digit && !*has_digit {
+            return;
+        }
+        if let Some(sub) = &rule.required_sub {
+            if !current_lower.contains(sub.as_str()) {
+                return;
+            }
+        }
+        if !rule.regex.is_match(current) {
+            return;
+        }
+
+        let next = rule.regex.replace_all(current, rule.replacement.as_str());
+        if next == *current {
+            return;
+        }
+
+        if let Some(evs) = events.as_deref_mut() {
+            if evs.len() < 200 {
+                if let Some(m) = rule.regex.find(current) {
+                    let before_snip = snippet_around(current, m.start(), m.end());
+                    let after_snip = snippet_around(
+                        next.as_ref(),
+                        m.start().min(next.len()),
+                        m.start().saturating_add(rule.replacement.len()),
+                    );
+                    evs.push(ReplacementEvent {
+                        dictionary_name: self.name.clone(),
+                        rule_summary: rule.raw_rule.clone(),
+                        before_snippet: before_snip,
+                        after_snippet: after_snip,
+                    });
+                }
+            }
+        }
+
+        *current = next.into_owned();
+        *current_lower = current.to_lowercase();
+        *has_digit = current.bytes().any(|b| b.is_ascii_digit());
+        *count += 1;
+    }
 }
 
 impl TextProcessor for RexProcessor {
@@ -242,7 +302,7 @@ impl TextProcessor for RexProcessor {
                     if line.trim().is_empty() {
                         (line.to_string(), 0)
                     } else {
-                        self.process_chunk_indexed(line)
+                        self.process_chunk(line, None)
                     }
                 })
                 .collect();
@@ -264,73 +324,31 @@ impl TextProcessor for RexProcessor {
             };
         }
 
-        let mut words = FxHashSet::default();
-        for w in text.split(|c: char| !c.is_alphabetic()) {
-            if !w.is_empty() {
-                words.insert(w.to_lowercase());
-            }
-        }
-
-        let mut current = text.to_string();
+        let mut out = String::with_capacity(text.len() + 256);
         let mut total_repl = 0usize;
         let mut events = Vec::new();
 
-        let mut apply_rule = |rule: &CompiledRexRule, cur: &mut String| {
-            if let Some(m) = rule.regex.find(cur) {
-                let before_snip = snippet_around(cur, m.start(), m.end());
-                let next = rule.regex.replace_all(cur, rule.replacement.as_str());
-                if next != *cur {
-                    total_repl += 1;
-                    if capture_diff && events.len() < 200 {
-                        let next_str = next.into_owned();
-                        let after_snip = snippet_around(
-                            &next_str,
-                            m.start().min(next_str.len()),
-                            (m.start() + rule.replacement.len()).min(next_str.len()),
-                        );
-                        events.push(ReplacementEvent {
-                            dictionary_name: self.name.clone(),
-                            rule_summary: rule.raw_rule.clone(),
-                            before_snippet: before_snip,
-                            after_snippet: after_snip,
-                        });
-                        *cur = next_str;
-                    } else {
-                        *cur = next.into_owned();
-                    }
-                }
+        for (i, line) in text.split('\n').enumerate() {
+            if i > 0 {
+                out.push('\n');
             }
-        };
+            if line.trim().is_empty() {
+                out.push_str(line);
+                continue;
+            }
 
-        for rule in &self.unindexed_rules {
-            apply_rule(rule, &mut current);
-        }
-
-        for block in &self.indexed_blocks {
-            if block.keywords.iter().any(|kw| words.contains(kw)) {
-                for rule in &block.rules {
-                    apply_rule(rule, &mut current);
-                }
-            }
-        }
-
-        if self.collapse_spaces_at_end && current.contains("  ") {
-            while current.contains("  ") {
-                current = current.replace("  ", " ");
-            }
-        }
-
-        if self.cleanup_yo_tags {
-            if current.contains("<:yo:>") {
-                current = current.replace("<:yo:>", "ё");
-            }
-            if current.contains("<:ye:>") {
-                current = current.replace("<:ye:>", "е");
-            }
+            let line_events = if capture_diff {
+                Some(&mut events)
+            } else {
+                None
+            };
+            let (line_out, c) = self.process_chunk(line, line_events);
+            out.push_str(&line_out);
+            total_repl += c;
         }
 
         ProcessOutput {
-            text: current,
+            text: out,
             replacements_count: total_repl,
             events,
         }
@@ -341,6 +359,12 @@ impl TextProcessor for RexProcessor {
 /// 1) Whether it requires an ASCII digit (`\d` without `|` at top level)
 /// 2) Whether it requires a fixed substring like `"вс"`, `"<t"`, `"<:"`
 fn analyze_pattern_prefilter(pat: &str) -> (bool, Option<String>) {
+    // Alternations make both prefilters unsafe: the required literal or digit
+    // may only belong to one branch.
+    if pat.contains('|') {
+        return (false, None);
+    }
+
     let lower = pat.to_lowercase();
     if lower.contains(r"\bвс") || lower.contains("(вс)") {
         return (false, Some("вс".to_string()));
@@ -357,15 +381,27 @@ fn analyze_pattern_prefilter(pat: &str) -> (bool, Option<String>) {
     if lower.contains("<num") {
         return (false, Some("<num".to_string()));
     }
-    if pat.contains(r"\d") && !pat.contains(r"\d*") && !pat.contains(r"\d?") {
-        // Check that \d is not inside an optional group
+    if pat.contains(r"\d")
+        && !pat.contains(r"\d*")
+        && !pat.contains(r"\d?")
+        && !pat.contains(r"\d{0")
+    {
         return (true, None);
     }
     (false, None)
 }
 
 fn snippet_around(s: &str, start_byte: usize, end_byte: usize) -> String {
-    let before = s[..start_byte]
+    let mut start = start_byte.min(s.len());
+    while start > 0 && !s.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut end = end_byte.min(s.len()).max(start);
+    while end < s.len() && !s.is_char_boundary(end) {
+        end += 1;
+    }
+
+    let before = s[..start]
         .chars()
         .rev()
         .take(25)
@@ -373,7 +409,38 @@ fn snippet_around(s: &str, start_byte: usize, end_byte: usize) -> String {
         .into_iter()
         .rev()
         .collect::<String>();
-    let matched = &s[start_byte..end_byte.min(s.len())];
-    let after: String = s[end_byte.min(s.len())..].chars().take(25).collect();
+    let matched = &s[start..end];
+    let after: String = s[end..].chars().take(25).collect();
     format!("{before}[{matched}]{after}").replace('\n', " ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ports::TextProcessor;
+
+    #[test]
+    fn snippet_handles_offsets_inside_multibyte_chars() {
+        let snippet = snippet_around("я😀", 1, 3);
+        assert!(snippet.contains('['));
+    }
+
+    #[test]
+    fn alternation_disables_digit_prefilter() {
+        assert_eq!(analyze_pattern_prefilter(r"\d+|один"), (false, None));
+    }
+
+    #[test]
+    fn diff_and_fast_paths_produce_same_text() {
+        let processor =
+            RexProcessor::compile("test.rex".to_string(), "слово=СЛОВО\n", "UTF-8");
+        let text = format!("{}\nСлово.", "Слово и слово.".repeat(100));
+        assert!(text.len() > 1024);
+
+        let fast = processor.process(&text, false);
+        let diff = processor.process(&text, true);
+
+        assert_eq!(fast.text, diff.text);
+        assert_eq!(fast.replacements_count, diff.replacements_count);
+    }
 }

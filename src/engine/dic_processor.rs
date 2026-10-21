@@ -44,6 +44,7 @@ pub struct DicProcessor {
     unanchored_phrases: Vec<ExactPhraseRule>,
     wildcard_index: FxHashMap<String, Vec<AnchoredWildcardRule>>,
     unanchored_wildcards: Vec<SubstringWildcardRule>,
+    compile_warnings: Vec<String>,
 }
 
 impl DicProcessor {
@@ -72,6 +73,7 @@ impl DicProcessor {
                 unanchored_phrases: Vec::new(),
                 wildcard_index: FxHashMap::default(),
                 unanchored_wildcards: Vec::new(),
+                compile_warnings: Vec::new(),
             };
         }
 
@@ -86,6 +88,7 @@ impl DicProcessor {
         let mut wildcard_index: FxHashMap<String, Vec<AnchoredWildcardRule>> = FxHashMap::default();
         let mut unanchored_wildcards = Vec::new();
         let mut rule_count = 0usize;
+        let mut compile_warnings = Vec::new();
 
         for raw_line in content.lines() {
             let line = raw_line.trim_start_matches('\u{feff}');
@@ -173,7 +176,7 @@ impl DicProcessor {
                 }
 
                 if let Some((compiled, required_words, sub_filter)) =
-                    compile_dic_wildcard_rule(lhs, &rhs, case_sensitive)
+                    compile_dic_wildcard_rule(lhs, &rhs, case_sensitive, &mut compile_warnings)
                 {
                     if let Some(anchor) = required_words.iter().max_by_key(|w| w.len()).cloned() {
                         wildcard_index
@@ -213,7 +216,12 @@ impl DicProcessor {
             unanchored_phrases,
             wildcard_index,
             unanchored_wildcards,
+            compile_warnings,
         }
+    }
+
+    pub fn compile_warnings(&self) -> &[String] {
+        &self.compile_warnings
     }
 
     fn process_stress_converter(&self, text: &str, capture_diff: bool) -> ProcessOutput {
@@ -560,14 +568,32 @@ impl TextProcessor for DicProcessor {
             };
         }
 
+        let mut out = String::with_capacity(text.len() + 256);
+        let mut total_repl = 0usize;
         let mut events = Vec::new();
-        let (out, count) = self.process_paragraph(
-            text,
-            if capture_diff { Some(&mut events) } else { None },
-        );
+
+        for (i, line) in text.split('\n').enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            if line.trim().is_empty() {
+                out.push_str(line);
+                continue;
+            }
+
+            let line_events = if capture_diff {
+                Some(&mut events)
+            } else {
+                None
+            };
+            let (line_out, count) = self.process_paragraph(line, line_events);
+            out.push_str(&line_out);
+            total_repl += count;
+        }
+
         ProcessOutput {
             text: out,
-            replacements_count: count,
+            replacements_count: total_repl,
             events,
         }
     }
@@ -750,6 +776,7 @@ fn compile_dic_wildcard_rule(
     lhs: &str,
     rhs: &str,
     case_sensitive: bool,
+    warnings: &mut Vec<String>,
 ) -> Option<(CompiledRexRule, Vec<String>, String)> {
     let lhs_tokens: Vec<&str> = lhs.split_whitespace().collect();
     let rhs_tokens: Vec<&str> = rhs.split_whitespace().collect();
@@ -837,11 +864,19 @@ fn compile_dic_wildcard_rule(
         rhs_idx += 1;
     }
 
-    let regex = RegexBuilder::new(&pattern)
+    let regex = match RegexBuilder::new(&pattern)
         .case_insensitive(!case_sensitive)
         .unicode(true)
         .build()
-        .ok()?;
+    {
+        Ok(regex) => regex,
+        Err(err) => {
+            if warnings.len() < 50 {
+                warnings.push(format!("{lhs}={rhs} → {err}"));
+            }
+            return None;
+        }
+    };
 
     Some((
         CompiledRexRule {
@@ -854,4 +889,24 @@ fn compile_dic_wildcard_rule(
         required_words,
         longest_core,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ports::TextProcessor;
+
+    #[test]
+    fn diff_and_fast_paths_produce_same_text() {
+        let processor =
+            DicProcessor::compile("test.dic".to_string(), "з+амок=замок\n", "UTF-8");
+        let text = format!("{}\nз+амок", "з+амок ".repeat(400));
+        assert!(text.len() > 2048);
+
+        let fast = processor.process(&text, false);
+        let diff = processor.process(&text, true);
+
+        assert_eq!(fast.text, diff.text);
+        assert_eq!(fast.replacements_count, diff.replacements_count);
+    }
 }
