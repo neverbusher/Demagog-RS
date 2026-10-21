@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::time::Instant;
-use eframe::egui::{self, Color32, FontFamily, FontId, RichText, ScrollArea, TextStyle};
+use egui::{self, Color32, FontFamily, FontId, RichText, ScrollArea, TextStyle};
 
 use crate::domain::{
     AppSettings, BookDocument, DictionaryMeta, DictionaryTag, PipelineProgress,
@@ -55,6 +55,7 @@ enum WorkerMessage {
 
 impl DemagogApp {
     #[cfg(not(feature = "sw"))]
+    #[cfg(feature = "eframe-backend")]
     pub fn new(cc: &eframe::CreationContext<'_>, initial_dic_folder: PathBuf) -> Self {
         Self::init(cc.egui_ctx.clone(), initial_dic_folder)
     }
@@ -440,13 +441,14 @@ impl DemagogApp {
     }
 }
 
+#[cfg(feature = "eframe-backend")]
 impl eframe::App for DemagogApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.shutdown();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.update_ui(ui.ctx());
+        self.update_ui(ui);
     }
 }
 
@@ -459,11 +461,12 @@ impl DemagogApp {
         std::process::exit(0);
     }
 
-    pub(crate) fn update_ui(&mut self, ctx: &egui::Context) {
+    pub(crate) fn update_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         self.poll_worker();
 
         // Top toolbar
-        egui::TopBottomPanel::top("top_toolbar").show(ctx, |ui| {
+        egui::Panel::top("top_toolbar").show_inside(ui, |ui| {
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
                 if ui
@@ -539,7 +542,7 @@ impl DemagogApp {
                 {
                     self.settings.ui_font_size = (self.settings.ui_font_size - 1.0).max(12.0);
                     self.settings.editor_font_size = (self.settings.editor_font_size - 1.5).max(12.0);
-                    apply_style_settings(ctx, &self.settings);
+                    apply_style_settings(&ctx, &self.settings);
                     self.settings.save();
                 }
                 ui.label(
@@ -556,7 +559,7 @@ impl DemagogApp {
                 {
                     self.settings.ui_font_size = (self.settings.ui_font_size + 1.0).min(28.0);
                     self.settings.editor_font_size = (self.settings.editor_font_size + 1.5).min(36.0);
-                    apply_style_settings(ctx, &self.settings);
+                    apply_style_settings(&ctx, &self.settings);
                     self.settings.save();
                 }
 
@@ -569,7 +572,7 @@ impl DemagogApp {
                 };
                 if ui.button(theme_icon).on_hover_text(theme_hint).clicked() {
                     self.settings.dark_mode = !self.settings.dark_mode;
-                    apply_style_settings(ctx, &self.settings);
+                    apply_style_settings(&ctx, &self.settings);
                     self.settings.save();
                 }
             });
@@ -577,7 +580,7 @@ impl DemagogApp {
         });
 
         // Bottom status bar
-        egui::TopBottomPanel::bottom("bottom_status").show(ctx, |ui| {
+        egui::Panel::bottom("bottom_status").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 if self.is_busy {
                     ui.spinner();
@@ -613,10 +616,10 @@ impl DemagogApp {
         });
 
         // Left sidebar: Dictionary list with semantic tags & descriptions
-        egui::SidePanel::left("dictionaries_sidebar")
-            .default_width(450.0)
-            .min_width(340.0)
-            .show(ctx, |ui| {
+        egui::Panel::left("dictionaries_sidebar")
+            .default_size(450.0)
+            .min_size(340.0)
+            .show_inside(ui, |ui| {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.heading("📚 Словари конвейера");
@@ -848,7 +851,7 @@ impl DemagogApp {
             });
 
         // Central workspace
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.selectable_value(
                     &mut self.active_tab,
@@ -1201,7 +1204,7 @@ impl DemagogApp {
                         });
 
                     if style_changed {
-                        apply_style_settings(ctx, &self.settings);
+                        apply_style_settings(&ctx, &self.settings);
                         self.settings.save();
                     }
 

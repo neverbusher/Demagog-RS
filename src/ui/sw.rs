@@ -30,7 +30,7 @@ struct SwDemagogApp {
 
 impl SwApp for SwDemagogApp {
     fn ui(&mut self, ui: &mut egui::Ui, _backend: &mut SoftwareBackend) {
-        self.app.update_ui(ui.ctx());
+        self.app.update_ui(ui);
     }
 
     fn on_exit(&mut self, _ctx: &egui::Context) {
