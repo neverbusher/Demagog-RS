@@ -37,6 +37,7 @@ if (-not $SkipBuild) {
 foreach ($file in @(
     $exeSource,
     (Join-Path $root "README.md"),
+    (Join-Path $root "LICENSE"),
     (Join-Path $root "THIRD_PARTY_NOTICES.md")
 )) {
     if (-not (Test-Path -LiteralPath $file)) {
@@ -56,6 +57,7 @@ New-Item -ItemType Directory -Path (Join-Path $staging "dic") | Out-Null
 
 Copy-Item -LiteralPath $exeSource -Destination (Join-Path $staging "Demagog-RS.exe")
 Copy-Item -LiteralPath (Join-Path $root "README.md") -Destination (Join-Path $staging "README.txt")
+Copy-Item -LiteralPath (Join-Path $root "LICENSE") -Destination (Join-Path $staging "LICENSE.txt")
 Copy-Item -LiteralPath (Join-Path $root "THIRD_PARTY_NOTICES.md") -Destination (Join-Path $staging "THIRD_PARTY_NOTICES.md")
 
 $excludedDictionaries = @("35_мой словарь.dic")
