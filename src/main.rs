@@ -27,6 +27,8 @@ compile_error!("Build either the default eframe backend or `--no-default-feature
 #[cfg(feature = "eframe-backend")]
 use crate::ui::app::DemagogApp;
 use crate::ui::app::locate_default_dic_folder;
+#[cfg(feature = "eframe-backend")]
+use crate::ui::window::initial_viewport;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -76,10 +78,7 @@ fn show_startup_error(description: String) {
 fn run_eframe(dic_folder: PathBuf) -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Demagog-RS")
-            .with_inner_size([1440.0, 900.0])
-            .with_min_inner_size([1000.0, 640.0]),
+        viewport: initial_viewport(),
         ..Default::default()
     };
 

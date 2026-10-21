@@ -17,7 +17,7 @@ $staging = Join-Path $outputRoot "Demagog-RS"
 
 if (-not $Version) {
     $versionLine = Select-String -LiteralPath (Join-Path $root "Cargo.toml") -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
-    $Version = if ($versionLine) { $versionLine.Matches[0].Groups[1].Value } else { "0.1.3" }
+    $Version = if ($versionLine) { $versionLine.Matches[0].Groups[1].Value } else { "0.1.4" }
 }
 $zipPath = Join-Path $outputRoot "Demagog-RS-$Version-win64.zip"
 
