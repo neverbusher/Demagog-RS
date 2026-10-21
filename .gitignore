@@ -1,6 +1,7 @@
 /target/
 /dic/
 /Demagog-RS.exe
+/Demagog-RS-wgpu.exe
 /settings.json
 /dist/
 *.log

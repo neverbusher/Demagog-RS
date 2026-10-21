@@ -28,7 +28,13 @@ fn main() -> eframe::Result<()> {
     }
 
     let dic_folder = locate_default_dic_folder();
+    #[cfg(feature = "wgpu")]
+    let renderer = eframe::Renderer::Wgpu;
+    #[cfg(not(feature = "wgpu"))]
+    let renderer = eframe::Renderer::Glow;
+
     let native_options = eframe::NativeOptions {
+        renderer,
         viewport: egui::ViewportBuilder::default()
             .with_title("Demagog-RS")
             .with_inner_size([1440.0, 900.0])
@@ -36,11 +42,26 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native(
+    let result = eframe::run_native(
         "Demagog-RS",
         native_options,
         Box::new(move |cc| Ok(Box::new(DemagogApp::new(cc, dic_folder)))),
-    )
+    );
+
+    if let Err(err) = &result {
+        let _ = rfd::MessageDialog::new()
+            .set_title("Demagog-RS")
+            .set_level(rfd::MessageLevel::Error)
+            .set_buttons(rfd::MessageButtons::Ok)
+            .set_description(format!(
+                "Не удалось открыть окно Demagog-RS.\n\n{err}\n\n\
+                 Обновите драйвер видеокарты. Если рядом лежит Demagog-RS-wgpu.exe, \
+                 попробуйте запустить его: он использует DirectX вместо OpenGL."
+            ))
+            .show();
+    }
+
+    result
 }
 
 fn run_cli_or_bench(args: &[String]) {

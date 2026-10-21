@@ -1,6 +1,6 @@
 [package]
 name = "demagog-rs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "MIT"
 description = "Text and dictionary processor for TTS (FishAudio Drama3 / ComfyUI)"
@@ -19,6 +19,10 @@ quick-xml = "0.37"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 arboard = "3.4"
+
+[features]
+default = []
+wgpu = ["eframe/wgpu"]
 
 [profile.release]
 opt-level = 3
