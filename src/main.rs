@@ -18,7 +18,9 @@ use crate::ports::DocumentReader;
 use crate::services::chunker::SentenceAwareChunker;
 use crate::services::pipeline::ProcessingPipeline;
 use crate::services::stress::RussianStressFormatter;
-use crate::ui::app::{locate_default_dic_folder, DemagogApp};
+#[cfg(not(feature = "sw"))]
+use crate::ui::app::DemagogApp;
+use crate::ui::app::locate_default_dic_folder;
 
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -28,6 +30,29 @@ fn main() -> eframe::Result<()> {
     }
 
     let dic_folder = locate_default_dic_folder();
+
+    // CPU-only software rendering: no OpenGL, DirectX or GPU required.
+    #[cfg(feature = "sw")]
+    {
+        if let Err(err) = ui::sw::run(dic_folder) {
+            let _ = rfd::MessageDialog::new()
+                .set_title("Demagog-RS")
+                .set_level(rfd::MessageLevel::Error)
+                .set_buttons(rfd::MessageButtons::Ok)
+                .set_description(format!(
+                    "Не удалось открыть окно Demagog-RS (программный рендер).\n\n{err}"
+                ))
+                .show();
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(feature = "sw"))]
+    return run_eframe(dic_folder);
+}
+
+#[cfg(not(feature = "sw"))]
+fn run_eframe(dic_folder: PathBuf) -> eframe::Result<()> {
     #[cfg(feature = "wgpu")]
     let renderer = eframe::Renderer::Wgpu;
     #[cfg(not(feature = "wgpu"))]
