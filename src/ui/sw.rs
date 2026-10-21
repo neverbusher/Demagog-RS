@@ -9,12 +9,10 @@ use egui_software_backend::{
 };
 
 use super::app::DemagogApp;
+use super::window::initial_viewport;
 
 pub fn run(initial_dic_folder: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    let config = SoftwareBackendAppConfiguration::new()
-        .title(Some("Demagog-RS".to_owned()))
-        .inner_size(Some(egui::vec2(1440.0, 900.0)))
-        .min_inner_size(Some(egui::vec2(1000.0, 640.0)));
+    let config = SoftwareBackendAppConfiguration::new().viewport_builder(initial_viewport());
 
     // The factory may be called again if the window is suspended and resumed,
     // so the dictionary folder is cloned per invocation.
