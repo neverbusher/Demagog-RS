@@ -6,9 +6,10 @@ license = "MIT"
 description = "Text and dictionary processor for TTS (FishAudio Drama3 / ComfyUI)"
 
 [dependencies]
-eframe = "0.31"
-egui = "0.31"
-egui_extras = { version = "0.31", features = ["all_loaders"] }
+eframe = { version = "0.34", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
+egui = "0.34"
+egui_extras = { version = "0.34", features = ["all_loaders"] }
+egui_software_backend = { version = "0.0.3", optional = true }
 rfd = "0.15"
 rayon = "1.10"
 regex = "1.11"
@@ -23,6 +24,7 @@ arboard = "3.4"
 [features]
 default = []
 wgpu = ["eframe/wgpu"]
+sw = ["dep:egui_software_backend"]
 
 [profile.release]
 opt-level = 3
