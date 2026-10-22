@@ -3,5 +3,6 @@
 /Demagog-RS.exe
 /Demagog-RS-cpu.exe
 /settings.json
+/settings.json.corrupt
 /dist/
 *.log
