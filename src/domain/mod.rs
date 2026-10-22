@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ThemeMode {
     #[default]
     Dark,
@@ -121,6 +121,15 @@ fn default_true() -> bool {
     true
 }
 
+fn legacy_theme(dark_mode: Option<bool>, warm_mode: Option<bool>) -> Option<ThemeMode> {
+    match (dark_mode, warm_mode) {
+        (None, None) => None,
+        (Some(true), _) => Some(ThemeMode::Dark),
+        (_, Some(true)) => Some(ThemeMode::Warm),
+        _ => Some(ThemeMode::Light),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DictionaryMeta {
     pub name: String,
@@ -202,9 +211,12 @@ pub enum PipelineProgress {
 pub struct AppSettings {
     pub ui_font_size: f32,
     pub editor_font_size: f32,
-    pub dark_mode: bool,
     #[serde(default)]
-    pub warm_mode: bool,
+    pub theme: ThemeMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) dark_mode: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) warm_mode: Option<bool>,
     pub stress_format: StressFormat,
     pub chunk_config: ChunkConfig,
     pub dic_folder: PathBuf,
@@ -220,8 +232,9 @@ impl Default for AppSettings {
         Self {
             ui_font_size: 16.0,
             editor_font_size: 19.0,
-            dark_mode: true,
-            warm_mode: false,
+            theme: ThemeMode::Dark,
+            dark_mode: None,
+            warm_mode: None,
             stress_format: StressFormat::PlusBeforeVowel,
             chunk_config: ChunkConfig::default(),
             dic_folder: PathBuf::from("dic"),
@@ -234,18 +247,11 @@ impl Default for AppSettings {
 
 impl AppSettings {
     pub fn theme(&self) -> ThemeMode {
-        if self.dark_mode {
-            ThemeMode::Dark
-        } else if self.warm_mode {
-            ThemeMode::Warm
-        } else {
-            ThemeMode::Light
-        }
+        self.theme
     }
 
     pub fn set_theme(&mut self, theme: ThemeMode) {
-        self.dark_mode = theme == ThemeMode::Dark;
-        self.warm_mode = theme == ThemeMode::Warm;
+        self.theme = theme;
     }
 
     pub fn settings_path() -> PathBuf {
@@ -260,20 +266,33 @@ impl AppSettings {
     pub fn load(default_dic_folder: PathBuf) -> Self {
         let path = Self::settings_path();
         if let Ok(bytes) = std::fs::read(&path)
-            && let Ok(mut s) = serde_json::from_slice::<Self>(&bytes)
+            && let Some(settings) = Self::from_json(&bytes, default_dic_folder.clone())
         {
-            let is_old_demagog = s.dic_folder.to_string_lossy().contains("Demagog-x64-Piper");
-            if (!s.dic_folder.is_dir() || is_old_demagog) && default_dic_folder.is_dir() {
-                s.dic_folder = default_dic_folder;
-            }
-            s.ui_font_size = s.ui_font_size.clamp(12.0, 28.0);
-            s.editor_font_size = s.editor_font_size.clamp(12.0, 36.0);
-            return s;
+            return settings;
         }
         Self {
             dic_folder: default_dic_folder,
             ..Self::default()
         }
+    }
+
+    fn from_json(bytes: &[u8], default_dic_folder: PathBuf) -> Option<Self> {
+        let mut settings = serde_json::from_slice::<Self>(bytes).ok()?;
+        if let Some(theme) = legacy_theme(settings.dark_mode, settings.warm_mode) {
+            settings.theme = theme;
+            settings.dark_mode = None;
+            settings.warm_mode = None;
+        }
+        let is_old_demagog = settings
+            .dic_folder
+            .to_string_lossy()
+            .contains("Demagog-x64-Piper");
+        if (!settings.dic_folder.is_dir() || is_old_demagog) && default_dic_folder.is_dir() {
+            settings.dic_folder = default_dic_folder;
+        }
+        settings.ui_font_size = settings.ui_font_size.clamp(12.0, 28.0);
+        settings.editor_font_size = settings.editor_font_size.clamp(12.0, 36.0);
+        Some(settings)
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -462,9 +481,54 @@ mod tests {
         assert_eq!(settings.theme(), ThemeMode::Dark);
         settings.set_theme(ThemeMode::Light);
         assert_eq!(settings.theme(), ThemeMode::Light);
-        assert!(!settings.dark_mode && !settings.warm_mode);
         settings.set_theme(ThemeMode::Warm);
         assert_eq!(settings.theme(), ThemeMode::Warm);
-        assert!(!settings.dark_mode && settings.warm_mode);
+    }
+
+    #[test]
+    fn legacy_theme_flags_are_migrated() {
+        assert_eq!(legacy_theme(Some(true), Some(true)), Some(ThemeMode::Dark));
+        assert_eq!(legacy_theme(Some(false), Some(true)), Some(ThemeMode::Warm));
+        assert_eq!(
+            legacy_theme(Some(false), Some(false)),
+            Some(ThemeMode::Light)
+        );
+        assert_eq!(legacy_theme(None, None), None);
+    }
+
+    #[test]
+    fn theme_is_serialized_as_a_single_field() {
+        let mut settings = AppSettings::default();
+        settings.set_theme(ThemeMode::Warm);
+
+        let value = serde_json::to_value(&settings).expect("serialize settings");
+        assert_eq!(value["theme"], "Warm");
+        assert!(value.get("dark_mode").is_none());
+        assert!(value.get("warm_mode").is_none());
+
+        let parsed: AppSettings = serde_json::from_value(value).expect("deserialize settings");
+        assert_eq!(parsed.theme(), ThemeMode::Warm);
+    }
+
+    #[test]
+    fn loads_legacy_theme_flags_from_json() {
+        let mut value =
+            serde_json::to_value(AppSettings::default()).expect("serialize default settings");
+        value["dark_mode"] = serde_json::json!(false);
+        value["warm_mode"] = serde_json::json!(true);
+        value
+            .as_object_mut()
+            .expect("settings object")
+            .remove("theme");
+
+        let loaded = AppSettings::from_json(
+            &serde_json::to_vec(&value).expect("legacy JSON"),
+            PathBuf::from("dic"),
+        )
+        .expect("load legacy settings");
+
+        assert_eq!(loaded.theme(), ThemeMode::Warm);
+        assert!(loaded.dark_mode.is_none());
+        assert!(loaded.warm_mode.is_none());
     }
 }
