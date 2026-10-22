@@ -21,7 +21,7 @@ use crate::ui::palette;
 enum ActiveTab {
     RawText,
     ProcessedText,
-    DramaChunks,
+    Chunks,
     DiffAndStats,
     Settings,
 }
@@ -61,6 +61,12 @@ impl ResultState {
     fn mark_computed(&mut self, format: StressFormat) {
         self.dirty = true;
         self.stale = false;
+        self.edited = false;
+        self.format = format;
+    }
+
+    fn mark_reformatted(&mut self, format: StressFormat) {
+        self.dirty = true;
         self.edited = false;
         self.format = format;
     }
@@ -415,7 +421,11 @@ impl DemagogApp {
                                 };
                                 pending_status = Some((level, status));
                                 self.dic_load_errors = errors;
-                                self.result_state.mark_stale();
+                                if !self.document.processed_text.is_empty()
+                                    || !self.document.chunks.is_empty()
+                                {
+                                    self.result_state.mark_stale();
+                                }
                                 self.is_busy = false;
                                 self.progress_ratio = 1.0;
                                 finished = true;
@@ -1046,7 +1056,8 @@ impl DemagogApp {
         self.document.processed_text =
             formatter.format_stress(&self.raw_pipeline_output, self.settings.stress_format);
         self.refresh_processed_char_count();
-        self.result_state.mark_computed(self.settings.stress_format);
+        self.result_state
+            .mark_reformatted(self.settings.stress_format);
         self.rechunk_result();
         true
     }
@@ -1774,7 +1785,7 @@ impl DemagogApp {
                 );
                 ui.selectable_value(
                     &mut self.active_tab,
-                    ActiveTab::DramaChunks,
+                    ActiveTab::Chunks,
                     format!("✂ Чанки ({})", self.document.chunks.len()),
                 );
                 ui.selectable_value(
@@ -1983,7 +1994,7 @@ impl DemagogApp {
                     });
                 }
 
-                ActiveTab::DramaChunks => {
+                ActiveTab::Chunks => {
                     ui.horizontal_wrapped(|ui| {
                         let label = ui.label("Макс. длина чанка (символов):");
                         let slider = ui
@@ -2963,6 +2974,19 @@ mod tests {
         state.mark_rechunked();
         assert!(state.is_dirty());
         assert!(state.is_edited());
+    }
+
+    #[test]
+    fn reformatting_keeps_stale_state_and_clears_edits() {
+        let mut state = ResultState::new(StressFormat::PlusBeforeVowel);
+        state.mark_computed(StressFormat::PlusBeforeVowel);
+        state.mark_edited();
+        state.mark_stale();
+        state.mark_reformatted(StressFormat::CleanYoOnly);
+        assert!(state.is_dirty());
+        assert!(state.is_stale());
+        assert!(!state.is_edited());
+        assert_eq!(state.format(), StressFormat::CleanYoOnly);
     }
 
     #[test]
