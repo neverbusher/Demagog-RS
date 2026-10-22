@@ -91,7 +91,6 @@ pub fn compile_single_dictionary(path: &Path) -> Result<CompiledDictionary, Stri
 
     let meta = DictionaryMeta {
         name,
-        path: path.to_path_buf(),
         kind: processor.kind(),
         tag,
         description,

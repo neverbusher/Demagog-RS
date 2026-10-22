@@ -122,10 +122,8 @@ fn default_true() -> bool {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct DictionaryMeta {
     pub name: String,
-    pub path: PathBuf,
     pub kind: DictionaryKind,
     pub tag: DictionaryTag,
     pub description: String,
@@ -171,7 +169,6 @@ pub struct PipelineReport {
 }
 
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct BookDocument {
     pub title: String,
     pub source_path: Option<PathBuf>,
