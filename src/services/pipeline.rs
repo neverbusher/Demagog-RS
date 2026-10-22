@@ -207,6 +207,76 @@ mod tests {
         }
     }
 
+    struct SlowCountingProcessor {
+        calls: Arc<AtomicUsize>,
+        delay: std::time::Duration,
+    }
+
+    impl TextProcessor for SlowCountingProcessor {
+        fn name(&self) -> &str {
+            "slow"
+        }
+
+        fn kind(&self) -> DictionaryKind {
+            DictionaryKind::RegexStandard
+        }
+
+        fn rule_count(&self) -> usize {
+            1
+        }
+
+        fn process(&self, text: &str, _capture_diff: bool) -> ProcessOutput {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            std::thread::sleep(self.delay);
+            ProcessOutput {
+                text: text.to_string(),
+                replacements_count: 0,
+                events: Vec::new(),
+            }
+        }
+    }
+
+    #[test]
+    fn sees_cancellation_from_another_thread() {
+        let pipeline = ProcessingPipeline::new(
+            Arc::new(RussianStressFormatter),
+            Arc::new(SentenceAwareChunker),
+        );
+        let cancel = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let processors: Vec<Arc<dyn TextProcessor>> = (0..50)
+            .map(|_| {
+                Arc::new(SlowCountingProcessor {
+                    calls: calls.clone(),
+                    delay: std::time::Duration::from_millis(20),
+                }) as Arc<dyn TextProcessor>
+            })
+            .collect();
+
+        let canceller = {
+            let cancel = cancel.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                cancel.store(true, Ordering::Relaxed);
+            })
+        };
+
+        let result = pipeline.execute(
+            "start",
+            &processors,
+            StressFormat::CleanYoOnly,
+            &ChunkConfig::default(),
+            false,
+            Some(cancel.as_ref()),
+            None,
+        );
+        canceller.join().unwrap();
+
+        assert!(result.is_none(), "cancelled pipeline must not return a result");
+        let processed = calls.load(Ordering::Relaxed);
+        assert!(processed < 10, "pipeline ignored cancellation after {processed} steps");
+    }
+
     #[test]
     fn stops_before_next_dictionary_when_cancelled() {
         let pipeline = ProcessingPipeline::new(
