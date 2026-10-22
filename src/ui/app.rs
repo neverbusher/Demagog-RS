@@ -68,6 +68,13 @@ pub struct DemagogApp {
     find_last_edit: Instant,
     find_current: usize,
     find_go_to: Option<usize>,
+    raw_char_count: usize,
+    processed_char_count: usize,
+    chunk_render_limit: usize,
+    diff_render_limit: usize,
+    diff_filter_cache: String,
+    diff_visible: Vec<usize>,
+    diff_cache_valid: bool,
     focus_find: bool,
     last_window_title: String,
     window_icon_applied: bool,
@@ -103,6 +110,7 @@ impl DemagogApp {
             "Веселые места и весеннего ветра шум напоминали о том, что все уже в прошлом."
         )
         .to_string();
+        let sample_chars = sample_text.chars().count();
 
         let mut app = Self {
             settings,
@@ -144,6 +152,13 @@ impl DemagogApp {
             find_last_edit: Instant::now(),
             find_current: 0,
             find_go_to: None,
+            raw_char_count: sample_chars,
+            processed_char_count: 0,
+            chunk_render_limit: CHUNK_BATCH,
+            diff_render_limit: DIFF_BATCH,
+            diff_filter_cache: String::new(),
+            diff_visible: Vec::new(),
+            diff_cache_valid: false,
             focus_find: false,
             last_window_title: "Demagog-RS".to_string(),
             window_icon_applied: false,
@@ -240,6 +255,7 @@ impl DemagogApp {
         self.is_busy = true;
         self.progress_ratio = 0.0;
         self.report = PipelineReport::default();
+        self.reset_long_list_state();
         for d in &mut self.dictionaries {
             d.last_ms = None;
             d.last_replacements = None;
@@ -354,6 +370,11 @@ impl DemagogApp {
                                             ),
                                         ));
                                         self.document = doc;
+                                        self.raw_char_count = chars;
+                                        self.processed_char_count = 0;
+                                        self.chunk_render_limit = CHUNK_BATCH;
+                                        self.diff_render_limit = DIFF_BATCH;
+                                        self.diff_cache_valid = false;
                                         self.raw_pipeline_output.clear();
                                         self.active_tab = ActiveTab::RawText;
                                         self.last_copied_chunk = None;
@@ -409,6 +430,11 @@ impl DemagogApp {
                                     self.raw_pipeline_output = result.raw_text;
                                     self.document.processed_text = result.processed_text;
                                     self.document.chunks = result.chunks;
+                                    self.processed_char_count =
+                                        self.document.processed_text.chars().count();
+                                    self.chunk_render_limit = CHUNK_BATCH;
+                                    self.diff_render_limit = DIFF_BATCH;
+                                    self.diff_cache_valid = false;
                                     let had_events = !result.report.events.is_empty();
                                     self.report = result.report;
                                     self.result_dirty = true;
@@ -629,6 +655,38 @@ impl DemagogApp {
             return;
         };
         self.load_book(path, ctx.clone());
+    }
+
+    fn refresh_raw_char_count(&mut self) {
+        self.raw_char_count = self.document.raw_text.chars().count();
+    }
+
+    fn refresh_processed_char_count(&mut self) {
+        self.processed_char_count = self.document.processed_text.chars().count();
+    }
+
+    fn reset_long_list_state(&mut self) {
+        self.chunk_render_limit = CHUNK_BATCH;
+        self.diff_render_limit = DIFF_BATCH;
+        self.diff_cache_valid = false;
+    }
+
+    fn refresh_diff_visible(&mut self) {
+        let filter = self.diff_filter.to_lowercase();
+        self.diff_visible.clear();
+        for (index, event) in self.report.events.iter().enumerate() {
+            if filter.is_empty()
+                || event.dictionary_name.to_lowercase().contains(&filter)
+                || event.before_snippet.to_lowercase().contains(&filter)
+                || event.after_snippet.to_lowercase().contains(&filter)
+                || event.rule_summary.to_lowercase().contains(&filter)
+            {
+                self.diff_visible.push(index);
+            }
+        }
+        self.diff_filter_cache = filter;
+        self.diff_cache_valid = true;
+        self.diff_render_limit = DIFF_BATCH;
     }
 
     fn refresh_find_matches(&mut self) {
@@ -936,6 +994,7 @@ impl DemagogApp {
         let formatter = RussianStressFormatter;
         self.document.processed_text =
             formatter.format_stress(&self.raw_pipeline_output, self.settings.stress_format);
+        self.refresh_processed_char_count();
         self.result_format = self.settings.stress_format;
         self.rechunk_result();
         self.result_edited = false;
@@ -953,6 +1012,7 @@ impl DemagogApp {
                 .split_into_chunks(&self.document.processed_text, &self.settings.chunk_config);
         }
         self.last_copied_chunk = None;
+        self.chunk_render_limit = CHUNK_BATCH;
         self.result_dirty = true;
         self.find_dirty = true;
     }
@@ -1643,7 +1703,7 @@ impl DemagogApp {
                     ActiveTab::RawText,
                     format!(
                         "📝 Исходный текст ({})",
-                        format_num(self.document.raw_text.chars().count())
+                        format_num(self.raw_char_count)
                     ),
                 );
                 ui.selectable_value(
@@ -1651,7 +1711,7 @@ impl DemagogApp {
                     ActiveTab::ProcessedText,
                     format!(
                         "✅ Результат ({})",
-                        format_num(self.document.processed_text.chars().count())
+                        format_num(self.processed_char_count)
                     ),
                 );
                 ui.selectable_value(
@@ -1698,6 +1758,7 @@ impl DemagogApp {
                                         self.document.raw_text = txt;
                                         self.document.title = "Из буфера обмена".to_string();
                                         self.document.source_path = None;
+                                        self.refresh_raw_char_count();
                                         self.source_dirty = true;
                                         self.mark_result_stale();
                                         self.find_dirty = true;
@@ -1726,6 +1787,7 @@ impl DemagogApp {
                                 )
                             {
                                 self.document.raw_text.clear();
+                                self.raw_char_count = 0;
                                 self.document.source_path = None;
                                 self.source_dirty = false;
                                 self.mark_result_stale();
@@ -1764,6 +1826,7 @@ impl DemagogApp {
                             .show(ui);
                         if output.response.changed() {
                             self.source_dirty = true;
+                            self.refresh_raw_char_count();
                             self.mark_result_stale();
                             self.find_dirty = true;
                             self.find_last_edit = Instant::now();
@@ -1806,6 +1869,7 @@ impl DemagogApp {
                                 )
                             {
                                 self.document.raw_text = self.document.processed_text.clone();
+                                self.raw_char_count = self.processed_char_count;
                                 self.raw_pipeline_output.clear();
                                 self.source_dirty = true;
                                 self.find_dirty = true;
@@ -1854,6 +1918,7 @@ impl DemagogApp {
                         if output.response.changed() {
                             self.result_dirty = true;
                             self.result_edited = true;
+                            self.refresh_processed_char_count();
                             self.find_dirty = true;
                             self.find_last_edit = Instant::now();
                         }
@@ -1892,12 +1957,14 @@ impl DemagogApp {
                     self.show_stale_banner(ui, theme);
                     ui.separator();
 
+                    let chunk_total = self.document.chunks.len();
+                    let chunk_shown = chunk_total.min(self.chunk_render_limit.max(CHUNK_BATCH));
                     let mut copied_status: Option<(StatusLevel, String)> = None;
-                    ScrollArea::vertical().show(ui, |ui| {
+                    let chunks_output = ScrollArea::vertical().show(ui, |ui| {
                         if self.document.chunks.is_empty() {
                             ui.label("Нажмите «Обработать книгу», чтобы нарезать текст на чанки по границам предложений. Чанк можно скопировать отдельно, а все — экспортировать в JSON для ComfyUI.");
                         }
-                        for (idx, chunk) in self.document.chunks.iter().enumerate() {
+                        for (idx, chunk) in self.document.chunks.iter().take(chunk_shown).enumerate() {
                             let is_copied = self.last_copied_chunk == Some(idx);
                             let mut frame = egui::Frame::group(ui.style());
                             if is_copied {
@@ -1964,7 +2031,29 @@ impl DemagogApp {
                                 });
                             ui.add_space(6.0);
                         }
+                        if chunk_shown < chunk_total {
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new(format!(
+                                    "Показаны первые {} из {} чанков — прокрутите ниже, чтобы догрузить.",
+                                    format_num(chunk_shown),
+                                    format_num(chunk_total)
+                                ))
+                                .weak(),
+                            );
+                        }
                     });
+                    if chunk_shown < chunk_total {
+                        let near_bottom = chunks_output.state.offset.y
+                            + chunks_output.inner_rect.height()
+                            >= chunks_output.content_size.y - 120.0;
+                        let fits = chunks_output.content_size.y
+                            <= chunks_output.inner_rect.height() + 1.0;
+                        if near_bottom || fits {
+                            self.chunk_render_limit = (chunk_shown + CHUNK_BATCH).min(chunk_total);
+                            ui.ctx().request_repaint();
+                        }
+                    }
                     if let Some((level, text)) = copied_status {
                         self.set_status(level, text);
                     }
@@ -1990,7 +2079,14 @@ impl DemagogApp {
                     self.show_stale_banner(ui, theme);
                     ui.separator();
 
-                    ScrollArea::both()
+                    if !self.diff_cache_valid
+                        || self.diff_filter.to_lowercase() != self.diff_filter_cache
+                    {
+                        self.refresh_diff_visible();
+                    }
+                    let diff_total = self.diff_visible.len();
+                    let diff_shown = diff_total.min(self.diff_render_limit.max(DIFF_BATCH));
+                    let diff_output = ScrollArea::both()
                         .id_salt("diff_scroll")
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
@@ -2022,8 +2118,9 @@ impl DemagogApp {
                             ui.label(
                                 "Для записи детальных примеров каждого сработавшего правила нажмите кнопку «🔬 С логом замен (Diff)» на верхней панели.",
                             );
+                        } else if self.diff_visible.is_empty() {
+                            ui.label("Ничего не найдено по фильтру замен.");
                         } else {
-                            let filter_low = self.diff_filter.to_lowercase();
                             egui::Grid::new("diff_events_grid")
                                 .striped(true)
                                 .max_col_width(420.0)
@@ -2034,27 +2131,10 @@ impl DemagogApp {
                                     ui.label(RichText::new("Стало").strong());
                                     ui.end_row();
 
-                                    for ev in &self.report.events {
-                                        if !filter_low.is_empty()
-                                            && !ev
-                                                .dictionary_name
-                                                .to_lowercase()
-                                                .contains(&filter_low)
-                                            && !ev
-                                                .before_snippet
-                                                .to_lowercase()
-                                                .contains(&filter_low)
-                                            && !ev
-                                                .after_snippet
-                                                .to_lowercase()
-                                                .contains(&filter_low)
-                                            && !ev
-                                                .rule_summary
-                                                .to_lowercase()
-                                                .contains(&filter_low)
-                                        {
-                                            continue;
-                                        }
+                                    for &event_index in
+                                        self.diff_visible.iter().take(diff_shown)
+                                    {
+                                        let ev = &self.report.events[event_index];
                                         ui.label(&ev.dictionary_name);
                                         ui.label(RichText::new(&ev.rule_summary).monospace());
                                         ui.label(
@@ -2071,7 +2151,29 @@ impl DemagogApp {
                                     }
                                 });
                         }
+                        if diff_shown < diff_total {
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new(format!(
+                                    "Показаны первые {} из {} записей — прокрутите ниже, чтобы догрузить.",
+                                    format_num(diff_shown),
+                                    format_num(diff_total)
+                                ))
+                                .weak(),
+                            );
+                        }
                     });
+                    if diff_shown < diff_total {
+                        let near_bottom = diff_output.state.offset.y
+                            + diff_output.inner_rect.height()
+                            >= diff_output.content_size.y - 120.0;
+                        let fits =
+                            diff_output.content_size.y <= diff_output.inner_rect.height() + 1.0;
+                        if near_bottom || fits {
+                            self.diff_render_limit = (diff_shown + DIFF_BATCH).min(diff_total);
+                            ui.ctx().request_repaint();
+                        }
+                    }
                 }
 
                 ActiveTab::Settings => {
@@ -2520,6 +2622,8 @@ fn editor_line_height(font_size: f32) -> f32 {
 }
 
 const MAX_FIND_MATCHES: usize = 5000;
+const CHUNK_BATCH: usize = 80;
+const DIFF_BATCH: usize = 150;
 
 #[derive(Debug, Default)]
 struct FindMatches {
