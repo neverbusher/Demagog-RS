@@ -43,7 +43,7 @@ impl DocumentReader for TxtDocumentReader {
             return Err("Файл пуст или не содержит читаемого текста.".to_string());
         }
         Ok(BookDocument {
-            title: file_stem_title(path),
+            title: document_title_from_path(path),
             source_path: Some(path.to_path_buf()),
             raw_text: text,
             processed_text: String::new(),
@@ -103,8 +103,10 @@ impl DocumentReader for Fb2DocumentReader {
         if text.trim().is_empty() {
             return Err("В FB2 не найден текст книги.".to_string());
         }
+        let title = xml_element_text(&bytes, b"book-title")
+            .unwrap_or_else(|| document_title_from_path(path));
         Ok(BookDocument {
-            title: file_stem_title(path),
+            title,
             source_path: Some(path.to_path_buf()),
             raw_text: text,
             processed_text: String::new(),
@@ -130,6 +132,9 @@ impl DocumentReader for DocxDocumentReader {
         let file = File::open(path).map_err(|e| format!("Ошибка открытия DOCX: {e}"))?;
         let mut archive =
             ZipArchive::new(file).map_err(|e| format!("Ошибка чтения ZIP/DOCX: {e}"))?;
+        let title = read_zip_entry_optional(&mut archive, "docProps/core.xml")?
+            .and_then(|bytes| xml_element_text(&bytes, b"title"))
+            .unwrap_or_else(|| document_title_from_path(path));
         let doc_xml = {
             let entry = archive
                 .by_name("word/document.xml")
@@ -179,7 +184,7 @@ impl DocumentReader for DocxDocumentReader {
             return Err("В DOCX не найден текст.".to_string());
         }
         Ok(BookDocument {
-            title: file_stem_title(path),
+            title,
             source_path: Some(path.to_path_buf()),
             raw_text: text,
             processed_text: String::new(),
@@ -204,7 +209,8 @@ impl DocumentReader for EpubDocumentReader {
     fn read_document(&self, path: &Path) -> Result<BookDocument, String> {
         let file = File::open(path).map_err(|e| format!("Ошибка открытия EPUB: {e}"))?;
         let mut archive = ZipArchive::new(file).map_err(|e| format!("Ошибка чтения EPUB: {e}"))?;
-        let entries = epub_reading_order(&mut archive)?;
+        let EpubContents { entries, title } = epub_contents(&mut archive)?;
+        let title = title.unwrap_or_else(|| document_title_from_path(path));
 
         let mut full_text = String::new();
         let mut total_bytes: u64 = 0;
@@ -234,7 +240,7 @@ impl DocumentReader for EpubDocumentReader {
             return Err("В EPUB не найден текст: файлы внутри повреждены или пусты.".to_string());
         }
         Ok(BookDocument {
-            title: file_stem_title(path),
+            title,
             source_path: Some(path.to_path_buf()),
             raw_text: full_text,
             processed_text: String::new(),
@@ -277,7 +283,7 @@ impl DocumentReader for CompositeBookReader {
     }
 }
 
-fn file_stem_title(path: &Path) -> String {
+fn document_title_from_path(path: &Path) -> String {
     let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
     let base = if file_name.to_ascii_lowercase().ends_with(".fb2.zip") {
         &file_name[..file_name.len() - ".fb2.zip".len()]
@@ -288,6 +294,36 @@ fn file_stem_title(path: &Path) -> String {
         "Без названия".to_string()
     } else {
         base.to_string()
+    }
+}
+
+fn xml_element_text(bytes: &[u8], element: &[u8]) -> Option<String> {
+    let xml = decode_xml_with_declared_encoding(bytes);
+    let mut reader = Reader::from_str(&xml);
+    let mut inside = false;
+    let mut text = String::new();
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) if e.local_name().as_ref() == element => {
+                inside = true;
+                text.clear();
+            }
+            Ok(Event::End(e)) if e.local_name().as_ref() == element && inside => {
+                let text = text.trim();
+                return (!text.is_empty()).then(|| text.to_string());
+            }
+            Ok(Event::Text(event)) if inside => {
+                if let Ok(unescaped) = event.unescape() {
+                    text.push_str(&unescaped);
+                }
+            }
+            Ok(Event::CData(event)) if inside => {
+                text.push_str(&String::from_utf8_lossy(event.as_ref()));
+            }
+            Ok(Event::Eof) | Err(_) => return None,
+            _ => {}
+        }
     }
 }
 
@@ -490,7 +526,7 @@ fn read_epub_zip_entry(archive: &mut ZipArchive<File>, name: &str) -> Result<Vec
     read_limited(entry, name, MAX_ARCHIVE_ENTRY_BYTES)
 }
 
-fn read_epub_zip_entry_optional(
+fn read_zip_entry_optional(
     archive: &mut ZipArchive<File>,
     name: &str,
 ) -> Result<Option<Vec<u8>>, String> {
@@ -507,9 +543,12 @@ fn read_epub_zip_entry_optional(
     read_limited(entry, name, MAX_ARCHIVE_ENTRY_BYTES).map(Some)
 }
 
-fn epub_reading_order(archive: &mut ZipArchive<File>) -> Result<Vec<String>, String> {
-    let Some(container) = read_epub_zip_entry_optional(archive, "META-INF/container.xml")? else {
-        return Ok(fallback_epub_entries(archive));
+fn epub_contents(archive: &mut ZipArchive<File>) -> Result<EpubContents, String> {
+    let Some(container) = read_zip_entry_optional(archive, "META-INF/container.xml")? else {
+        return Ok(EpubContents {
+            entries: fallback_epub_entries(archive),
+            title: None,
+        });
     };
     let opf_path = epub_rootfile_path(&container)?
         .ok_or_else(|| "В META-INF/container.xml не указан rootfile".to_string())?;
@@ -518,7 +557,15 @@ fn epub_reading_order(archive: &mut ZipArchive<File>) -> Result<Vec<String>, Str
     if entries.is_empty() {
         return Err("В OPF не найден spine с главами".to_string());
     }
-    Ok(entries)
+    Ok(EpubContents {
+        entries,
+        title: xml_element_text(&opf, b"title"),
+    })
+}
+
+struct EpubContents {
+    entries: Vec<String>,
+    title: Option<String>,
 }
 
 fn fallback_epub_entries(archive: &mut ZipArchive<File>) -> Vec<String> {
@@ -637,12 +684,12 @@ mod tests {
     #[test]
     fn title_strips_compound_fb2_zip_extension() {
         assert_eq!(
-            file_stem_title(Path::new("Война и мир.fb2.zip")),
+            document_title_from_path(Path::new("Война и мир.fb2.zip")),
             "Война и мир"
         );
-        assert_eq!(file_stem_title(Path::new("BOOK.FB2.ZIP")), "BOOK");
-        assert_eq!(file_stem_title(Path::new("book.zip")), "book");
-        assert_eq!(file_stem_title(Path::new("book.fb2")), "book");
+        assert_eq!(document_title_from_path(Path::new("BOOK.FB2.ZIP")), "BOOK");
+        assert_eq!(document_title_from_path(Path::new("book.zip")), "book");
+        assert_eq!(document_title_from_path(Path::new("book.fb2")), "book");
     }
 
     #[test]
@@ -777,7 +824,8 @@ mod tests {
     #[test]
     fn reads_epub_chapters_in_spine_order() {
         let opf = r#"<?xml version="1.0" encoding="utf-8"?>
-<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0">
+  <metadata><dc:title>Настоящее название</dc:title></metadata>
   <manifest>
     <item id="chapter10" href="Text/chapter10.xhtml" media-type="application/xhtml+xml"/>
     <item id="chapter2" href="Text/chapter2.xhtml" media-type="application/xhtml+xml"/>
@@ -804,6 +852,7 @@ mod tests {
         let document = EpubDocumentReader
             .read_document(&epub.0)
             .expect("read EPUB");
+        assert_eq!(document.title, "Настоящее название");
         let second = document
             .raw_text
             .find("Вторая глава")
@@ -833,6 +882,29 @@ mod tests {
             .read_document(&epub.0)
             .expect_err("missing chapter must not be ignored");
         assert!(error.contains("не найден файл"), "{error}");
+    }
+
+    #[test]
+    fn extracts_title_text_from_xml_metadata() {
+        let opf = r#"<package xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata><dc:title>Война &amp; мир</dc:title></metadata></package>"#;
+        assert_eq!(
+            xml_element_text(opf.as_bytes(), b"title").as_deref(),
+            Some("Война & мир")
+        );
+
+        let fb2 = r#"<FictionBook><description><title-info><book-title>Мир и война</book-title></title-info></description></FictionBook>"#;
+        assert_eq!(
+            xml_element_text(fb2.as_bytes(), b"book-title").as_deref(),
+            Some("Мир и война")
+        );
+    }
+
+    #[test]
+    fn missing_xml_title_is_none() {
+        assert_eq!(
+            xml_element_text(b"<package><metadata></metadata></package>", b"title"),
+            None
+        );
     }
 
     #[test]

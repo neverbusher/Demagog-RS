@@ -1042,6 +1042,7 @@ impl DemagogApp {
         {
             match std::fs::write(&path, &self.document.raw_text) {
                 Ok(_) => {
+                    self.document.source_path = Some(path.clone());
                     self.source_dirty = false;
                     self.set_status(
                         StatusLevel::Success,
