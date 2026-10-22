@@ -278,11 +278,10 @@ impl AppSettings {
         }
     }
 
-    pub fn save(&self) {
+    pub fn save(&self) -> Result<(), String> {
         let path = Self::settings_path();
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(path, json);
-        }
+        let json = serde_json::to_string_pretty(self).map_err(|err| err.to_string())?;
+        std::fs::write(&path, json).map_err(|err| format!("{}: {err}", path.display()))
     }
 
     pub fn is_dic_enabled(&self, name: &str) -> bool {

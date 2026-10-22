@@ -26,6 +26,14 @@ enum ActiveTab {
     Settings,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusLevel {
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
 pub struct DemagogApp {
     settings: AppSettings,
     dictionaries: Vec<DictionaryMeta>,
@@ -35,6 +43,8 @@ pub struct DemagogApp {
     active_tab: ActiveTab,
     report: PipelineReport,
     status_line: String,
+    status_level: StatusLevel,
+    last_error: Option<String>,
     is_busy: bool,
     progress_ratio: f32,
     rx: Option<Receiver<WorkerMessage>>,
@@ -109,6 +119,8 @@ impl DemagogApp {
             active_tab: ActiveTab::RawText,
             report: PipelineReport::default(),
             status_line: "Загрузка и компиляция словарей на всех ядрах CPU...".to_string(),
+            status_level: StatusLevel::Info,
+            last_error: None,
             is_busy: false,
             progress_ratio: 0.0,
             rx: None,
@@ -148,9 +160,10 @@ impl DemagogApp {
         self.is_busy = true;
         self.progress_ratio = 0.1;
         self.dic_load_errors.clear();
-        self.status_line = format!(
-            "Параллельная компиляция словарей из {}...",
-            self.settings.dic_folder.display()
+        let dic_folder = self.settings.dic_folder.display().to_string();
+        self.set_status(
+            StatusLevel::Info,
+            format!("Параллельная компиляция словарей из {dic_folder}..."),
         );
 
         let folder = self.settings.dic_folder.clone();
@@ -194,7 +207,7 @@ impl DemagogApp {
         if self.settings.stress_format != previous_format && !self.reformat_result() {
             self.settings.stress_format = previous_format;
         }
-        self.settings.save();
+        self.save_settings();
     }
 
     fn start_processing(&mut self, ctx: egui::Context, capture_diff: bool) {
@@ -210,7 +223,7 @@ impl DemagogApp {
             .collect();
 
         if active_processors.is_empty() {
-            self.status_line = "Не выбран ни один словарь!".to_string();
+            self.set_status(StatusLevel::Warning, "Не выбран ни один словарь!");
             return;
         }
         if self.result_edited
@@ -222,7 +235,7 @@ impl DemagogApp {
         }
 
         self.settings.sync_disabled_from_metas(&self.dictionaries);
-        self.settings.save();
+        self.save_settings();
 
         self.is_busy = true;
         self.progress_ratio = 0.0;
@@ -274,6 +287,9 @@ impl DemagogApp {
     fn poll_worker(&mut self) {
         let mut finished = false;
         let mut disconnected = false;
+        // The worker channel borrows `self.rx` for the whole loop, so status
+        // updates are collected here and applied once the borrow ends.
+        let mut pending_status: Option<(StatusLevel, String)> = None;
 
         if let Some(rx) = &self.rx {
             loop {
@@ -309,7 +325,12 @@ impl DemagogApp {
                                         errors.len()
                                     ));
                                 }
-                                self.status_line = status;
+                                let level = if errors.is_empty() {
+                                    StatusLevel::Success
+                                } else {
+                                    StatusLevel::Warning
+                                };
+                                pending_status = Some((level, status));
                                 self.dic_load_errors = errors;
                                 if !self.document.processed_text.is_empty()
                                     || !self.document.chunks.is_empty()
@@ -324,11 +345,14 @@ impl DemagogApp {
                                 match result {
                                     Ok(doc) => {
                                         let chars = doc.raw_text.chars().count();
-                                        self.status_line = format!(
-                                            "Открыта книга «{}» ({} символов)",
-                                            doc.title,
-                                            format_num(chars)
-                                        );
+                                        pending_status = Some((
+                                            StatusLevel::Success,
+                                            format!(
+                                                "Открыта книга «{}» ({} символов)",
+                                                doc.title,
+                                                format_num(chars)
+                                            ),
+                                        ));
                                         self.document = doc;
                                         self.raw_pipeline_output.clear();
                                         self.active_tab = ActiveTab::RawText;
@@ -342,11 +366,10 @@ impl DemagogApp {
                                         self.result_dirty = false;
                                         self.result_stale = false;
                                         self.result_edited = false;
-                                        self.last_copied_chunk = None;
                                         self.find_dirty = true;
                                     }
                                     Err(err) => {
-                                        self.status_line = err;
+                                        pending_status = Some((StatusLevel::Error, err));
                                     }
                                 }
                                 self.is_busy = false;
@@ -357,8 +380,10 @@ impl DemagogApp {
                                 PipelineProgress::StepStarted { index, total, name } => {
                                     self.progress_ratio =
                                         index as f32 / total.max(1) as f32;
-                                    self.status_line =
-                                        format!("[{index}/{total}] Обработка: {name}...");
+                                    pending_status = Some((
+                                        StatusLevel::Info,
+                                        format!("[{index}/{total}] Обработка: {name}..."),
+                                    ));
                                 }
                                 PipelineProgress::StepFinished(step) => {
                                     if let Some(d) = self
@@ -372,12 +397,15 @@ impl DemagogApp {
                                     }
                                 }
                                 PipelineProgress::Completed(result) => {
-                                    self.status_line = format!(
-                                        "Обработано за {} мс | Замен: {} | Чанков: {}",
-                                        result.report.total_ms,
-                                        format_num(result.report.total_replacements),
-                                        result.chunks.len()
-                                    );
+                                    pending_status = Some((
+                                        StatusLevel::Success,
+                                        format!(
+                                            "Обработано за {} мс | Замен: {} | Чанков: {}",
+                                            result.report.total_ms,
+                                            format_num(result.report.total_replacements),
+                                            result.chunks.len()
+                                        ),
+                                    ));
                                     self.raw_pipeline_output = result.raw_text;
                                     self.document.processed_text = result.processed_text;
                                     self.document.chunks = result.chunks;
@@ -399,14 +427,16 @@ impl DemagogApp {
                                     finished = true;
                                 }
                                 PipelineProgress::Cancelled => {
-                                    self.status_line = "Обработка отменена".to_string();
+                                    pending_status =
+                                        Some((StatusLevel::Warning, "Обработка отменена".to_string()));
                                     self.cancel_flag = None;
                                     self.is_busy = false;
                                     self.progress_ratio = 0.0;
                                     finished = true;
                                 }
                                 PipelineProgress::Error(err) => {
-                                    self.status_line = format!("Ошибка: {err}");
+                                    pending_status =
+                                        Some((StatusLevel::Error, format!("Ошибка: {err}")));
                                     self.cancel_flag = None;
                                     self.is_busy = false;
                                     self.progress_ratio = 0.0;
@@ -428,10 +458,16 @@ impl DemagogApp {
             }
         }
 
+        if let Some((level, text)) = pending_status {
+            self.set_status(level, text);
+        }
+
         if finished || disconnected {
             if disconnected && !finished {
-                self.status_line =
-                    "Рабочий поток завершился неожиданно — попробуйте ещё раз".to_string();
+                self.set_status(
+                    StatusLevel::Error,
+                    "Рабочий поток завершился неожиданно — попробуйте ещё раз",
+                );
                 self.cancel_flag = None;
                 self.is_busy = false;
                 self.progress_ratio = 0.0;
@@ -469,7 +505,10 @@ impl DemagogApp {
 
         self.is_busy = true;
         self.progress_ratio = 0.0;
-        self.status_line = format!("Чтение «{}»...", path.display());
+        self.set_status(
+            StatusLevel::Info,
+            format!("Чтение «{}»...", path.display()),
+        );
 
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
@@ -544,7 +583,7 @@ impl DemagogApp {
                 && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
             {
                 cancel.store(true, Ordering::Relaxed);
-                self.status_line = "Отмена...".to_string();
+                self.set_status(StatusLevel::Warning, "Отмена...");
             }
         } else if self.find_open
             && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
@@ -573,15 +612,20 @@ impl DemagogApp {
             return;
         }
         if self.is_busy {
-            self.status_line = "Дождитесь завершения текущей операции".to_string();
+            self.set_status(
+                StatusLevel::Warning,
+                "Дождитесь завершения текущей операции",
+            );
             return;
         }
         let Some(path) = dropped
             .into_iter()
             .find(|path| is_supported_book_path(path))
         else {
-            self.status_line =
-                "Поддерживаются TXT, FB2, EPUB, DOCX, ZIP и MD".to_string();
+            self.set_status(
+                StatusLevel::Warning,
+                "Поддерживаются TXT, FB2, EPUB, DOCX, ZIP и MD",
+            );
             return;
         };
         self.load_book(path, ctx.clone());
@@ -757,7 +801,10 @@ impl DemagogApp {
 
     fn save_processed_txt(&mut self) {
         if self.document.processed_text.is_empty() {
-            self.status_line = "Сначала выполните обработку текста!".to_string();
+            self.set_status(
+                StatusLevel::Warning,
+                "Сначала выполните обработку текста!",
+            );
             return;
         }
         if !self.confirm_stale_result("Сохранить его всё равно") {
@@ -772,10 +819,16 @@ impl DemagogApp {
             match std::fs::write(&path, &self.document.processed_text) {
                 Ok(_) => {
                     self.result_dirty = false;
-                    self.status_line = format!("Сохранено в {}", path.display());
+                    self.set_status(
+                        StatusLevel::Success,
+                        format!("Сохранено в {}", path.display()),
+                    );
                 }
                 Err(e) => {
-                    self.status_line = format!("Ошибка сохранения: {e}");
+                    self.set_status(
+                        StatusLevel::Error,
+                        format!("Ошибка сохранения: {e}"),
+                    );
                 }
             }
         }
@@ -783,7 +836,10 @@ impl DemagogApp {
 
     fn save_source_txt(&mut self) {
         if self.document.raw_text.trim().is_empty() {
-            self.status_line = "Исходный текст пуст — нечего сохранять".to_string();
+            self.set_status(
+                StatusLevel::Warning,
+                "Исходный текст пуст — нечего сохранять",
+            );
             return;
         }
         let default_name = format!("{}_source.txt", self.document.title);
@@ -795,16 +851,25 @@ impl DemagogApp {
             match std::fs::write(&path, &self.document.raw_text) {
                 Ok(_) => {
                     self.source_dirty = false;
-                    self.status_line = format!("Исходный текст сохранён в {}", path.display());
+                    self.set_status(
+                        StatusLevel::Success,
+                        format!("Исходный текст сохранён в {}", path.display()),
+                    );
                 }
-                Err(e) => self.status_line = format!("Ошибка сохранения: {e}"),
+                Err(e) => self.set_status(
+                    StatusLevel::Error,
+                    format!("Ошибка сохранения: {e}"),
+                ),
             }
         }
     }
 
     fn export_chunks_json(&mut self) {
         if self.document.chunks.is_empty() {
-            self.status_line = "Нет чанков для экспорта — запустите обработку!".to_string();
+            self.set_status(
+                StatusLevel::Warning,
+                "Нет чанков для экспорта — запустите обработку!",
+            );
             return;
         }
         if !self.confirm_stale_result("Экспортировать его всё равно") {
@@ -833,9 +898,15 @@ impl DemagogApp {
                 match std::fs::write(&path, json) {
                     Ok(_) => {
                         self.result_dirty = false;
-                        self.status_line = format!("Чанки экспортированы в {}", path.display());
+                        self.set_status(
+                            StatusLevel::Success,
+                            format!("Чанки экспортированы в {}", path.display()),
+                        );
                     }
-                    Err(e) => self.status_line = format!("Ошибка записи JSON: {e}"),
+                    Err(e) => self.set_status(
+                        StatusLevel::Error,
+                        format!("Ошибка записи JSON: {e}"),
+                    ),
                 }
             }
         }
@@ -849,9 +920,10 @@ impl DemagogApp {
         }
         if self.raw_pipeline_output.is_empty() {
             self.result_stale = true;
-            self.status_line =
-                "Результат нельзя пересобрать: он уже снят с конвейера — обработайте книгу заново"
-                    .to_string();
+            self.set_status(
+                StatusLevel::Warning,
+                "Результат нельзя пересобрать: он уже снят с конвейера — обработайте книгу заново",
+            );
             return false;
         }
         if self.result_edited
@@ -898,7 +970,7 @@ impl DemagogApp {
         }
         self.chunk_apply_pending = false;
         self.rechunk_result();
-        self.settings.save();
+        self.save_settings();
     }
 }
 
@@ -914,6 +986,34 @@ impl eframe::App for DemagogApp {
 }
 
 impl DemagogApp {
+    fn set_status(&mut self, level: StatusLevel, text: impl Into<String>) {
+        self.status_line = text.into();
+        self.status_level = level;
+        if level == StatusLevel::Error {
+            self.last_error = Some(self.status_line.clone());
+        }
+    }
+
+    fn save_settings(&mut self) {
+        if let Err(err) = self.settings.save() {
+            self.set_status(
+                StatusLevel::Error,
+                format!("Не удалось сохранить настройки: {err}"),
+            );
+        }
+    }
+
+    fn choose_dictionary_folder(&mut self, ctx: egui::Context) {
+        if self.is_busy {
+            return;
+        }
+        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+            self.settings.dic_folder = dir;
+            self.save_settings();
+            self.reload_dictionaries_async(ctx);
+        }
+    }
+
     fn has_unsaved_work(&self) -> bool {
         self.source_dirty || self.result_dirty
     }
@@ -940,15 +1040,18 @@ impl DemagogApp {
                 if let Some(index) = chunk {
                     self.last_copied_chunk = Some(index);
                 }
-                self.status_line = success;
+                self.set_status(StatusLevel::Success, success);
             }
             Err(err) => {
-                self.status_line = format!("Не удалось скопировать в буфер обмена: {err}");
+                self.set_status(
+                    StatusLevel::Error,
+                    format!("Не удалось скопировать в буфер обмена: {err}"),
+                );
             }
         }
     }
 
-    fn show_status_left(&mut self, ui: &mut egui::Ui) {
+    fn show_status_left(&mut self, ui: &mut egui::Ui, theme: ThemeMode) {
         if self.is_busy {
             ui.spinner();
             ui.add(
@@ -964,28 +1067,85 @@ impl DemagogApp {
                     .clicked()
                 {
                     cancel.store(true, Ordering::Relaxed);
-                    self.status_line = "Отмена...".to_string();
+                    self.set_status(StatusLevel::Warning, "Отмена...");
                 }
             }
         }
-        let status = ui.label(&self.status_line);
+        let (icon, color) = match self.status_level {
+            StatusLevel::Info => ("", ui.visuals().text_color()),
+            StatusLevel::Success => ("✓ ", palette::success_text(theme)),
+            StatusLevel::Warning => ("⚠ ", palette::warning_text(theme)),
+            StatusLevel::Error => ("✖ ", palette::diff_before(theme)),
+        };
+        let status = ui.add(
+            egui::Label::new(RichText::new(format!("{icon}{}", self.status_line)).color(color))
+                .selectable(true),
+        );
         if !self.dic_load_errors.is_empty() {
             status.on_hover_text(self.dic_load_errors.join("\n"));
+        }
+        if self.status_level != StatusLevel::Error {
+            if let Some(error) = self.last_error.clone() {
+                let chip = ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new("⚠ Ошибка")
+                                .color(palette::diff_before(theme))
+                                .strong(),
+                        )
+                        .frame(false),
+                    )
+                    .on_hover_text(&error);
+                if chip.clicked() {
+                    rfd::MessageDialog::new()
+                        .set_title("Demagog-RS — ошибка")
+                        .set_level(rfd::MessageLevel::Error)
+                        .set_buttons(rfd::MessageButtons::Ok)
+                        .set_description(&error)
+                        .show();
+                }
+                if ui
+                    .small_button("✖")
+                    .on_hover_text("Скрыть ошибку")
+                    .clicked()
+                {
+                    self.last_error = None;
+                }
+            }
         }
     }
 
     fn show_status_counters(&self, ui: &mut egui::Ui, theme: ThemeMode, counters: &str) {
         ui.label(RichText::new(counters).weak());
         if !self.dic_load_errors.is_empty() {
-            ui.label(
-                RichText::new(format!(
-                    "Ошибки загрузки: {}",
-                    self.dic_load_errors.len()
-                ))
-                .color(palette::warning_text(theme))
-                .strong(),
-            )
-            .on_hover_text(self.dic_load_errors.join("\n"));
+            let details = self.dic_load_errors.join("\n");
+            let errors = ui.add(
+                egui::Label::new(
+                    RichText::new(format!(
+                        "Ошибки загрузки: {}",
+                        self.dic_load_errors.len()
+                    ))
+                    .color(palette::warning_text(theme))
+                    .strong(),
+                )
+                .sense(egui::Sense::click()),
+            );
+            errors.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    true,
+                    "Ошибки загрузки словарей",
+                )
+            });
+            if errors.clicked() {
+                rfd::MessageDialog::new()
+                    .set_title("Demagog-RS — ошибки загрузки словарей")
+                    .set_level(rfd::MessageLevel::Warning)
+                    .set_buttons(rfd::MessageButtons::Ok)
+                    .set_description(&details)
+                    .show();
+            }
+            errors.on_hover_text(details);
         }
     }
 
@@ -1005,7 +1165,7 @@ impl DemagogApp {
 
     pub(crate) fn shutdown(&mut self) {
         self.settings.sync_disabled_from_metas(&self.dictionaries);
-        self.settings.save();
+        self.save_settings();
         // Exit immediately so Windows reclaims the ~6.6M heap-allocated dictionary strings
         // in 1ms instead of running sequential HeapFree destructors for 5 seconds.
         std::process::exit(0);
@@ -1116,7 +1276,7 @@ impl DemagogApp {
                     if !self.reformat_result() {
                         self.settings.stress_format = prev_fmt;
                     }
-                    self.settings.save();
+                    self.save_settings();
                 }
 
                 ui.separator();
@@ -1152,7 +1312,7 @@ impl DemagogApp {
                         if ui.selectable_label(candidate == theme, label).clicked() {
                             self.settings.set_theme(candidate);
                             apply_style_settings(ui.ctx(), &self.settings);
-                            self.settings.save();
+                            self.save_settings();
                             ui.close();
                         }
                     }
@@ -1197,11 +1357,11 @@ impl DemagogApp {
                 }
                 + if self.is_busy { 300.0 } else { 40.0 };
             if ui.available_width() < estimate {
-                ui.horizontal_wrapped(|ui| self.show_status_left(ui));
+                ui.horizontal_wrapped(|ui| self.show_status_left(ui, theme));
                 ui.horizontal_wrapped(|ui| self.show_status_counters(ui, theme, &counters));
             } else {
                 ui.horizontal(|ui| {
-                    self.show_status_left(ui);
+                    self.show_status_left(ui, theme);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         self.show_status_counters(ui, theme, &counters);
                     });
@@ -1228,11 +1388,7 @@ impl DemagogApp {
                         .add_enabled(!self.is_busy, egui::Button::new("Папка..."))
                         .clicked()
                     {
-                        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                            self.settings.dic_folder = dir;
-                            self.settings.save();
-                            self.reload_dictionaries_async(ctx.clone());
-                        }
+                        self.choose_dictionary_folder(ctx.clone());
                     }
                     ui.separator();
                     let selected = ui
@@ -1249,7 +1405,7 @@ impl DemagogApp {
                         )
                         .changed()
                     {
-                        self.settings.save();
+                        self.save_settings();
                     }
                 });
 
@@ -1297,7 +1453,46 @@ impl DemagogApp {
                 ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        if self.settings.group_dictionaries_by_type {
+                        if visible.is_empty() {
+                            ui.add_space(8.0);
+                            if !self.dic_search_filter.trim().is_empty() {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Ничего не найдено по запросу «{}».",
+                                        self.dic_search_filter.trim()
+                                    ))
+                                    .weak(),
+                                );
+                                if ui.button("Сбросить фильтр").clicked() {
+                                    self.dic_search_filter.clear();
+                                }
+                            } else if self.dictionaries.is_empty() {
+                                ui.label(
+                                    RichText::new(if self.is_busy {
+                                        "Загрузка словарей..."
+                                    } else {
+                                        "Словари не загружены. Укажите папку со словарями."
+                                    })
+                                    .weak(),
+                                );
+                                if !self.is_busy && ui.button("Указать папку...").clicked() {
+                                    self.choose_dictionary_folder(ctx.clone());
+                                }
+                                if !self.dic_load_errors.is_empty() {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "Ошибок загрузки: {}",
+                                            self.dic_load_errors.len()
+                                        ))
+                                        .color(palette::warning_text(theme))
+                                        .strong(),
+                                    )
+                                    .on_hover_text(self.dic_load_errors.join("\n"));
+                                }
+                            } else {
+                                ui.label(RichText::new("Все словари скрыты фильтром.").weak());
+                            }
+                        } else if self.settings.group_dictionaries_by_type {
                             for tag in DictionaryTag::ALL {
                                 let mut indices: Vec<usize> = visible
                                     .iter()
@@ -1416,7 +1611,7 @@ impl DemagogApp {
                                             .collapsed_dictionary_groups
                                             .retain(|g| g != group_key);
                                     }
-                                    self.settings.save();
+                                    self.save_settings();
                                 }
                             }
                         } else {
@@ -1436,7 +1631,7 @@ impl DemagogApp {
                 if changed_any {
                     self.settings.sync_disabled_from_metas(&self.dictionaries);
                     self.mark_result_stale();
-                    self.settings.save();
+                    self.save_settings();
                 }
             });
 
@@ -1510,11 +1705,13 @@ impl DemagogApp {
                                     }
                                 }
                                 Ok(_) => {
-                                    self.status_line = "Буфер обмена пуст".to_string();
+                                    self.set_status(StatusLevel::Warning, "Буфер обмена пуст");
                                 }
                                 Err(err) => {
-                                    self.status_line =
-                                        format!("Не удалось прочитать буфер обмена: {err}");
+                                    self.set_status(
+                                        StatusLevel::Error,
+                                        format!("Не удалось прочитать буфер обмена: {err}"),
+                                    );
                                 }
                             }
                         }
@@ -1689,12 +1886,13 @@ impl DemagogApp {
                             .changed();
                         if paragraphs_changed {
                             self.rechunk_result();
-                            self.settings.save();
+                            self.save_settings();
                         }
                     });
                     self.show_stale_banner(ui, theme);
                     ui.separator();
 
+                    let mut copied_status: Option<(StatusLevel, String)> = None;
                     ScrollArea::vertical().show(ui, |ui| {
                         if self.document.chunks.is_empty() {
                             ui.label("Нажмите «Обработать книгу», чтобы нарезать текст на чанки по границам предложений. Чанк можно скопировать отдельно, а все — экспортировать в JSON для ComfyUI.");
@@ -1738,15 +1936,21 @@ impl DemagogApp {
                                             {
                                                 Ok(()) => {
                                                     self.last_copied_chunk = Some(idx);
-                                                    self.status_line = format!(
-                                                        "Чанк #{} скопирован в буфер обмена",
-                                                        idx + 1
-                                                    );
+                                                    copied_status = Some((
+                                                        StatusLevel::Success,
+                                                        format!(
+                                                            "Чанк #{} скопирован в буфер обмена",
+                                                            idx + 1
+                                                        ),
+                                                    ));
                                                 }
                                                 Err(err) => {
-                                                    self.status_line = format!(
-                                                        "Не удалось скопировать чанк: {err}"
-                                                    );
+                                                    copied_status = Some((
+                                                        StatusLevel::Error,
+                                                        format!(
+                                                            "Не удалось скопировать чанк: {err}"
+                                                        ),
+                                                    ));
                                                 }
                                             }
                                         }
@@ -1761,6 +1965,9 @@ impl DemagogApp {
                             ui.add_space(6.0);
                         }
                     });
+                    if let Some((level, text)) = copied_status {
+                        self.set_status(level, text);
+                    }
                 }
 
                 ActiveTab::DiffAndStats => {
@@ -1932,11 +2139,7 @@ impl DemagogApp {
                                     )
                                     .clicked()
                                 {
-                                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                                        self.settings.dic_folder = dir;
-                                        self.settings.save();
-                                        self.reload_dictionaries_async(ctx.clone());
-                                    }
+                                    self.choose_dictionary_folder(ctx.clone());
                                 }
                             });
                             ui.end_row();
@@ -1944,7 +2147,7 @@ impl DemagogApp {
 
                     if style_changed {
                         apply_style_settings(&ctx, &self.settings);
-                        self.settings.save();
+                        self.save_settings();
                     }
 
                     ui.add_space(18.0);
