@@ -10,7 +10,7 @@ use crate::domain::{
     PipelineReport, StressFormat, ThemeMode,
 };
 use crate::engine::loader::{load_dictionaries_parallel, CompiledDictionary, DictionaryLoadReport};
-use crate::io::book_reader::CompositeBookReader;
+use crate::io::book_reader::{CompositeBookReader, SUPPORTED_BOOK_FORMATS, can_read_book};
 use crate::ports::{DocumentReader, StressFormatter, TextChunker, TextProcessor};
 use crate::services::chunker::SentenceAwareChunker;
 use crate::services::pipeline::ProcessingPipeline;
@@ -34,6 +34,78 @@ enum StatusLevel {
     Error,
 }
 
+#[derive(Debug, Clone)]
+struct ResultState {
+    dirty: bool,
+    stale: bool,
+    edited: bool,
+    format: StressFormat,
+}
+
+impl ResultState {
+    fn new(format: StressFormat) -> Self {
+        Self {
+            dirty: false,
+            stale: false,
+            edited: false,
+            format,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.dirty = false;
+        self.stale = false;
+        self.edited = false;
+    }
+
+    fn mark_computed(&mut self, format: StressFormat) {
+        self.dirty = true;
+        self.stale = false;
+        self.edited = false;
+        self.format = format;
+    }
+
+    fn mark_edited(&mut self) {
+        self.dirty = true;
+        self.edited = true;
+    }
+
+    fn mark_saved(&mut self) {
+        self.dirty = false;
+        self.edited = false;
+    }
+
+    fn mark_exported(&mut self) {
+        if !self.edited {
+            self.dirty = false;
+        }
+    }
+
+    fn mark_rechunked(&mut self) {
+        self.dirty = true;
+    }
+
+    fn mark_stale(&mut self) {
+        self.stale = true;
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    fn is_stale(&self) -> bool {
+        self.stale
+    }
+
+    fn is_edited(&self) -> bool {
+        self.edited
+    }
+
+    fn format(&self) -> StressFormat {
+        self.format
+    }
+}
+
 pub struct DemagogApp {
     settings: AppSettings,
     dictionaries: Vec<DictionaryMeta>,
@@ -54,10 +126,7 @@ pub struct DemagogApp {
     capture_diff_on_run: bool,
     dic_load_errors: Vec<String>,
     source_dirty: bool,
-    result_dirty: bool,
-    result_stale: bool,
-    result_edited: bool,
-    result_format: StressFormat,
+    result_state: ResultState,
     chunk_apply_pending: bool,
     cancel_flag: Option<Arc<AtomicBool>>,
     find_open: bool,
@@ -138,10 +207,7 @@ impl DemagogApp {
             capture_diff_on_run: false,
             dic_load_errors: Vec::new(),
             source_dirty: false,
-            result_dirty: false,
-            result_stale: false,
-            result_edited: false,
-            result_format,
+            result_state: ResultState::new(result_format),
             chunk_apply_pending: false,
             cancel_flag: None,
             find_open: false,
@@ -241,7 +307,7 @@ impl DemagogApp {
             self.set_status(StatusLevel::Warning, "Не выбран ни один словарь!");
             return;
         }
-        if self.result_edited
+        if self.result_state.is_edited()
             && !confirm_destructive(
                 "Запустить обработку заново?\nРучные правки в результате будут потеряны.",
             )
@@ -263,7 +329,6 @@ impl DemagogApp {
 
         let input_text = self.document.raw_text.clone();
         let stress_format = self.settings.stress_format;
-        self.result_format = stress_format;
         let chunk_config = self.settings.chunk_config.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancel_flag = Some(Arc::clone(&cancel));
@@ -348,11 +413,7 @@ impl DemagogApp {
                                 };
                                 pending_status = Some((level, status));
                                 self.dic_load_errors = errors;
-                                if !self.document.processed_text.is_empty()
-                                    || !self.document.chunks.is_empty()
-                                {
-                                    self.result_stale = true;
-                                }
+                                self.result_state.mark_stale();
                                 self.is_busy = false;
                                 self.progress_ratio = 1.0;
                                 finished = true;
@@ -384,9 +445,7 @@ impl DemagogApp {
                                             d.last_replacements = None;
                                         }
                                         self.source_dirty = false;
-                                        self.result_dirty = false;
-                                        self.result_stale = false;
-                                        self.result_edited = false;
+                                        self.result_state.reset();
                                         self.find_dirty = true;
                                     }
                                     Err(err) => {
@@ -437,9 +496,8 @@ impl DemagogApp {
                                     self.diff_cache_valid = false;
                                     let had_events = !result.report.events.is_empty();
                                     self.report = result.report;
-                                    self.result_dirty = true;
-                                    self.result_stale = false;
-                                    self.result_edited = false;
+                                    self.result_state
+                                        .mark_computed(self.settings.stress_format);
                                     self.last_copied_chunk = None;
                                     self.find_dirty = true;
                                     self.cancel_flag = None;
@@ -508,7 +566,10 @@ impl DemagogApp {
         }
 
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("Книги и текст", &["txt", "fb2", "epub", "docx", "zip", "md"])
+            .add_filter(
+                "Книги и текст",
+                &["txt", "fb2", "epub", "docx", "zip", "md", "log"],
+            )
             .pick_file()
         else {
             return;
@@ -521,11 +582,8 @@ impl DemagogApp {
         if self.is_busy {
             return;
         }
-        if !is_supported_book_path(&path) {
-            self.set_status(
-                StatusLevel::Warning,
-                "Формат не поддерживается. Выберите TXT, FB2, EPUB, DOCX, ZIP или MD.",
-            );
+        if !can_read_book(&path) {
+            self.set_status(StatusLevel::Warning, SUPPORTED_BOOK_FORMATS.to_string());
             return;
         }
         if self.has_unsaved_work()
@@ -653,12 +711,9 @@ impl DemagogApp {
         }
         let Some(path) = dropped
             .into_iter()
-            .find(|path| is_supported_book_path(path))
+            .find(|path| can_read_book(path))
         else {
-            self.set_status(
-                StatusLevel::Warning,
-                "Поддерживаются TXT, FB2, EPUB, DOCX, ZIP и MD",
-            );
+            self.set_status(StatusLevel::Warning, SUPPORTED_BOOK_FORMATS.to_string());
             return;
         };
         self.load_book(path, ctx.clone());
@@ -883,7 +938,7 @@ impl DemagogApp {
         {
             match std::fs::write(&path, &self.document.processed_text) {
                 Ok(_) => {
-                    self.result_dirty = false;
+                    self.result_state.mark_saved();
                     self.set_status(
                         StatusLevel::Success,
                         format!("Сохранено в {}", path.display()),
@@ -955,14 +1010,16 @@ impl DemagogApp {
             }
             let payload = ExportPayload {
                 title: &self.document.title,
-                stress_format: self.result_format.label(),
+                stress_format: self.result_state.format().label(),
                 chunk_count: self.document.chunks.len(),
                 chunks: &self.document.chunks,
             };
             if let Ok(json) = serde_json::to_string_pretty(&payload) {
                 match std::fs::write(&path, json) {
                     Ok(_) => {
-                        self.result_dirty = false;
+                        // Chunks do not contain manual edits to processed_text,
+                        // so an edited result stays dirty after exporting.
+                        self.result_state.mark_exported();
                         self.set_status(
                             StatusLevel::Success,
                             format!("Чанки экспортированы в {}", path.display()),
@@ -984,14 +1041,14 @@ impl DemagogApp {
             return true;
         }
         if self.raw_pipeline_output.is_empty() {
-            self.result_stale = true;
+            self.result_state.mark_stale();
             self.set_status(
                 StatusLevel::Warning,
                 "Результат нельзя пересобрать: он уже снят с конвейера — обработайте книгу заново",
             );
             return false;
         }
-        if self.result_edited
+        if self.result_state.is_edited()
             && !confirm_destructive(
                 "Пересобрать результат по текущему формату?\nРучные правки в результате будут потеряны.",
             )
@@ -1002,9 +1059,9 @@ impl DemagogApp {
         self.document.processed_text =
             formatter.format_stress(&self.raw_pipeline_output, self.settings.stress_format);
         self.refresh_processed_char_count();
-        self.result_format = self.settings.stress_format;
+        self.result_state
+            .mark_computed(self.settings.stress_format);
         self.rechunk_result();
-        self.result_edited = false;
         true
     }
 
@@ -1020,7 +1077,7 @@ impl DemagogApp {
         }
         self.last_copied_chunk = None;
         self.chunk_render_limit = CHUNK_BATCH;
-        self.result_dirty = true;
+        self.result_state.mark_rechunked();
         self.find_dirty = true;
     }
 
@@ -1082,17 +1139,17 @@ impl DemagogApp {
     }
 
     fn has_unsaved_work(&self) -> bool {
-        self.source_dirty || self.result_dirty
+        self.source_dirty || self.result_state.is_dirty()
     }
 
     fn mark_result_stale(&mut self) {
         if !self.document.processed_text.is_empty() || !self.document.chunks.is_empty() {
-            self.result_stale = true;
+            self.result_state.mark_stale();
         }
     }
 
     fn confirm_stale_result(&self, action: &str) -> bool {
-        if !self.result_stale {
+        if !self.result_state.is_stale() {
             return true;
         }
         confirm_destructive(&format!(
@@ -1230,7 +1287,7 @@ impl DemagogApp {
     }
 
     fn show_stale_banner(&self, ui: &mut egui::Ui, theme: ThemeMode) {
-        if !self.result_stale {
+        if !self.result_state.is_stale() {
             return;
         }
         ui.add(
@@ -1950,8 +2007,7 @@ impl DemagogApp {
                             .layouter(&mut layouter)
                             .show(ui);
                         if output.response.changed() {
-                            self.result_dirty = true;
-                            self.result_edited = true;
+                            self.result_state.mark_edited();
                             self.refresh_processed_char_count();
                             self.find_dirty = true;
                             self.find_last_edit = Instant::now();
@@ -2714,17 +2770,6 @@ fn preset_enables(preset: DictionaryPreset, tag: DictionaryTag, name: &str) -> b
     }
 }
 
-fn is_supported_book_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| {
-            matches!(
-                ext.to_ascii_lowercase().as_str(),
-                "txt" | "fb2" | "epub" | "docx" | "zip" | "md"
-            )
-        })
-}
-
 fn editor_line_height(font_size: f32) -> f32 {
     font_size * 1.45
 }
@@ -2884,20 +2929,109 @@ mod tests {
         for name in [
             "book.txt",
             "book.FB2",
+            "book.fb2.zip",
             "book.epub",
             "book.docx",
             "book.zip",
             "book.MD",
+            "book.log",
         ] {
-            assert!(is_supported_book_path(Path::new(name)), "{name}");
+            assert!(can_read_book(Path::new(name)), "{name}");
         }
     }
 
     #[test]
     fn rejects_other_files() {
         for name in ["cover.png", "book", "book.rtf"] {
-            assert!(!is_supported_book_path(Path::new(name)), "{name}");
+            assert!(!can_read_book(Path::new(name)), "{name}");
         }
+    }
+
+    #[test]
+    fn result_state_starts_clean() {
+        let state = ResultState::new(StressFormat::PlusBeforeVowel);
+        assert!(!state.is_dirty());
+        assert!(!state.is_stale());
+        assert!(!state.is_edited());
+        assert_eq!(state.format(), StressFormat::PlusBeforeVowel);
+    }
+
+    #[test]
+    fn computed_result_is_dirty_but_not_edited_or_stale() {
+        let mut state = ResultState::new(StressFormat::PlusBeforeVowel);
+        state.mark_stale();
+        state.mark_computed(StressFormat::AcuteAccent);
+        assert!(state.is_dirty());
+        assert!(!state.is_stale());
+        assert!(!state.is_edited());
+        assert_eq!(state.format(), StressFormat::AcuteAccent);
+    }
+
+    #[test]
+    fn editing_marks_result_dirty_and_edited() {
+        let mut state = ResultState::new(StressFormat::PlusBeforeVowel);
+        state.mark_computed(StressFormat::PlusBeforeVowel);
+        state.mark_saved();
+        state.mark_edited();
+        assert!(state.is_dirty());
+        assert!(state.is_edited());
+    }
+
+    #[test]
+    fn saving_clears_both_dirty_and_edited_flags() {
+        let mut state = ResultState::new(StressFormat::PlusBeforeVowel);
+        state.mark_computed(StressFormat::PlusBeforeVowel);
+        state.mark_edited();
+        state.mark_saved();
+        assert!(!state.is_dirty());
+        assert!(!state.is_edited());
+    }
+
+    #[test]
+    fn rechunking_keeps_manual_edit_status() {
+        let mut state = ResultState::new(StressFormat::PlusBeforeVowel);
+        state.mark_computed(StressFormat::PlusBeforeVowel);
+        state.mark_saved();
+        state.mark_edited();
+        state.mark_rechunked();
+        assert!(state.is_dirty());
+        assert!(state.is_edited());
+    }
+
+    #[test]
+    fn exporting_clears_dirty_only_for_unedited_results() {
+        let mut state = ResultState::new(StressFormat::PlusBeforeVowel);
+        state.mark_computed(StressFormat::PlusBeforeVowel);
+        state.mark_exported();
+        assert!(!state.is_dirty());
+
+        state.mark_edited();
+        state.mark_exported();
+        assert!(state.is_dirty());
+        assert!(state.is_edited());
+    }
+
+    #[test]
+    fn stale_result_does_not_become_dirty_on_its_own() {
+        let mut state = ResultState::new(StressFormat::PlusBeforeVowel);
+        state.mark_computed(StressFormat::PlusBeforeVowel);
+        state.mark_saved();
+        state.mark_stale();
+        assert!(state.is_stale());
+        assert!(!state.is_dirty());
+    }
+
+    #[test]
+    fn reset_clears_flags_but_keeps_format() {
+        let mut state = ResultState::new(StressFormat::PlusBeforeVowel);
+        state.mark_computed(StressFormat::AcuteAccent);
+        state.mark_edited();
+        state.mark_stale();
+        state.reset();
+        assert!(!state.is_dirty());
+        assert!(!state.is_stale());
+        assert!(!state.is_edited());
+        assert_eq!(state.format(), StressFormat::AcuteAccent);
     }
 
     #[test]

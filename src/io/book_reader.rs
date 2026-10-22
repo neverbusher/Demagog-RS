@@ -9,6 +9,13 @@ use crate::domain::BookDocument;
 use crate::io::encoding::{decode_text_bytes, looks_like_text_bytes};
 use crate::ports::DocumentReader;
 
+pub const SUPPORTED_BOOK_FORMATS: &str =
+    "Поддерживаются TXT, MD, LOG, FB2, EPUB, DOCX и ZIP с FB2 внутри.";
+
+pub fn can_read_book(path: &Path) -> bool {
+    CompositeBookReader::new().can_read(path)
+}
+
 pub struct TxtDocumentReader;
 
 impl DocumentReader for TxtDocumentReader {
@@ -22,11 +29,12 @@ impl DocumentReader for TxtDocumentReader {
     fn read_document(&self, path: &Path) -> Result<BookDocument, String> {
         let bytes = std::fs::read(path).map_err(|e| format!("Ошибка чтения файла: {e}"))?;
         if !looks_like_text_bytes(&bytes) {
-            return Err(
-                "Файл не похож на текст. Выберите TXT, MD, FB2, EPUB или DOCX.".to_string(),
-            );
+            return Err(format!("Файл не похож на текст. {SUPPORTED_BOOK_FORMATS}"));
         }
         let (text, _) = decode_text_bytes(&bytes);
+        if text.trim().is_empty() {
+            return Err("Файл пуст или не содержит читаемого текста.".to_string());
+        }
         Ok(BookDocument {
             title: file_stem_title(path),
             source_path: Some(path.to_path_buf()),
@@ -42,7 +50,7 @@ pub struct Fb2DocumentReader;
 impl DocumentReader for Fb2DocumentReader {
     fn can_read(&self, path: &Path) -> bool {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
-        name.ends_with(".fb2") || name.ends_with(".fb2.zip")
+        name.ends_with(".fb2") || name.ends_with(".zip")
     }
 
     fn read_document(&self, path: &Path) -> Result<BookDocument, String> {
@@ -67,6 +75,9 @@ impl DocumentReader for Fb2DocumentReader {
         };
 
         let text = extract_xml_paragraphs(&bytes, &["p", "v", "subtitle", "title", "text-author"], &["binary", "description"])?;
+        if text.trim().is_empty() {
+            return Err("В FB2 не найден текст книги.".to_string());
+        }
         Ok(BookDocument {
             title: file_stem_title(path),
             source_path: Some(path.to_path_buf()),
@@ -127,15 +138,19 @@ impl DocumentReader for DocxDocumentReader {
                     }
                 }
                 Ok(Event::Eof) => break,
-                Err(_) => break,
+                Err(e) => return Err(format!("Ошибка разбора document.xml: {e}")),
                 _ => {}
             }
         }
 
+        let text = out.trim().to_string();
+        if text.is_empty() {
+            return Err("В DOCX не найден текст.".to_string());
+        }
         Ok(BookDocument {
             title: file_stem_title(path),
             source_path: Some(path.to_path_buf()),
-            raw_text: out.trim().to_string(),
+            raw_text: text,
             processed_text: String::new(),
             chunks: Vec::new(),
         })
@@ -188,6 +203,9 @@ impl DocumentReader for EpubDocumentReader {
             }
         }
 
+        if full_text.trim().is_empty() {
+            return Err("В EPUB не найден текст: файлы внутри повреждены или пусты.".to_string());
+        }
         Ok(BookDocument {
             title: file_stem_title(path),
             source_path: Some(path.to_path_buf()),
@@ -226,15 +244,22 @@ impl DocumentReader for CompositeBookReader {
                 return r.read_document(path);
             }
         }
-        TxtDocumentReader.read_document(path)
+        Err(format!("Формат файла не поддерживается. {SUPPORTED_BOOK_FORMATS}"))
     }
 }
 
 fn file_stem_title(path: &Path) -> String {
-    path.file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("Без названия")
-        .to_string()
+    let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    let base = if file_name.to_ascii_lowercase().ends_with(".fb2.zip") {
+        &file_name[..file_name.len() - ".fb2.zip".len()]
+    } else {
+        path.file_stem().and_then(|s| s.to_str()).unwrap_or("")
+    };
+    if base.is_empty() {
+        "Без названия".to_string()
+    } else {
+        base.to_string()
+    }
 }
 
 fn extract_xml_paragraphs(
@@ -283,7 +308,7 @@ fn extract_xml_paragraphs(
                 }
             }
             Ok(Event::Eof) => break,
-            Err(_) => break,
+            Err(e) => return Err(format!("Ошибка разбора XML: {e}")),
             _ => {}
         }
     }
@@ -299,4 +324,70 @@ fn decode_xml_with_declared_encoding(bytes: &[u8]) -> String {
         return crate::io::encoding::normalize_line_endings(cow.into_owned());
     }
     decode_text_bytes(bytes).0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_supported_book_paths_case_insensitively() {
+        for name in [
+            "book.txt",
+            "book.MD",
+            "book.log",
+            "book.FB2",
+            "book.fb2.zip",
+            "book.zip",
+            "book.epub",
+            "book.docx",
+        ] {
+            assert!(can_read_book(Path::new(name)), "{name}");
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_book_paths() {
+        for name in ["cover.png", "book", "book.rtf"] {
+            assert!(!can_read_book(Path::new(name)), "{name}");
+        }
+    }
+
+    #[test]
+    fn title_strips_compound_fb2_zip_extension() {
+        assert_eq!(file_stem_title(Path::new("Война и мир.fb2.zip")), "Война и мир");
+        assert_eq!(file_stem_title(Path::new("BOOK.FB2.ZIP")), "BOOK");
+        assert_eq!(file_stem_title(Path::new("book.zip")), "book");
+        assert_eq!(file_stem_title(Path::new("book.fb2")), "book");
+    }
+
+    #[test]
+    fn extracts_fb2_paragraphs_and_skips_service_sections() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<FictionBook><description><title-info><book-title>Служебное</book-title></title-info></description>
+<body><section><title><p>Глава</p></title><p>Первый абзац.</p><p>Второй абзац.</p></section></body>
+<binary>AAEC</binary></FictionBook>"#;
+
+        let text = extract_xml_paragraphs(
+            xml.as_bytes(),
+            &["p", "v", "subtitle", "title", "text-author"],
+            &["binary", "description"],
+        )
+        .expect("well-formed FB2");
+
+        assert!(text.contains("Глава"));
+        assert!(text.contains("Первый абзац."));
+        assert!(text.contains("Второй абзац."));
+        assert!(!text.contains("Служебное"));
+        assert!(!text.contains("AAEC"));
+    }
+
+    #[test]
+    fn malformed_fb2_reports_an_error_instead_of_empty_text() {
+        let xml = "<FictionBook><body><p>Текст</body></FictionBook>";
+        assert!(
+            extract_xml_paragraphs(xml.as_bytes(), &["p"], &["description"]).is_err(),
+            "broken XML must not silently become an empty book"
+        );
+    }
 }
