@@ -155,7 +155,7 @@ fn run_cli_or_bench(args: &[String]) {
     }
     println!("------------------------------------------------------------");
     println!(
-        "ИТОГО: {} мс | Всего замен: {} | Чанков для Drama3: {}",
+        "ИТОГО: {} мс | Всего замен: {} | Чанков: {}",
         result.report.total_ms,
         result.report.total_replacements,
         result.chunks.len()

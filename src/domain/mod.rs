@@ -21,7 +21,7 @@ impl ThemeMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StressFormat {
-    /// Знак '+' перед ударной гласной: з+амок, +Август (для FishAudio Drama3 / Silero / F5-TTS)
+    /// Знак '+' перед ударной гласной: з+амок, +Август (для TTS)
     PlusBeforeVowel,
     /// Комбинируемый знак ударения Юникода U+0301 после гласной: за́мок
     AcuteAccent,
@@ -32,7 +32,7 @@ pub enum StressFormat {
 impl StressFormat {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::PlusBeforeVowel => "+ перед гласной (з+амок) [Drama3 / Silero]",
+            Self::PlusBeforeVowel => "+ перед гласной (з+амок)",
             Self::AcuteAccent => "Ударение Юникода (за́мок) [U+0301]",
             Self::CleanYoOnly => "Без ударений — только Ё (замок)",
         }

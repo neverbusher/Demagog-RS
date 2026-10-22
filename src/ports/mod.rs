@@ -21,7 +21,7 @@ pub trait StressFormatter: Send + Sync {
     fn format_stress(&self, text: &str, format: StressFormat) -> String;
 }
 
-/// Single Responsibility: Splits processed text into sentence-safe chunks for ComfyUI / Drama3.
+/// Single Responsibility: Splits processed text into sentence-safe chunks for TTS.
 pub trait TextChunker: Send + Sync {
     fn split_into_chunks(&self, text: &str, config: &ChunkConfig) -> Vec<String>;
 }

@@ -924,7 +924,7 @@ impl DemagogApp {
         if !self.confirm_stale_result("Сохранить его всё равно") {
             return;
         }
-        let default_name = format!("{}_drama3.txt", self.document.title);
+        let default_name = format!("{}_processed.txt", self.document.title);
         if let Some(path) = rfd::FileDialog::new()
             .set_file_name(&default_name)
             .add_filter("Текстовый файл UTF-8", &["txt"])
