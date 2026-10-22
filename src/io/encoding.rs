@@ -45,6 +45,49 @@ fn looks_like_utf16le_no_bom(bytes: &[u8]) -> bool {
     null_or_cyr_high * 10 >= sample_pairs * 8
 }
 
+pub fn looks_like_text_bytes(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return true;
+    }
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF])
+        || bytes.starts_with(&[0xFF, 0xFE])
+        || bytes.starts_with(&[0xFE, 0xFF])
+        || looks_like_utf16le_no_bom(bytes)
+    {
+        return true;
+    }
+
+    const BINARY_SIGNATURES: &[&[u8]] = &[
+        b"\x89PNG\r\n\x1a\n",
+        b"\xFF\xD8\xFF",
+        b"%PDF-",
+        b"PK\x03\x04",
+        b"MZ",
+        b"GIF87a",
+        b"GIF89a",
+        b"\x7FELF",
+        b"Rar!\x1a\x07",
+    ];
+    if BINARY_SIGNATURES
+        .iter()
+        .any(|signature| bytes.starts_with(signature))
+    {
+        return false;
+    }
+
+    let sample = &bytes[..bytes.len().min(8192)];
+    let mut control = 0usize;
+    for &byte in sample {
+        if byte == 0 {
+            return false;
+        }
+        if byte < 0x09 || (byte > 0x0d && byte < 0x20) {
+            control += 1;
+        }
+    }
+    control * 100 <= sample.len() * 2
+}
+
 pub fn normalize_line_endings(mut s: String) -> String {
     if !s.contains('\r') {
         return s;
@@ -77,5 +120,15 @@ mod tests {
         let (text, encoding) = decode_text_bytes(bytes);
         assert_eq!(text, "one\ntwo\nthree");
         assert_eq!(encoding, "UTF-8 BOM");
+    }
+
+    #[test]
+    fn detects_text_but_rejects_binary_data() {
+        assert!(looks_like_text_bytes("Привет, мир!\n".as_bytes()));
+        assert!(looks_like_text_bytes(&[0xCF, 0xF0, 0xE8, 0xE2, 0xE5, 0xF2]));
+        assert!(looks_like_text_bytes(&[0xFF, 0xFE, 0x1F, 0x04]));
+        assert!(!looks_like_text_bytes(b"\x89PNG\r\n\x1a\n"));
+        assert!(!looks_like_text_bytes(b"MZ\x90\x00"));
+        assert!(!looks_like_text_bytes(&[0x00, 0x01, 0x02, 0x03]));
     }
 }

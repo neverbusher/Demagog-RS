@@ -6,7 +6,7 @@ use quick_xml::reader::Reader;
 use zip::ZipArchive;
 
 use crate::domain::BookDocument;
-use crate::io::encoding::decode_text_bytes;
+use crate::io::encoding::{decode_text_bytes, looks_like_text_bytes};
 use crate::ports::DocumentReader;
 
 pub struct TxtDocumentReader;
@@ -21,6 +21,11 @@ impl DocumentReader for TxtDocumentReader {
 
     fn read_document(&self, path: &Path) -> Result<BookDocument, String> {
         let bytes = std::fs::read(path).map_err(|e| format!("Ошибка чтения файла: {e}"))?;
+        if !looks_like_text_bytes(&bytes) {
+            return Err(
+                "Файл не похож на текст. Выберите TXT, MD, FB2, EPUB или DOCX.".to_string(),
+            );
+        }
         let (text, _) = decode_text_bytes(&bytes);
         Ok(BookDocument {
             title: file_stem_title(path),

@@ -521,6 +521,13 @@ impl DemagogApp {
         if self.is_busy {
             return;
         }
+        if !is_supported_book_path(&path) {
+            self.set_status(
+                StatusLevel::Warning,
+                "Формат не поддерживается. Выберите TXT, FB2, EPUB, DOCX, ZIP или MD.",
+            );
+            return;
+        }
         if self.has_unsaved_work()
             && !confirm_destructive(
                 "Открыть другую книгу?\nНесохранённые изменения будут потеряны.",
@@ -1327,26 +1334,30 @@ impl DemagogApp {
 
                 let prev_fmt = self.settings.stress_format;
                 ui.add_enabled_ui(!self.is_busy, |ui| {
-                    egui::ComboBox::from_id_salt("stress_format_combo")
-                        .selected_text(format!(
-                            "Формат: {}",
-                            self.settings.stress_format.short_label()
-                        ))
-                        .show_ui(ui, |ui| {
-                            for fmt in [
-                                StressFormat::PlusBeforeVowel,
-                                StressFormat::AcuteAccent,
-                                StressFormat::CleanYoOnly,
-                            ] {
-                                ui.selectable_value(
+                    let format_label = format!(
+                        "Формат: {} ▾",
+                        self.settings.stress_format.short_label()
+                    );
+                    ui.menu_button(format_label, |ui| {
+                        for fmt in [
+                            StressFormat::PlusBeforeVowel,
+                            StressFormat::AcuteAccent,
+                            StressFormat::CleanYoOnly,
+                        ] {
+                            if ui
+                                .selectable_value(
                                     &mut self.settings.stress_format,
                                     fmt,
                                     fmt.label(),
-                                );
+                                )
+                                .clicked()
+                            {
+                                ui.close();
                             }
-                        })
-                        .response
-                        .on_hover_text("Формат вывода ударений");
+                        }
+                    })
+                    .response
+                    .on_hover_text("Формат вывода ударений");
                 });
                 if self.settings.stress_format != prev_fmt {
                     if !self.reformat_result() {
@@ -1450,41 +1461,46 @@ impl DemagogApp {
             .default_size(450.0)
             .min_size(340.0)
             .show_inside(ui, |ui| {
-                ui.add_space(4.0);
+                ui.add_space(6.0);
                 ui.heading("📚 Словари");
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .add_enabled(!self.is_busy, egui::Button::new("🔄 Обновить"))
-                        .on_hover_text("Перезагрузить словари с диска")
-                        .clicked()
-                    {
-                        self.reload_dictionaries_async(ctx.clone());
-                    }
-                    if ui
-                        .add_enabled(!self.is_busy, egui::Button::new("Папка..."))
-                        .clicked()
-                    {
-                        self.choose_dictionary_folder(ctx.clone());
-                    }
-                    ui.separator();
-                    let selected = ui
-                        .add_enabled_ui(!self.is_busy, |ui| presets_menu(ui))
-                        .inner;
-                    if let Some(preset) = selected {
-                        self.apply_preset(preset);
-                    }
+                ui.add_space(6.0);
+                ui.scope(|ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .add_enabled(!self.is_busy, egui::Button::new("🔄 Обновить"))
+                            .on_hover_text("Перезагрузить словари с диска")
+                            .clicked()
+                        {
+                            self.reload_dictionaries_async(ctx.clone());
+                        }
+                        if ui
+                            .add_enabled(!self.is_busy, egui::Button::new("Папка..."))
+                            .clicked()
+                        {
+                            self.choose_dictionary_folder(ctx.clone());
+                        }
+                        ui.separator();
+                        let selected = ui
+                            .add_enabled_ui(!self.is_busy, |ui| presets_menu(ui))
+                            .inner;
+                        if let Some(preset) = selected {
+                            self.apply_preset(preset);
+                        }
 
-                    if ui
-                        .checkbox(&mut self.settings.group_dictionaries_by_type, "Группы")
-                        .on_hover_text(
-                            "Группировать словари по типу. Порядок обработки остаётся по нумерации файлов конвейера",
-                        )
-                        .changed()
-                    {
-                        self.save_settings();
-                    }
+                        if ui
+                            .checkbox(&mut self.settings.group_dictionaries_by_type, "Группы")
+                            .on_hover_text(
+                                "Группировать словари по типу. Порядок обработки остаётся по нумерации файлов конвейера",
+                            )
+                            .changed()
+                        {
+                            self.save_settings();
+                        }
+                    });
                 });
 
+                ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     let label = ui.label("Фильтр:");
                     let width = (ui.available_width() - 24.0).max(80.0);
@@ -1509,7 +1525,9 @@ impl DemagogApp {
                     }
                 });
 
+                ui.add_space(8.0);
                 ui.separator();
+                ui.add_space(4.0);
 
                 let filter_low = self.dic_search_filter.to_lowercase();
                 let mut changed_any = false;
@@ -1656,7 +1674,7 @@ impl DemagogApp {
 
                                 let (toggle_response, _header, _body) =
                                     header.body_unindented(|ui| {
-                                        ui.add_space(2.0);
+                                        ui.add_space(4.0);
                                         for idx in indices {
                                             dictionary_card(
                                                 ui,
@@ -1667,7 +1685,7 @@ impl DemagogApp {
                                                 !self.is_busy,
                                             );
                                         }
-                                        ui.add_space(4.0);
+                                        ui.add_space(6.0);
                                     });
 
                                 if filter_low.is_empty() && toggle_response.clicked() {
@@ -2348,7 +2366,7 @@ fn dictionary_card(
     }
 
     egui::Frame::group(ui.style())
-        .inner_margin(egui::Margin::symmetric(10, 4))
+        .inner_margin(egui::Margin::symmetric(10, 5))
         .show(ui, |ui| {
             // Force equal card width: otherwise the frame shrinks
             // to the longest wrapped line and the right edge is ragged.
@@ -2417,7 +2435,7 @@ fn dictionary_card(
                 }
             });
         });
-    ui.add_space(2.0);
+    ui.add_space(3.0);
 }
 
 fn warm_visuals() -> egui::Visuals {
