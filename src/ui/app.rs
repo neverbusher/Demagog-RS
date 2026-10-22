@@ -1141,6 +1141,19 @@ impl DemagogApp {
             egui::Label::new(RichText::new(format!("{icon}{}", self.status_line)).color(color))
                 .selectable(true),
         );
+        status.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Label,
+                true,
+                self.status_line.clone(),
+            )
+        });
+        ui.ctx().accesskit_node_builder(status.id, |node| {
+            node.set_role(egui::accesskit::Role::Status);
+            node.set_live(status_live(self.is_busy, self.status_level));
+            node.set_live_atomic();
+            node.set_label(self.status_line.clone());
+        });
         if !self.dic_load_errors.is_empty() {
             status.on_hover_text(self.dic_load_errors.join("\n"));
         }
@@ -1213,12 +1226,15 @@ impl DemagogApp {
         if !self.result_stale {
             return;
         }
-        ui.label(
-            RichText::new(
-                "⚠ Результат устарел: исходный текст или набор словарей изменились. Обработайте книгу заново.",
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "⚠ Результат устарел: исходный текст или набор словарей изменились. Обработайте текст заново.",
+                )
+                .color(palette::warning_text(theme))
+                .strong(),
             )
-            .color(palette::warning_text(theme))
-            .strong(),
+            .selectable(true),
         );
         ui.add_space(4.0);
     }
@@ -1243,7 +1259,7 @@ impl DemagogApp {
         if ctx.input(|i| i.viewport().close_requested()) && self.has_unsaved_work() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             if confirm_destructive(
-                "Есть несохранённые изменения исходника или результата.\nВыйти без сохранения?",
+                "Есть несохранённые изменения исходного текста или результата.\nВыйти без сохранения?",
             ) {
                 self.shutdown();
             }
@@ -1279,7 +1295,7 @@ impl DemagogApp {
 
                 let (primary_fill, primary_text) = palette::primary_button(theme);
                 let run_btn = egui::Button::new(
-                    RichText::new("⚡ Обработать книгу")
+                    RichText::new("⚡ Обработать")
                         .strong()
                         .color(primary_text),
                 )
@@ -1287,7 +1303,7 @@ impl DemagogApp {
 
                 let run_response = ui
                     .add_enabled(can_run, run_btn)
-                    .on_hover_text("Обработать книгу (Ctrl+Enter)")
+                    .on_hover_text("Обработать исходный текст (Ctrl+Enter)")
                     .on_disabled_hover_text(run_disabled_hint);
                 if run_response.clicked() {
                     self.capture_diff_on_run = false;
@@ -1297,7 +1313,7 @@ impl DemagogApp {
                 if ui
                     .add_enabled(
                         can_run,
-                        egui::Button::new("🔬 С логом замен (Diff)"),
+                        egui::Button::new("🔬 С журналом замен"),
                     )
                     .on_hover_text("Собрать журнал замен (Ctrl+Shift+Enter)")
                     .on_disabled_hover_text(run_disabled_hint)
@@ -1344,7 +1360,7 @@ impl DemagogApp {
                 if ui
                     .add_enabled(
                         !self.document.processed_text.is_empty(),
-                        egui::Button::new("💾 Сохранить TXT"),
+                        egui::Button::new("💾 Сохранить результат"),
                     )
                     .on_hover_text("Сохранить результат в TXT (Ctrl+S)")
                     .on_disabled_hover_text("Сначала обработайте текст")
@@ -1355,7 +1371,7 @@ impl DemagogApp {
                 if ui
                     .add_enabled(
                         !self.document.chunks.is_empty(),
-                        egui::Button::new("📦 Экспорт JSON"),
+                        egui::Button::new("📦 Экспорт чанков"),
                     )
                     .on_hover_text("Экспортировать чанки в JSON (Ctrl+E)")
                     .on_disabled_hover_text("Сначала обработайте текст")
@@ -1723,7 +1739,7 @@ impl DemagogApp {
                     &mut self.active_tab,
                     ActiveTab::DiffAndStats,
                     format!(
-                        "🔬 Отладка замен ({})",
+                        "🔬 Журнал замен ({})",
                         format_num(self.report.total_replacements)
                     ),
                 );
@@ -1741,7 +1757,7 @@ impl DemagogApp {
                     );
                     ui.horizontal_wrapped(|ui| {
                         if ui
-                            .button("💾 Сохранить исходник")
+                            .button("💾 Сохранить исходный текст")
                             .on_hover_text("Сохранить исходный текст в TXT (Ctrl+Shift+S)")
                             .clicked()
                         {
@@ -1855,10 +1871,10 @@ impl DemagogApp {
                         if ui
                             .add_enabled(
                                 has_result,
-                                egui::Button::new("🔄 Заменить исходник результатом"),
+                                egui::Button::new("🔄 Заменить исходный текст"),
                             )
                             .on_hover_text(
-                                "Результат останется на месте, исходный текст будет заменён им",
+                                "Результат останется на месте, текущий исходный текст будет заменён",
                             )
                             .clicked()
                         {
@@ -1962,7 +1978,7 @@ impl DemagogApp {
                     let mut copied_status: Option<(StatusLevel, String)> = None;
                     let chunks_output = ScrollArea::vertical().show(ui, |ui| {
                         if self.document.chunks.is_empty() {
-                            ui.label("Нажмите «Обработать книгу», чтобы нарезать текст на чанки по границам предложений. Чанк можно скопировать отдельно, а все — экспортировать в JSON для ComfyUI.");
+                            ui.label("Нажмите «Обработать», чтобы нарезать текст на чанки по границам предложений. Чанк можно скопировать отдельно, а все — экспортировать в JSON для ComfyUI.");
                         }
                         for (idx, chunk) in self.document.chunks.iter().take(chunk_shown).enumerate() {
                             let is_copied = self.last_copied_chunk == Some(idx);
@@ -2023,10 +2039,13 @@ impl DemagogApp {
                                         }
                                     });
                                     ui.add_space(4.0);
-                                    ui.label(
-                                        RichText::new(chunk)
-                                            .font(editor_font.clone())
-                                            .line_height(Some(line_height)),
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(chunk)
+                                                .font(editor_font.clone())
+                                                .line_height(Some(line_height)),
+                                        )
+                                        .selectable(true),
                                     );
                                 });
                             ui.add_space(6.0);
@@ -2113,10 +2132,10 @@ impl DemagogApp {
                             });
 
                         ui.add_space(14.0);
-                        ui.heading("🔍 Журнал сработавших правил (Diff)");
+                        ui.heading("🔍 Журнал сработавших правил");
                         if self.report.events.is_empty() {
                             ui.label(
-                                "Для записи детальных примеров каждого сработавшего правила нажмите кнопку «🔬 С логом замен (Diff)» на верхней панели.",
+                                "Для записи детальных примеров каждого сработавшего правила нажмите кнопку «🔬 С журналом замен» на верхней панели.",
                             );
                         } else if self.diff_visible.is_empty() {
                             ui.label("Ничего не найдено по фильтру замен.");
@@ -2136,16 +2155,27 @@ impl DemagogApp {
                                     {
                                         let ev = &self.report.events[event_index];
                                         ui.label(&ev.dictionary_name);
-                                        ui.label(RichText::new(&ev.rule_summary).monospace());
-                                        ui.label(
-                                            RichText::new(&ev.before_snippet)
-                                                .color(palette::diff_before(theme))
-                                                .font(editor_font.clone()),
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(&ev.rule_summary).monospace(),
+                                            )
+                                            .selectable(true),
                                         );
-                                        ui.label(
-                                            RichText::new(&ev.after_snippet)
-                                                .color(palette::diff_after(theme))
-                                                .font(editor_font.clone()),
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(&ev.before_snippet)
+                                                    .color(palette::diff_before(theme))
+                                                    .font(editor_font.clone()),
+                                            )
+                                            .selectable(true),
+                                        );
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(&ev.after_snippet)
+                                                    .color(palette::diff_after(theme))
+                                                    .font(editor_font.clone()),
+                                            )
+                                            .selectable(true),
                                         );
                                         ui.end_row();
                                     }
@@ -2252,17 +2282,45 @@ impl DemagogApp {
                         self.save_settings();
                     }
 
+                    ui.add_space(12.0);
+                    ui.separator();
+                    let reset = ui.add_enabled(
+                        !self.is_busy,
+                        egui::Button::new("🔄 Сбросить настройки..."),
+                    );
+                    if reset
+                        .on_disabled_hover_text("Доступно после завершения обработки")
+                        .clicked()
+                        && confirm_destructive(
+                            "Сбросить настройки интерфейса и обработки?\nТекст останется, выбор словарей вернётся к стандартному.",
+                        )
+                    {
+                        self.settings = reset_settings_preserving_folder(&self.settings);
+                        for d in &mut self.dictionaries {
+                            d.enabled = true;
+                        }
+                        self.settings.sync_disabled_from_metas(&self.dictionaries);
+                        self.save_settings();
+                        self.mark_result_stale();
+                        apply_style_settings(&ctx, &self.settings);
+                        self.set_status(StatusLevel::Success, "Настройки сброшены");
+                    }
+
                     ui.add_space(18.0);
                     ui.separator();
                     egui::CollapsingHeader::new("ℹ Справка по категориям словарей")
                         .default_open(false)
                         .show(ui, |ui| {
-                            ui.label("• [ЧИСЛА И ДАТЫ] — переводит числа и даты в слова (1995 → тысяча девятьсот девяносто пятом).");
-                            ui.label("• [Ё-ФИКАЦИЯ] — расставляет букву «ё» (все/всё и 337 тыс. слов из edge_Yo_.dic). Знаков «+» не ставит.");
-                            ui.label("• [ОМОГРАФЫ (загл.)] — находит омографы по контексту и выделяет ударную гласную заглавной буквой (зАмок / замОк, зЕмли).");
-                            ui.label("• [ЗАГЛАВНЫЕ → '+'] (словари 69 и 70) — переводит заглавные ударные буквы омографов в знак «+» (зЕмли → з+емли).");
-                            ui.label("• [УДАРЕНИЯ '+'] и [ОРФОЭПИЯ '+' (2.9М)] (словари 35, 67, 71..75, 95.NEW) — сами напрямую ставят знак «+» в обычных словах. Именно из-за 95.NEW и 67 в тексте остаются «+», если выключить только словарь 69.");
-                            ui.label("💡 Совет: если не нужны знаки «+», выберите в меню «Пресеты» вариант «Числа + Ё (без ударений)» или формат выхода «Без ударений — только Ё» сверху.");
+                            for text in [
+                                "• [ЧИСЛА И ДАТЫ] — переводит числа и даты в слова (1995 → тысяча девятьсот девяносто пятом).",
+                                "• [Ё-ФИКАЦИЯ] — расставляет букву «ё» (все/всё и 337 тыс. слов из edge_Yo_.dic). Знаков «+» не ставит.",
+                                "• [ОМОГРАФЫ (загл.)] — находит омографы по контексту и выделяет ударную гласную заглавной буквой (зАмок / замОк, зЕмли).",
+                                "• [ЗАГЛАВНЫЕ → '+'] (словари 69 и 70) — переводит заглавные ударные буквы омографов в знак «+» (зЕмли → з+емли).",
+                                "• [УДАРЕНИЯ '+'] и [ОРФОЭПИЯ '+' (2.9М)] (словари 35, 67, 71..75, 95.NEW) — сами напрямую ставят знак «+» в обычных словах. Именно из-за 95.NEW и 67 в тексте остаются «+», если выключить только словарь 69.",
+                                "💡 Совет: если не нужны знаки «+», выберите в меню «Пресеты» вариант «Числа + Ё (без ударений)» или формат выхода «Без ударений — только Ё» сверху.",
+                            ] {
+                                ui.add(egui::Label::new(text).selectable(true));
+                            }
                         });
                 }
             }
@@ -2278,8 +2336,19 @@ fn dictionary_card(
     theme: ThemeMode,
     interactive: bool,
 ) {
+    let mut details = d.description.clone();
+    details.push_str(&format!(
+        "\n{} • {} правил • {}",
+        d.kind.badge(),
+        format_num(d.rule_count),
+        d.encoding
+    ));
+    if let (Some(ms), Some(repl)) = (d.last_ms, d.last_replacements) {
+        details.push_str(&format!("\nПоследний запуск: {ms} мс, замен: {repl}"));
+    }
+
     egui::Frame::group(ui.style())
-        .inner_margin(egui::Margin::symmetric(10, 6))
+        .inner_margin(egui::Margin::symmetric(10, 4))
         .show(ui, |ui| {
             // Force equal card width: otherwise the frame shrinks
             // to the longest wrapped line and the right edge is ragged.
@@ -2306,33 +2375,32 @@ fn dictionary_card(
 
                 let name_response = ui
                     .label(RichText::new(&d.name).strong())
-                    .on_hover_text(&d.description);
+                    .on_hover_text(&details);
                 checkbox_response = checkbox_response.labelled_by(name_response.id);
                 if checkbox_response.changed() {
                     *changed_any = true;
                 }
-            });
 
-            ui.horizontal_wrapped(|ui| {
                 ui.label(
-                    RichText::new(format!(
-                        "{} • {} правил • {}",
-                        d.kind.badge(),
-                        format_num(d.rule_count),
-                        d.encoding
-                    ))
-                    .small()
-                    .weak(),
+                    RichText::new(format!("{} правил", format_num(d.rule_count)))
+                        .small()
+                        .weak(),
                 );
+
                 if !d.warnings.is_empty() {
                     ui.label(
-                        RichText::new(format!("⚠ Пропущено правил: {}", d.warnings.len()))
+                        RichText::new(format!("⚠ {}", d.warnings.len()))
                             .small()
                             .color(palette::warning_text(theme))
                             .strong(),
                     )
-                    .on_hover_text(d.warnings.join("\n"));
+                    .on_hover_text(format!(
+                        "Пропущено правил: {}\n{}",
+                        d.warnings.len(),
+                        d.warnings.join("\n")
+                    ));
                 }
+
                 if let (Some(ms), Some(repl)) = (d.last_ms, d.last_replacements) {
                     let col = if repl > 0 {
                         palette::success_text(theme)
@@ -2340,15 +2408,16 @@ fn dictionary_card(
                         palette::weak_text(theme)
                     };
                     ui.label(
-                        RichText::new(format!("• {ms} мс ({repl} замен)"))
+                        RichText::new(format!("{ms} мс"))
                             .small()
                             .color(col)
                             .strong(),
-                    );
+                    )
+                    .on_hover_text(format!("Замен: {repl}"));
                 }
             });
         });
-    ui.add_space(4.0);
+    ui.add_space(2.0);
 }
 
 fn warm_visuals() -> egui::Visuals {
@@ -2403,7 +2472,7 @@ fn apply_style_settings(ctx: &egui::Context, settings: &AppSettings) {
     };
     ctx.set_theme(egui_theme);
 
-    let visuals = match theme {
+    let mut visuals = match theme {
         ThemeMode::Dark => {
             let mut visuals = egui::Visuals::dark();
             visuals.weak_text_color = Some(palette::weak_text(theme));
@@ -2416,6 +2485,9 @@ fn apply_style_settings(ctx: &egui::Context, settings: &AppSettings) {
         }
         ThemeMode::Warm => warm_visuals(),
     };
+    visuals.widgets.active.bg_stroke =
+        egui::Stroke::new(2.0_f32, palette::focus_ring(theme));
+    visuals.widgets.active.expansion = 1.0;
     ctx.set_visuals(visuals);
 
     let base = settings.ui_font_size;
@@ -2538,6 +2610,21 @@ fn theme_icon(theme: ThemeMode) -> &'static str {
         ThemeMode::Dark => "🌙",
         ThemeMode::Light => "☀",
         ThemeMode::Warm => "📖",
+    }
+}
+
+fn status_live(is_busy: bool, level: StatusLevel) -> egui::accesskit::Live {
+    if is_busy || level == StatusLevel::Info {
+        egui::accesskit::Live::Off
+    } else {
+        egui::accesskit::Live::Polite
+    }
+}
+
+fn reset_settings_preserving_folder(settings: &AppSettings) -> AppSettings {
+    AppSettings {
+        dic_folder: settings.dic_folder.clone(),
+        ..AppSettings::default()
     }
 }
 
@@ -2989,5 +3076,31 @@ mod tests {
                 "{line_height} is too loose for {font_size}"
             );
         }
+    }
+
+    #[test]
+    fn status_live_is_quiet_while_busy_or_info() {
+        use egui::accesskit::Live;
+        assert_eq!(status_live(true, StatusLevel::Success), Live::Off);
+        assert_eq!(status_live(false, StatusLevel::Info), Live::Off);
+        assert_eq!(status_live(false, StatusLevel::Success), Live::Polite);
+        assert_eq!(status_live(false, StatusLevel::Warning), Live::Polite);
+        assert_eq!(status_live(false, StatusLevel::Error), Live::Polite);
+    }
+
+    #[test]
+    fn reset_settings_keeps_folder_and_restores_defaults() {
+        let mut settings = AppSettings::default();
+        settings.dic_folder = PathBuf::from(r"F:\custom\dic");
+        settings.set_theme(ThemeMode::Warm);
+        settings.ui_font_size = 24.0;
+        settings.disabled_dictionaries.push("disabled.dic".to_string());
+
+        let reset = reset_settings_preserving_folder(&settings);
+
+        assert_eq!(reset.dic_folder, PathBuf::from(r"F:\custom\dic"));
+        assert_eq!(reset.theme(), ThemeMode::Dark);
+        assert_eq!(reset.ui_font_size, 16.0);
+        assert!(reset.disabled_dictionaries.is_empty());
     }
 }

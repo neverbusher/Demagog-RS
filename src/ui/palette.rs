@@ -83,6 +83,14 @@ pub fn diff_after(theme: ThemeMode) -> Color32 {
     }
 }
 
+pub fn focus_ring(theme: ThemeMode) -> Color32 {
+    match theme {
+        ThemeMode::Dark => Color32::from_rgb(90, 215, 120),
+        ThemeMode::Light => Color32::from_rgb(31, 122, 77),
+        ThemeMode::Warm => Color32::from_rgb(156, 82, 52),
+    }
+}
+
 pub fn primary_button(theme: ThemeMode) -> (Color32, Color32) {
     match theme {
         ThemeMode::Dark | ThemeMode::Light => {
@@ -110,6 +118,7 @@ mod tests {
     const DARK_PANEL: Color32 = Color32::from_gray(27);
     const LIGHT_PANEL: Color32 = Color32::from_gray(248);
     const WCAG_AA_NORMAL_TEXT: f32 = 4.5;
+    const WCAG_AA_UI_COMPONENT: f32 = 3.0;
     const THEMES: [ThemeMode; 3] = [ThemeMode::Dark, ThemeMode::Light, ThemeMode::Warm];
 
     fn panel_color(theme: ThemeMode) -> Color32 {
@@ -183,6 +192,17 @@ mod tests {
             assert!(
                 ratio >= WCAG_AA_NORMAL_TEXT,
                 "primary button in {theme:?} has contrast {ratio:.2}:1"
+            );
+        }
+    }
+
+    #[test]
+    fn focus_ring_meets_non_text_contrast() {
+        for theme in THEMES {
+            let ratio = contrast(focus_ring(theme), panel_color(theme));
+            assert!(
+                ratio >= WCAG_AA_UI_COMPONENT,
+                "focus ring in {theme:?} has contrast {ratio:.2}:1"
             );
         }
     }
