@@ -42,6 +42,7 @@ pub struct DemagogApp {
     last_copied_chunk: Option<usize>,
     capture_diff_on_run: bool,
     dic_load_errors: Vec<String>,
+    unsaved_work: bool,
 }
 
 enum WorkerMessage {
@@ -97,6 +98,7 @@ impl DemagogApp {
             last_copied_chunk: None,
             capture_diff_on_run: false,
             dic_load_errors: Vec::new(),
+            unsaved_work: false,
         };
 
         app.reload_dictionaries_async(egui_ctx);
@@ -264,6 +266,7 @@ impl DemagogApp {
                                             d.last_ms = None;
                                             d.last_replacements = None;
                                         }
+                                        self.unsaved_work = false;
                                     }
                                     Err(err) => {
                                         self.status_line = err;
@@ -303,6 +306,7 @@ impl DemagogApp {
                                     self.document.chunks = result.chunks;
                                     let had_events = !result.report.events.is_empty();
                                     self.report = result.report;
+                                    self.unsaved_work = true;
                                     self.is_busy = false;
                                     self.progress_ratio = 1.0;
                                     if had_events && self.capture_diff_on_run {
@@ -357,6 +361,14 @@ impl DemagogApp {
             return;
         };
 
+        if self.unsaved_work
+            && !confirm_destructive(
+                "Открыть другую книгу? Несохранённая работа будет потеряна.",
+            )
+        {
+            return;
+        }
+
         self.is_busy = true;
         self.progress_ratio = 0.0;
         self.status_line = format!("Чтение «{}»...", path.display());
@@ -384,6 +396,7 @@ impl DemagogApp {
         {
             match std::fs::write(&path, &self.document.processed_text) {
                 Ok(_) => {
+                    self.unsaved_work = false;
                     self.status_line = format!("Сохранено в {}", path.display());
                 }
                 Err(e) => {
@@ -419,7 +432,10 @@ impl DemagogApp {
             };
             if let Ok(json) = serde_json::to_string_pretty(&payload) {
                 match std::fs::write(&path, json) {
-                    Ok(_) => self.status_line = format!("Чанки экспортированы в {}", path.display()),
+                    Ok(_) => {
+                        self.unsaved_work = false;
+                        self.status_line = format!("Чанки экспортированы в {}", path.display());
+                    }
                     Err(e) => self.status_line = format!("Ошибка записи JSON: {e}"),
                 }
             }
@@ -438,6 +454,10 @@ impl DemagogApp {
             let chunker = SentenceAwareChunker;
             self.document.chunks = chunker
                 .split_into_chunks(&self.document.processed_text, &self.settings.chunk_config);
+        }
+
+        if !self.document.processed_text.is_empty() || !self.document.chunks.is_empty() {
+            self.unsaved_work = true;
         }
     }
 }
@@ -465,6 +485,13 @@ impl DemagogApp {
     pub(crate) fn update_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.poll_worker();
+
+        if ctx.input(|i| i.viewport().close_requested()) && self.unsaved_work {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if confirm_destructive("Есть несохранённая работа. Выйти без сохранения?") {
+                self.shutdown();
+            }
+        }
 
         // Top toolbar
         egui::Panel::top("top_toolbar").show_inside(ui, |ui| {
@@ -896,51 +923,96 @@ impl DemagogApp {
                 ActiveTab::RawText => {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(&self.document.title).strong());
-                        if ui.button("📋 Вставить из буфера").clicked() {
+                        if ui.button("📋 Заменить из буфера").clicked() {
                             if let Ok(mut cb) = arboard::Clipboard::new() {
                                 if let Ok(txt) = cb.get_text() {
-                                    self.document.raw_text = txt;
-                                    self.document.title = "Из буфера обмена".to_string();
+                                    if !txt.is_empty()
+                                        && (!self.unsaved_work
+                                            || confirm_destructive(
+                                                "Заменить исходный текст содержимым буфера? Несохранённые изменения будут потеряны.",
+                                            ))
+                                    {
+                                        self.document.raw_text = txt;
+                                        self.document.title = "Из буфера обмена".to_string();
+                                        self.unsaved_work = true;
+                                    }
                                 }
                             }
                         }
                         if ui.button("🗑 Очистить").clicked() {
-                            self.document.raw_text.clear();
+                            let had_text = text_would_be_lost(&self.document.raw_text);
+                            if !had_text
+                                || confirm_destructive(
+                                    "Очистить исходный текст? Текст будет удалён без возможности отмены.",
+                                )
+                            {
+                                self.document.raw_text.clear();
+                                if had_text {
+                                    self.unsaved_work = true;
+                                }
+                            }
                         }
                     });
                     ui.add_space(4.0);
                     ScrollArea::vertical().show(ui, |ui| {
-                        ui.add(
+                        let response = ui.add(
                             egui::TextEdit::multiline(&mut self.document.raw_text)
                                 .desired_width(f32::INFINITY)
                                 .desired_rows(28)
                                 .font(editor_font.clone()),
                         );
+                        if response.changed() {
+                            self.unsaved_work = true;
+                        }
                     });
                 }
 
                 ActiveTab::ProcessedText => {
                     ui.horizontal(|ui| {
-                        if ui.button("📋 Копировать весь результат").clicked() {
+                        let has_result = !self.document.processed_text.is_empty();
+                        if ui
+                            .add_enabled(
+                                has_result,
+                                egui::Button::new("📋 Копировать весь результат"),
+                            )
+                            .clicked()
+                        {
                             if let Ok(mut cb) = arboard::Clipboard::new() {
                                 let _ = cb.set_text(self.document.processed_text.clone());
                                 self.status_line =
                                     "Весь обработанный текст скопирован в буфер обмена!".to_string();
                             }
                         }
-                        if ui.button("🔄 Перенести результат в исходник").clicked() {
-                            self.document.raw_text = self.document.processed_text.clone();
-                            self.raw_pipeline_output.clear();
+                        if ui
+                            .add_enabled(
+                                has_result,
+                                egui::Button::new("🔄 Перенести результат в исходник"),
+                            )
+                            .clicked()
+                        {
+                            let had_text = text_would_be_lost(&self.document.raw_text);
+                            if !had_text
+                                || confirm_destructive(
+                                    "Заменить исходный текст результатом? Текущий исходный текст будет потерян.",
+                                )
+                            {
+                                self.document.raw_text = self.document.processed_text.clone();
+                                self.raw_pipeline_output.clear();
+                                self.unsaved_work = true;
+                            }
                         }
                     });
                     ui.add_space(4.0);
                     ScrollArea::vertical().show(ui, |ui| {
-                        ui.add(
+                        let response = ui.add(
                             egui::TextEdit::multiline(&mut self.document.processed_text)
                                 .desired_width(f32::INFINITY)
                                 .desired_rows(28)
                                 .font(editor_font.clone()),
                         );
+                        if response.changed() {
+                            self.unsaved_work = true;
+                        }
                     });
                 }
 
@@ -1426,4 +1498,33 @@ pub fn locate_default_dic_folder() -> PathBuf {
         return local.to_path_buf();
     }
     PathBuf::from("dic")
+}
+
+fn text_would_be_lost(text: &str) -> bool {
+    !text.trim().is_empty()
+}
+
+fn confirm_destructive(description: &str) -> bool {
+    rfd::MessageDialog::new()
+        .set_title("Demagog-RS")
+        .set_level(rfd::MessageLevel::Warning)
+        .set_buttons(rfd::MessageButtons::YesNo)
+        .set_description(description)
+        .show()
+        == rfd::MessageDialogResult::Yes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_would_be_lost_for_non_empty_text() {
+        assert!(text_would_be_lost("Книга"));
+    }
+
+    #[test]
+    fn blank_text_does_not_need_confirmation() {
+        assert!(!text_would_be_lost(" \n\t"));
+    }
 }
