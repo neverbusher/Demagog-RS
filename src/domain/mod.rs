@@ -14,7 +14,7 @@ impl ThemeMode {
         match self {
             Self::Dark => "Тёмная",
             Self::Light => "Светлая",
-            Self::Warm => "Тёплая для чтения",
+            Self::Warm => "Тёплая",
         }
     }
 }

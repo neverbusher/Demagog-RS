@@ -790,37 +790,6 @@ impl DemagogApp {
 
                 ui.separator();
 
-                // Quick font size buttons
-                if ui
-                    .button("A-")
-                    .on_hover_text("Уменьшить шрифт интерфейса и текста")
-                    .clicked()
-                {
-                    self.settings.ui_font_size = (self.settings.ui_font_size - 1.0).max(12.0);
-                    self.settings.editor_font_size = (self.settings.editor_font_size - 1.5).max(12.0);
-                    apply_style_settings(&ctx, &self.settings);
-                    self.settings.save();
-                }
-                ui.label(
-                    RichText::new(format!(
-                        "{:.0}/{:.0}пт",
-                        self.settings.ui_font_size, self.settings.editor_font_size
-                    ))
-                    .weak(),
-                );
-                if ui
-                    .button("A+")
-                    .on_hover_text("Увеличить шрифт интерфейса и текста")
-                    .clicked()
-                {
-                    self.settings.ui_font_size = (self.settings.ui_font_size + 1.0).min(28.0);
-                    self.settings.editor_font_size = (self.settings.editor_font_size + 1.5).min(36.0);
-                    apply_style_settings(&ctx, &self.settings);
-                    self.settings.save();
-                }
-
-                ui.separator();
-
                 ui.menu_button(theme_icon(theme), |ui| {
                     for candidate in [ThemeMode::Dark, ThemeMode::Light, ThemeMode::Warm] {
                         let label = format!("{} {}", theme_icon(candidate), candidate.label());
@@ -1552,29 +1521,6 @@ impl DemagogApp {
                                 .labelled_by(editor_label.id)
                                 .changed()
                             {
-                                style_changed = true;
-                            }
-                            ui.end_row();
-
-                            ui.label("Тема оформления:");
-                            let mut selected_theme = self.settings.theme();
-                            egui::ComboBox::from_id_salt("theme_combo")
-                                .selected_text(selected_theme.label())
-                                .show_ui(ui, |ui| {
-                                    for candidate in [
-                                        ThemeMode::Dark,
-                                        ThemeMode::Light,
-                                        ThemeMode::Warm,
-                                    ] {
-                                        ui.selectable_value(
-                                            &mut selected_theme,
-                                            candidate,
-                                            candidate.label(),
-                                        );
-                                    }
-                                });
-                            if selected_theme != self.settings.theme() {
-                                self.settings.set_theme(selected_theme);
                                 style_changed = true;
                             }
                             ui.end_row();
