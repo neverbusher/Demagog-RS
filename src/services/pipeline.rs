@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::time::Instant;
@@ -30,14 +31,19 @@ impl ProcessingPipeline {
         stress_format: StressFormat,
         chunk_config: &ChunkConfig,
         capture_diff: bool,
+        cancel: Option<&AtomicBool>,
         progress_tx: Option<&Sender<PipelineProgress>>,
-    ) -> PipelineResult {
+    ) -> Option<PipelineResult> {
         let total_start = Instant::now();
         let mut current = input_text.to_string();
         let mut report = PipelineReport::default();
         let total = processors.len();
 
         for (idx, proc) in processors.iter().enumerate() {
+            if is_cancelled(cancel) {
+                notify_cancelled(progress_tx);
+                return None;
+            }
             if let Some(tx) = progress_tx {
                 let _ = tx.send(PipelineProgress::StepStarted {
                     index: idx + 1,
@@ -70,8 +76,17 @@ impl ProcessingPipeline {
             current = out.text;
         }
 
+        if is_cancelled(cancel) {
+            notify_cancelled(progress_tx);
+            return None;
+        }
+
         let raw_text = current;
         let processed_text = self.stress_formatter.format_stress(&raw_text, stress_format);
+        if is_cancelled(cancel) {
+            notify_cancelled(progress_tx);
+            return None;
+        }
         let chunks = self.chunker.split_into_chunks(&processed_text, chunk_config);
         report.total_ms = total_start.elapsed().as_millis();
 
@@ -82,11 +97,26 @@ impl ProcessingPipeline {
             report,
         };
 
+        if is_cancelled(cancel) {
+            notify_cancelled(progress_tx);
+            return None;
+        }
+
         if let Some(tx) = progress_tx {
             let _ = tx.send(PipelineProgress::Completed(result.clone()));
         }
 
-        result
+        Some(result)
+    }
+}
+
+fn is_cancelled(cancel: Option<&AtomicBool>) -> bool {
+    cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
+}
+
+fn notify_cancelled(progress_tx: Option<&Sender<PipelineProgress>>) {
+    if let Some(tx) = progress_tx {
+        let _ = tx.send(PipelineProgress::Cancelled);
     }
 }
 
@@ -97,6 +127,7 @@ mod tests {
     use crate::ports::TextProcessor;
     use crate::services::chunker::SentenceAwareChunker;
     use crate::services::stress::RussianStressFormatter;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct StressAddingProcessor;
 
@@ -122,6 +153,91 @@ mod tests {
         }
     }
 
+    struct CancelAfterFirst {
+        cancel: Arc<AtomicBool>,
+    }
+
+    impl TextProcessor for CancelAfterFirst {
+        fn name(&self) -> &str {
+            "cancel"
+        }
+
+        fn kind(&self) -> DictionaryKind {
+            DictionaryKind::RegexStandard
+        }
+
+        fn rule_count(&self) -> usize {
+            1
+        }
+
+        fn process(&self, _text: &str, _capture_diff: bool) -> ProcessOutput {
+            self.cancel.store(true, Ordering::Relaxed);
+            ProcessOutput {
+                text: "after-cancel".to_string(),
+                replacements_count: 0,
+                events: Vec::new(),
+            }
+        }
+    }
+
+    struct CountingProcessor {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl TextProcessor for CountingProcessor {
+        fn name(&self) -> &str {
+            "counting"
+        }
+
+        fn kind(&self) -> DictionaryKind {
+            DictionaryKind::RegexStandard
+        }
+
+        fn rule_count(&self) -> usize {
+            1
+        }
+
+        fn process(&self, text: &str, _capture_diff: bool) -> ProcessOutput {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            ProcessOutput {
+                text: text.to_string(),
+                replacements_count: 0,
+                events: Vec::new(),
+            }
+        }
+    }
+
+    #[test]
+    fn stops_before_next_dictionary_when_cancelled() {
+        let pipeline = ProcessingPipeline::new(
+            Arc::new(RussianStressFormatter),
+            Arc::new(SentenceAwareChunker),
+        );
+        let cancel = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let processors: Vec<Arc<dyn TextProcessor>> = vec![
+            Arc::new(CancelAfterFirst {
+                cancel: cancel.clone(),
+            }),
+            Arc::new(CountingProcessor {
+                calls: calls.clone(),
+            }),
+        ];
+
+        let result = pipeline.execute(
+            "start",
+            &processors,
+            StressFormat::CleanYoOnly,
+            &ChunkConfig::default(),
+            false,
+            Some(cancel.as_ref()),
+            None,
+        );
+
+        assert!(result.is_none(), "cancelled pipeline must not return a result");
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
     #[test]
     fn keeps_raw_text_for_later_reformatting() {
         let pipeline = ProcessingPipeline::new(
@@ -130,14 +246,17 @@ mod tests {
         );
         let processors: Vec<Arc<dyn TextProcessor>> = vec![Arc::new(StressAddingProcessor)];
 
-        let result = pipeline.execute(
-            "замок",
-            &processors,
-            StressFormat::CleanYoOnly,
-            &ChunkConfig::default(),
-            false,
-            None,
-        );
+        let result = pipeline
+            .execute(
+                "замок",
+                &processors,
+                StressFormat::CleanYoOnly,
+                &ChunkConfig::default(),
+                false,
+                None,
+                None,
+            )
+            .expect("not cancelled");
 
         assert_eq!(result.raw_text, "з+амок");
         assert_eq!(result.processed_text, "замок");

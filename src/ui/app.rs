@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::time::Instant;
@@ -43,6 +44,7 @@ pub struct DemagogApp {
     capture_diff_on_run: bool,
     dic_load_errors: Vec<String>,
     unsaved_work: bool,
+    cancel_flag: Option<Arc<AtomicBool>>,
 }
 
 enum WorkerMessage {
@@ -99,6 +101,7 @@ impl DemagogApp {
             capture_diff_on_run: false,
             dic_load_errors: Vec::new(),
             unsaved_work: false,
+            cancel_flag: None,
         };
 
         app.reload_dictionaries_async(egui_ctx);
@@ -172,6 +175,8 @@ impl DemagogApp {
         let input_text = self.document.raw_text.clone();
         let stress_format = self.settings.stress_format;
         let chunk_config = self.settings.chunk_config.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.cancel_flag = Some(Arc::clone(&cancel));
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
 
@@ -191,12 +196,13 @@ impl DemagogApp {
                 Arc::new(RussianStressFormatter),
                 Arc::new(SentenceAwareChunker),
             );
-            pipeline.execute(
+            let _ = pipeline.execute(
                 &input_text,
                 &active_processors,
                 stress_format,
                 &chunk_config,
                 capture_diff,
+                Some(cancel.as_ref()),
                 Some(&ptx),
             );
             drop(ptx);
@@ -307,6 +313,7 @@ impl DemagogApp {
                                     let had_events = !result.report.events.is_empty();
                                     self.report = result.report;
                                     self.unsaved_work = true;
+                                    self.cancel_flag = None;
                                     self.is_busy = false;
                                     self.progress_ratio = 1.0;
                                     if had_events && self.capture_diff_on_run {
@@ -316,8 +323,16 @@ impl DemagogApp {
                                     }
                                     finished = true;
                                 }
+                                PipelineProgress::Cancelled => {
+                                    self.status_line = "Обработка отменена".to_string();
+                                    self.cancel_flag = None;
+                                    self.is_busy = false;
+                                    self.progress_ratio = 0.0;
+                                    finished = true;
+                                }
                                 PipelineProgress::Error(err) => {
                                     self.status_line = format!("Ошибка: {err}");
+                                    self.cancel_flag = None;
                                     self.is_busy = false;
                                     self.progress_ratio = 0.0;
                                     finished = true;
@@ -342,6 +357,7 @@ impl DemagogApp {
             if disconnected && !finished {
                 self.status_line =
                     "Рабочий поток завершился неожиданно — попробуйте ещё раз".to_string();
+                self.cancel_flag = None;
                 self.is_busy = false;
                 self.progress_ratio = 0.0;
             }
@@ -361,6 +377,13 @@ impl DemagogApp {
             return;
         };
 
+        self.load_book(path, ctx);
+    }
+
+    fn load_book(&mut self, path: PathBuf, ctx: egui::Context) {
+        if self.is_busy {
+            return;
+        }
         if self.unsaved_work
             && !confirm_destructive(
                 "Открыть другую книгу?\nНесохранённая работа будет потеряна.",
@@ -381,6 +404,70 @@ impl DemagogApp {
             let _ = tx.send(WorkerMessage::BookLoaded(result));
             ctx.request_repaint();
         });
+    }
+
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        use egui::{Key, KeyboardShortcut, Modifiers};
+
+        let open = KeyboardShortcut::new(Modifiers::CTRL, Key::O);
+        let save = KeyboardShortcut::new(Modifiers::CTRL, Key::S);
+        let export = KeyboardShortcut::new(Modifiers::CTRL, Key::E);
+        let process = KeyboardShortcut::new(Modifiers::CTRL, Key::Enter);
+        let process_diff =
+            KeyboardShortcut::new(Modifiers::CTRL | Modifiers::SHIFT, Key::Enter);
+
+        if !self.is_busy && ctx.input_mut(|i| i.consume_shortcut(&open)) {
+            self.open_book_dialog(ctx.clone());
+        }
+        if !self.is_busy && ctx.input_mut(|i| i.consume_shortcut(&process_diff)) {
+            self.capture_diff_on_run = true;
+            self.start_processing(ctx.clone(), true);
+        }
+        if !self.is_busy && ctx.input_mut(|i| i.consume_shortcut(&process)) {
+            self.capture_diff_on_run = false;
+            self.start_processing(ctx.clone(), false);
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&save)) {
+            self.save_processed_txt();
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&export)) {
+            self.export_chunks_json();
+        }
+
+        if let Some(cancel) = self.cancel_flag.clone() {
+            if !cancel.load(Ordering::Relaxed)
+                && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+            {
+                cancel.store(true, Ordering::Relaxed);
+                self.status_line = "Отмена...".to_string();
+            }
+        }
+    }
+
+    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .filter_map(|file| file.path.clone())
+                .collect()
+        });
+        if dropped.is_empty() {
+            return;
+        }
+        if self.is_busy {
+            self.status_line = "Дождитесь завершения текущей операции".to_string();
+            return;
+        }
+        let Some(path) = dropped
+            .into_iter()
+            .find(|path| is_supported_book_path(path))
+        else {
+            self.status_line =
+                "Поддерживаются TXT, FB2, EPUB, DOCX, ZIP и MD".to_string();
+            return;
+        };
+        self.load_book(path, ctx.clone());
     }
 
     fn save_processed_txt(&mut self) {
@@ -493,6 +580,9 @@ impl DemagogApp {
             }
         }
 
+        self.handle_shortcuts(&ctx);
+        self.handle_dropped_files(&ctx);
+
         // Top toolbar
         egui::Panel::top("top_toolbar").show_inside(ui, |ui| {
             ui.add_space(4.0);
@@ -502,7 +592,7 @@ impl DemagogApp {
                         !self.is_busy,
                         egui::Button::new("📂 Открыть книгу"),
                     )
-                    .on_hover_text("Открыть TXT, FB2, FB2.ZIP, EPUB или DOCX")
+                    .on_hover_text("Открыть TXT, FB2, FB2.ZIP, EPUB или DOCX (Ctrl+O)")
                     .clicked()
                 {
                     self.open_book_dialog(ctx.clone());
@@ -515,7 +605,10 @@ impl DemagogApp {
                 )
                 .fill(Color32::from_rgb(90, 215, 120));
 
-                if ui.add_enabled(!self.is_busy, run_btn).clicked() {
+                let run_response = ui
+                    .add_enabled(!self.is_busy, run_btn)
+                    .on_hover_text("Обработать книгу (Ctrl+Enter)");
+                if run_response.clicked() {
                     self.capture_diff_on_run = false;
                     self.start_processing(ctx.clone(), false);
                 }
@@ -525,6 +618,7 @@ impl DemagogApp {
                         !self.is_busy,
                         egui::Button::new("🔬 С логом замен (Diff)"),
                     )
+                    .on_hover_text("Собрать журнал замен (Ctrl+Shift+Enter)")
                     .clicked()
                 {
                     self.capture_diff_on_run = true;
@@ -553,10 +647,18 @@ impl DemagogApp {
 
                 ui.separator();
 
-                if ui.button("💾 Сохранить TXT").clicked() {
+                if ui
+                    .button("💾 Сохранить TXT")
+                    .on_hover_text("Сохранить результат в TXT (Ctrl+S)")
+                    .clicked()
+                {
                     self.save_processed_txt();
                 }
-                if ui.button("📦 Экспорт JSON").clicked() {
+                if ui
+                    .button("📦 Экспорт JSON")
+                    .on_hover_text("Экспортировать чанки в JSON (Ctrl+E)")
+                    .clicked()
+                {
                     self.export_chunks_json();
                 }
 
@@ -617,6 +719,17 @@ impl DemagogApp {
                             .desired_width(180.0)
                             .show_percentage(),
                     );
+                    if let Some(cancel) = self.cancel_flag.clone() {
+                        let requested = cancel.load(Ordering::Relaxed);
+                        if ui
+                            .add_enabled(!requested, egui::Button::new("Отмена"))
+                            .on_hover_text("Остановить после текущего словаря (Esc)")
+                            .clicked()
+                        {
+                            cancel.store(true, Ordering::Relaxed);
+                            self.status_line = "Отмена...".to_string();
+                        }
+                    }
                 }
                 let status = ui.label(&self.status_line);
                 if !self.dic_load_errors.is_empty() {
@@ -1521,6 +1634,17 @@ fn text_would_be_lost(text: &str) -> bool {
     !text.trim().is_empty()
 }
 
+fn is_supported_book_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "txt" | "fb2" | "epub" | "docx" | "zip" | "md"
+            )
+        })
+}
+
 fn editor_line_height(font_size: f32) -> f32 {
     font_size * 1.45
 }
@@ -1566,6 +1690,27 @@ mod tests {
     #[test]
     fn blank_text_does_not_need_confirmation() {
         assert!(!text_would_be_lost(" \n\t"));
+    }
+
+    #[test]
+    fn accepts_supported_book_extensions_case_insensitively() {
+        for name in [
+            "book.txt",
+            "book.FB2",
+            "book.epub",
+            "book.docx",
+            "book.zip",
+            "book.MD",
+        ] {
+            assert!(is_supported_book_path(Path::new(name)), "{name}");
+        }
+    }
+
+    #[test]
+    fn rejects_other_files() {
+        for name in ["cover.png", "book", "book.rtf"] {
+            assert!(!is_supported_book_path(Path::new(name)), "{name}");
+        }
     }
 
     #[test]

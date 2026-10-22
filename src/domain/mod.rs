@@ -175,6 +175,7 @@ pub enum PipelineProgress {
     StepStarted { index: usize, total: usize, name: String },
     StepFinished(StepReport),
     Completed(PipelineResult),
+    Cancelled,
     Error(String),
 }
 

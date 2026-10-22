@@ -127,14 +127,18 @@ fn run_cli_or_bench(args: &[String]) {
         Arc::new(SentenceAwareChunker),
     );
 
-    let result = pipeline.execute(
+    let Some(result) = pipeline.execute(
         &doc.raw_text,
         &processors,
         StressFormat::PlusBeforeVowel,
         &ChunkConfig::default(),
         args.iter().any(|a| a == "--diff"),
         None,
-    );
+        None,
+    ) else {
+        eprintln!("Обработка отменена");
+        return;
+    };
 
     println!("------------------------------------------------------------");
     for s in &result.report.steps {
