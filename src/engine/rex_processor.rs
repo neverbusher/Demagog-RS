@@ -21,6 +21,14 @@ pub struct IndexedRexBlock {
     pub rules: Vec<CompiledRexRule>,
 }
 
+struct PendingRexRule {
+    pattern: String,
+    replacement: String,
+    raw_rule: String,
+    warning_line: String,
+    case_sensitive: bool,
+}
+
 pub struct RexProcessor {
     name: String,
     kind: DictionaryKind,
@@ -34,13 +42,12 @@ pub struct RexProcessor {
 
 impl RexProcessor {
     pub fn compile(name: String, content: &str, _encoding: &'static str) -> Self {
-        let mut unindexed_rules = Vec::new();
-        let mut indexed_blocks: Vec<IndexedRexBlock> = Vec::new();
+        let mut unindexed_pending = Vec::new();
+        let mut blocks_pending: Vec<(Vec<String>, Vec<PendingRexRule>)> = Vec::new();
         let mut current_keywords: Option<Vec<String>> = None;
-        let mut current_block_rules: Vec<CompiledRexRule> = Vec::new();
+        let mut current_rules = Vec::new();
         let mut collapse_spaces_at_end = false;
         let cleanup_yo_tags = content.contains("<:yo:>") || content.contains("<:ye:>");
-        let mut compile_warnings = Vec::new();
 
         for raw_line in content.lines() {
             let trimmed = raw_line.trim().trim_start_matches('\u{feff}');
@@ -57,12 +64,9 @@ impl RexProcessor {
 
                 if !kws.is_empty() {
                     if let Some(prev_kws) = current_keywords.take()
-                        && !current_block_rules.is_empty()
+                        && !current_rules.is_empty()
                     {
-                        indexed_blocks.push(IndexedRexBlock {
-                            keywords: prev_kws,
-                            rules: std::mem::take(&mut current_block_rules),
-                        });
+                        blocks_pending.push((prev_kws, std::mem::take(&mut current_rules)));
                     }
                     current_keywords = Some(kws);
                 }
@@ -82,46 +86,48 @@ impl RexProcessor {
                 continue;
             }
 
-            let (pat_str, case_sensitive) = normalize_rex_pattern(lhs);
-            if pat_str.is_empty() {
+            let (pattern, case_sensitive) = normalize_rex_pattern(lhs);
+            if pattern.is_empty() {
                 continue;
             }
 
-            let compiled = RegexBuilder::new(&pat_str)
-                .case_insensitive(!case_sensitive)
-                .unicode(true)
-                .build();
-
-            if let Err(err) = &compiled
-                && compile_warnings.len() < 50
-            {
-                compile_warnings.push(format!("{} → {err}", trimmed));
-            }
-
-            if let Ok(regex) = compiled {
-                let (needs_digit, required_sub) = analyze_pattern_prefilter(&pat_str);
-                let rule = CompiledRexRule {
-                    regex,
-                    replacement: normalize_rex_replacement(rhs),
-                    raw_rule: trimmed.chars().take(90).collect(),
-                    needs_digit,
-                    required_sub,
-                };
-                if current_keywords.is_some() {
-                    current_block_rules.push(rule);
-                } else {
-                    unindexed_rules.push(rule);
-                }
+            let rule = PendingRexRule {
+                pattern,
+                replacement: normalize_rex_replacement(rhs),
+                raw_rule: trimmed.chars().take(90).collect(),
+                warning_line: trimmed.to_string(),
+                case_sensitive,
+            };
+            if current_keywords.is_some() {
+                current_rules.push(rule);
+            } else {
+                unindexed_pending.push(rule);
             }
         }
 
         if let Some(prev_kws) = current_keywords.take()
-            && !current_block_rules.is_empty()
+            && !current_rules.is_empty()
         {
-            indexed_blocks.push(IndexedRexBlock {
-                keywords: prev_kws,
-                rules: current_block_rules,
-            });
+            blocks_pending.push((prev_kws, current_rules));
+        }
+
+        let (mut unindexed_rules, mut compile_warnings) = compile_rex_rules(unindexed_pending);
+        let compiled_blocks: Vec<(IndexedRexBlock, Vec<String>)> = blocks_pending
+            .into_par_iter()
+            .map(|(keywords, pending)| {
+                let (rules, warnings) = compile_rex_rules(pending);
+                (IndexedRexBlock { keywords, rules }, warnings)
+            })
+            .collect();
+
+        let mut indexed_blocks = Vec::with_capacity(compiled_blocks.len());
+        for (block, warnings) in compiled_blocks {
+            indexed_blocks.push(block);
+            for warning in warnings {
+                if compile_warnings.len() < 50 {
+                    compile_warnings.push(warning);
+                }
+            }
         }
 
         let is_indexed = indexed_blocks.len() > 5;
@@ -352,6 +358,45 @@ impl TextProcessor for RexProcessor {
             events,
         }
     }
+}
+
+fn compile_rex_rules(pending: Vec<PendingRexRule>) -> (Vec<CompiledRexRule>, Vec<String>) {
+    let results: Vec<Result<CompiledRexRule, String>> = pending
+        .into_par_iter()
+        .map(|rule| {
+            let compiled = RegexBuilder::new(&rule.pattern)
+                .case_insensitive(!rule.case_sensitive)
+                .unicode(true)
+                .build();
+            match compiled {
+                Ok(regex) => {
+                    let (needs_digit, required_sub) = analyze_pattern_prefilter(&rule.pattern);
+                    Ok(CompiledRexRule {
+                        regex,
+                        replacement: rule.replacement,
+                        raw_rule: rule.raw_rule,
+                        needs_digit,
+                        required_sub,
+                    })
+                }
+                Err(err) => Err(format!("{} → {err}", rule.warning_line)),
+            }
+        })
+        .collect();
+
+    let mut rules = Vec::with_capacity(results.len());
+    let mut warnings = Vec::new();
+    for result in results {
+        match result {
+            Ok(rule) => rules.push(rule),
+            Err(warning) => {
+                if warnings.len() < 50 {
+                    warnings.push(warning);
+                }
+            }
+        }
+    }
+    (rules, warnings)
 }
 
 /// Extracts fast pre-filter conditions for a regex pattern:
