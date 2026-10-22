@@ -1,4 +1,6 @@
 use egui::{self, Color32, FontFamily, FontId, RichText, ScrollArea, TextStyle};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -121,6 +123,33 @@ impl ResultState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProcessingSnapshot {
+    source_hash: u64,
+}
+
+impl ProcessingSnapshot {
+    fn capture(text: &str) -> Self {
+        Self {
+            source_hash: text_fingerprint(text),
+        }
+    }
+
+    fn source_changed(&self, text: &str) -> bool {
+        self.source_hash != text_fingerprint(text)
+    }
+}
+
+fn text_fingerprint(text: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn text_mutations_enabled(is_busy: bool) -> bool {
+    !is_busy
+}
+
 pub struct DemagogApp {
     settings: AppSettings,
     dictionaries: Vec<DictionaryMeta>,
@@ -133,6 +162,7 @@ pub struct DemagogApp {
     status_level: StatusLevel,
     last_error: Option<String>,
     is_busy: bool,
+    processing_snapshot: Option<ProcessingSnapshot>,
     progress_ratio: f32,
     rx: Option<Receiver<WorkerMessage>>,
     diff_filter: String,
@@ -214,6 +244,7 @@ impl DemagogApp {
             status_level: StatusLevel::Info,
             last_error: None,
             is_busy: false,
+            processing_snapshot: None,
             progress_ratio: 0.0,
             rx: None,
             diff_filter: String::new(),
@@ -343,6 +374,7 @@ impl DemagogApp {
         }
 
         let input_text = self.document.raw_text.clone();
+        self.processing_snapshot = Some(ProcessingSnapshot::capture(&input_text));
         let stress_format = self.settings.stress_format;
         let chunk_config = self.settings.chunk_config.clone();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -496,15 +528,16 @@ impl DemagogApp {
                                     }
                                 }
                                 PipelineProgress::Completed(result) => {
-                                    pending_status = Some((
-                                        StatusLevel::Success,
-                                        format!(
-                                            "Обработано за {} мс | Замен: {} | Чанков: {}",
-                                            result.report.total_ms,
-                                            format_num(result.report.total_replacements),
-                                            result.chunks.len()
-                                        ),
-                                    ));
+                                    let source_changed =
+                                        self.processing_snapshot.take().is_some_and(|snapshot| {
+                                            snapshot.source_changed(&self.document.raw_text)
+                                        });
+                                    let summary = format!(
+                                        "Обработано за {} мс | Замен: {} | Чанков: {}",
+                                        result.report.total_ms,
+                                        format_num(result.report.total_replacements),
+                                        result.chunks.len()
+                                    );
                                     self.raw_pipeline_output = result.raw_text;
                                     self.document.processed_text = result.processed_text;
                                     self.document.chunks = result.chunks;
@@ -516,6 +549,17 @@ impl DemagogApp {
                                     let had_events = !result.report.events.is_empty();
                                     self.report = result.report;
                                     self.result_state.mark_computed(self.settings.stress_format);
+                                    if source_changed {
+                                        self.result_state.mark_stale();
+                                        pending_status = Some((
+                                            StatusLevel::Warning,
+                                            format!(
+                                                "{summary} | Исходный текст изменён во время обработки — результат устарел, обработайте заново"
+                                            ),
+                                        ));
+                                    } else {
+                                        pending_status = Some((StatusLevel::Success, summary));
+                                    }
                                     self.last_copied_chunk = None;
                                     self.find_dirty = true;
                                     self.cancel_flag = None;
@@ -567,6 +611,7 @@ impl DemagogApp {
         }
 
         if finished || disconnected {
+            self.processing_snapshot = None;
             if disconnected && !finished {
                 self.set_status(
                     StatusLevel::Error,
@@ -1811,6 +1856,13 @@ impl DemagogApp {
                 ui.selectable_value(&mut self.active_tab, ActiveTab::Settings, "⚙ Настройки");
             });
             ui.separator();
+            if self.is_busy {
+                ui.label(
+                    RichText::new("Идёт обработка — текст временно доступен только для чтения.")
+                        .weak(),
+                );
+                ui.add_space(4.0);
+            }
 
             let editor_font = FontId::new(self.settings.editor_font_size, FontFamily::Monospace);
             let line_height = editor_line_height(self.settings.editor_font_size);
@@ -1821,6 +1873,7 @@ impl DemagogApp {
                         egui::Label::new(RichText::new(&self.document.title).strong()).truncate(),
                     );
                     ui.horizontal_wrapped(|ui| {
+                        let can_mutate = text_mutations_enabled(self.is_busy);
                         if ui
                             .button("💾 Сохранить исходный текст")
                             .on_hover_text("Сохранить исходный текст в TXT (Ctrl+Shift+S)")
@@ -1828,7 +1881,13 @@ impl DemagogApp {
                         {
                             self.save_source_txt();
                         }
-                        if ui.button("📋 Заменить из буфера").clicked() {
+                        let replace = ui
+                            .add_enabled(
+                                can_mutate,
+                                egui::Button::new("📋 Заменить из буфера"),
+                            )
+                            .on_disabled_hover_text("Дождитесь завершения обработки");
+                        if replace.clicked() {
                             match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
                                 Ok(txt) if !txt.is_empty() => {
                                     if !self.has_unsaved_work()
@@ -1857,7 +1916,10 @@ impl DemagogApp {
                                 }
                             }
                         }
-                        if ui.button("🗑 Очистить").clicked() {
+                        let clear = ui
+                            .add_enabled(can_mutate, egui::Button::new("🗑 Очистить"))
+                            .on_disabled_hover_text("Дождитесь завершения обработки");
+                        if clear.clicked() {
                             let had_text = text_would_be_lost(&self.document.raw_text);
                             let needs_confirm =
                                 self.source_dirty || self.document.source_path.is_some();
@@ -1903,6 +1965,7 @@ impl DemagogApp {
                             .desired_width(f32::INFINITY)
                             .desired_rows(28)
                             .margin(egui::Margin::symmetric(14, 12))
+                            .interactive(text_mutations_enabled(self.is_busy))
                             .layouter(&mut layouter)
                             .show(ui);
                         if output.response.changed() {
@@ -1935,12 +1998,13 @@ impl DemagogApp {
                         }
                         if ui
                             .add_enabled(
-                                has_result,
+                                has_result && text_mutations_enabled(self.is_busy),
                                 egui::Button::new("🔄 Заменить исходный текст"),
                             )
                             .on_hover_text(
                                 "Результат останется на месте, текущий исходный текст будет заменён",
                             )
+                            .on_disabled_hover_text("Дождитесь завершения обработки")
                             .clicked()
                         {
                             let had_text = text_would_be_lost(&self.document.raw_text);
@@ -1994,6 +2058,7 @@ impl DemagogApp {
                             .desired_width(f32::INFINITY)
                             .desired_rows(28)
                             .margin(egui::Margin::symmetric(14, 12))
+                            .interactive(text_mutations_enabled(self.is_busy))
                             .layouter(&mut layouter)
                             .show(ui);
                         if output.response.changed() {
@@ -2922,6 +2987,19 @@ mod tests {
     #[test]
     fn text_would_be_lost_for_non_empty_text() {
         assert!(text_would_be_lost("Книга"));
+    }
+
+    #[test]
+    fn processing_snapshot_detects_source_changes() {
+        let snapshot = ProcessingSnapshot::capture("старый текст");
+        assert!(!snapshot.source_changed("старый текст"));
+        assert!(snapshot.source_changed("старый текст!"));
+    }
+
+    #[test]
+    fn text_mutations_are_disabled_while_busy() {
+        assert!(!text_mutations_enabled(true));
+        assert!(text_mutations_enabled(false));
     }
 
     #[test]
