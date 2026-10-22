@@ -8,8 +8,8 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use crate::domain::{
-    AppSettings, BookDocument, DictionaryMeta, DictionaryTag, PipelineProgress, PipelineReport,
-    StressFormat, ThemeMode,
+    AppSettings, BookDocument, ChunkConfig, DictionaryMeta, DictionaryTag, PipelineProgress,
+    PipelineReport, StressFormat, ThemeMode,
 };
 use crate::engine::loader::{CompiledDictionary, DictionaryLoadReport, load_dictionaries_parallel};
 use crate::io::book_reader::{CompositeBookReader, SUPPORTED_BOOK_FORMATS, can_read_book};
@@ -148,6 +148,17 @@ fn text_fingerprint(text: &str) -> u64 {
 
 fn text_mutations_enabled(is_busy: bool) -> bool {
     !is_busy
+}
+
+fn chunks_for_text(text: &str, config: &ChunkConfig) -> Vec<String> {
+    if text.trim().is_empty() {
+        return Vec::new();
+    }
+    SentenceAwareChunker.split_into_chunks(text, config)
+}
+
+fn can_export_chunks(text: &str, chunks: &[String]) -> bool {
+    !text.trim().is_empty() && !chunks.is_empty()
 }
 
 pub struct DemagogApp {
@@ -1037,14 +1048,24 @@ impl DemagogApp {
     }
 
     fn export_chunks_json(&mut self) {
-        if self.document.chunks.is_empty() {
+        if self.document.processed_text.trim().is_empty() {
             self.set_status(
                 StatusLevel::Warning,
-                "Нет чанков для экспорта — запустите обработку!",
+                "Результат пуст — экспортировать нечего",
             );
             return;
         }
         if !self.confirm_stale_result("Экспортировать его всё равно") {
+            return;
+        }
+        if self.result_state.is_chunks_stale() {
+            self.rechunk_result();
+        }
+        if !can_export_chunks(&self.document.processed_text, &self.document.chunks) {
+            self.set_status(
+                StatusLevel::Warning,
+                "Нет чанков для экспорта — запустите обработку!",
+            );
             return;
         }
         let default_name = format!("{}_chunks.json", self.document.title);
@@ -1053,9 +1074,6 @@ impl DemagogApp {
             .add_filter("JSON для ComfyUI", &["json"])
             .save_file()
         {
-            if self.result_state.is_chunks_stale() {
-                self.rechunk_result();
-            }
             #[derive(serde::Serialize)]
             struct ExportPayload<'a> {
                 title: &'a str,
@@ -1121,14 +1139,8 @@ impl DemagogApp {
 
     /// Re-chunk the current result without touching its text.
     fn rechunk_result(&mut self) {
-        if self.document.processed_text.is_empty() && self.document.chunks.is_empty() {
-            return;
-        }
-        if !self.document.processed_text.is_empty() {
-            let chunker = SentenceAwareChunker;
-            self.document.chunks = chunker
-                .split_into_chunks(&self.document.processed_text, &self.settings.chunk_config);
-        }
+        self.document.chunks =
+            chunks_for_text(&self.document.processed_text, &self.settings.chunk_config);
         self.last_copied_chunk = None;
         self.chunk_render_limit = CHUNK_BATCH;
         self.result_state.mark_rechunked();
@@ -1471,13 +1483,11 @@ impl DemagogApp {
                 {
                     self.save_processed_txt();
                 }
+                let can_export = !self.document.processed_text.trim().is_empty();
                 if ui
-                    .add_enabled(
-                        !self.document.chunks.is_empty(),
-                        egui::Button::new("📦 Экспорт чанков"),
-                    )
+                    .add_enabled(can_export, egui::Button::new("📦 Экспорт чанков"))
                     .on_hover_text("Экспортировать чанки в JSON (Ctrl+E)")
-                    .on_disabled_hover_text("Сначала обработайте текст")
+                    .on_disabled_hover_text("Результат пуст — экспортировать нечего")
                     .clicked()
                 {
                     self.export_chunks_json();
@@ -2063,6 +2073,9 @@ impl DemagogApp {
                             .show(ui);
                         if output.response.changed() {
                             self.result_state.mark_edited();
+                            if self.document.processed_text.trim().is_empty() {
+                                self.rechunk_result();
+                            }
                             self.refresh_processed_char_count();
                             self.find_dirty = true;
                             self.find_last_edit = Instant::now();
@@ -2100,7 +2113,7 @@ impl DemagogApp {
                         }
                     });
                     self.show_stale_banner(ui, theme);
-                    if self.result_state.is_chunks_stale() && !self.document.chunks.is_empty() {
+                    if self.result_state.is_chunks_stale() {
                         ui.horizontal_wrapped(|ui| {
                             ui.label(
                                 RichText::new(
@@ -3099,6 +3112,23 @@ mod tests {
         state.mark_rechunked();
         assert!(!state.is_dirty());
         assert!(!state.is_chunks_stale());
+    }
+
+    #[test]
+    fn empty_text_produces_no_chunks() {
+        let config = crate::domain::ChunkConfig::default();
+        assert!(chunks_for_text("", &config).is_empty());
+        assert!(chunks_for_text("  \n\t ", &config).is_empty());
+        assert!(!chunks_for_text("Первое предложение.", &config).is_empty());
+    }
+
+    #[test]
+    fn old_chunks_of_an_empty_result_cannot_be_exported() {
+        let old_chunks = vec!["старый чанк".to_string()];
+        assert!(!can_export_chunks("", &old_chunks));
+        assert!(!can_export_chunks("  \n\t", &old_chunks));
+        assert!(!can_export_chunks("Новый текст.", &[]));
+        assert!(can_export_chunks("Новый текст.", &old_chunks));
     }
 
     #[test]
