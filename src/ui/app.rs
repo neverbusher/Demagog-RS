@@ -7,7 +7,7 @@ use egui::{self, Color32, FontFamily, FontId, RichText, ScrollArea, TextStyle};
 
 use crate::domain::{
     AppSettings, BookDocument, DictionaryMeta, DictionaryTag, PipelineProgress,
-    PipelineReport, StressFormat,
+    PipelineReport, StressFormat, ThemeMode,
 };
 use crate::engine::loader::{load_dictionaries_parallel, CompiledDictionary, DictionaryLoadReport};
 use crate::io::book_reader::CompositeBookReader;
@@ -332,7 +332,7 @@ impl DemagogApp {
                                 }
                                 PipelineProgress::Completed(result) => {
                                     self.status_line = format!(
-                                        "Обработано за {} мс | Замен: {} | Чанков для Drama3: {}",
+                                        "Обработано за {} мс | Замен: {} | Чанков: {}",
                                         result.report.total_ms,
                                         format_num(result.report.total_replacements),
                                         result.chunks.len()
@@ -687,6 +687,7 @@ impl DemagogApp {
     pub(crate) fn update_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.poll_worker();
+        let theme = self.settings.theme();
 
         if ctx.input(|i| i.viewport().close_requested()) && self.unsaved_work {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -714,12 +715,13 @@ impl DemagogApp {
                     self.open_book_dialog(ctx.clone());
                 }
 
+                let (primary_fill, primary_text) = palette::primary_button(theme);
                 let run_btn = egui::Button::new(
                     RichText::new("⚡ Обработать книгу")
                         .strong()
-                        .color(Color32::from_rgb(15, 25, 15)),
+                        .color(primary_text),
                 )
-                .fill(Color32::from_rgb(90, 215, 120));
+                .fill(primary_fill);
 
                 let run_response = ui
                     .add_enabled(!self.is_busy, run_btn)
@@ -819,17 +821,19 @@ impl DemagogApp {
 
                 ui.separator();
 
-                let theme_icon = if self.settings.dark_mode { "☀" } else { "🌙" };
-                let theme_hint = if self.settings.dark_mode {
-                    "Переключить на светлую тему"
-                } else {
-                    "Переключить на тёмную тему"
-                };
-                if ui.button(theme_icon).on_hover_text(theme_hint).clicked() {
-                    self.settings.dark_mode = !self.settings.dark_mode;
-                    apply_style_settings(&ctx, &self.settings);
-                    self.settings.save();
-                }
+                ui.menu_button(theme_icon(theme), |ui| {
+                    for candidate in [ThemeMode::Dark, ThemeMode::Light, ThemeMode::Warm] {
+                        let label = format!("{} {}", theme_icon(candidate), candidate.label());
+                        if ui.selectable_label(candidate == theme, label).clicked() {
+                            self.settings.set_theme(candidate);
+                            apply_style_settings(ui.ctx(), &self.settings);
+                            self.settings.save();
+                            ui.close();
+                        }
+                    }
+                })
+                .response
+                .on_hover_text("Тема оформления");
             });
             ui.add_space(4.0);
         });
@@ -883,7 +887,7 @@ impl DemagogApp {
                                 "Ошибки загрузки: {}",
                                 self.dic_load_errors.len()
                             ))
-                            .color(palette::warning_text(ui.visuals().dark_mode))
+                            .color(palette::warning_text(theme))
                             .strong(),
                         )
                         .on_hover_text(self.dic_load_errors.join("\n"));
@@ -1050,13 +1054,12 @@ impl DemagogApp {
                                 state.set_open(desired_open);
 
                                 let header = state.show_header(ui, |ui| {
-                                    let dark = ui.visuals().dark_mode;
                                     let (state_label, state_color) = if active == 0 {
-                                        ("нет", palette::weak_text(dark))
+                                        ("нет", palette::weak_text(theme))
                                     } else if active == total {
-                                        ("все", palette::success_text(dark))
+                                        ("все", palette::success_text(theme))
                                     } else {
-                                        ("часть", palette::warning_text(dark))
+                                        ("часть", palette::warning_text(theme))
                                     };
                                     let mut state_response = ui
                                         .small_button(RichText::new(state_label).color(state_color))
@@ -1064,7 +1067,7 @@ impl DemagogApp {
                                     ui.add_space(4.0);
                                     let tag_response = ui.label(
                                         RichText::new(format!("[{}]", group_key))
-                                            .color(palette::tag_color(tag, dark))
+                                            .color(palette::tag_color(tag, theme))
                                             .strong(),
                                     );
                                     state_response = state_response.labelled_by(tag_response.id);
@@ -1096,6 +1099,7 @@ impl DemagogApp {
                                                 &mut self.dictionaries[idx],
                                                 &mut changed_any,
                                                 false,
+                                                theme,
                                             );
                                         }
                                         ui.add_space(4.0);
@@ -1128,6 +1132,7 @@ impl DemagogApp {
                                     &mut self.dictionaries[*idx],
                                     &mut changed_any,
                                     true,
+                                    theme,
                                 );
                             }
                         }
@@ -1161,7 +1166,7 @@ impl DemagogApp {
                 ui.selectable_value(
                     &mut self.active_tab,
                     ActiveTab::DramaChunks,
-                    format!("🧩 Чанки Drama3 ({})", self.document.chunks.len()),
+                    format!("✂ Чанки ({})", self.document.chunks.len()),
                 );
                 ui.selectable_value(
                     &mut self.active_tab,
@@ -1351,16 +1356,15 @@ impl DemagogApp {
 
                     ScrollArea::vertical().show(ui, |ui| {
                         if self.document.chunks.is_empty() {
-                            ui.label("Нажмите «Обработать книгу», чтобы нарезать текст на чанки для Drama3 / ComfyUI.");
+                            ui.label("Нажмите «Обработать книгу», чтобы нарезать текст на чанки по границам предложений. Чанк можно скопировать отдельно, а все — экспортировать в JSON для ComfyUI.");
                         }
                         for (idx, chunk) in self.document.chunks.iter().enumerate() {
                             let is_copied = self.last_copied_chunk == Some(idx);
-                            let dark = ui.visuals().dark_mode;
                             let mut frame = egui::Frame::group(ui.style());
                             if is_copied {
                                 frame = frame.stroke(egui::Stroke::new(
                                     2.0_f32,
-                                    palette::success_text(dark),
+                                    palette::success_text(theme),
                                 ));
                             }
 
@@ -1380,7 +1384,7 @@ impl DemagogApp {
                                         if is_copied {
                                             ui.label(
                                                 RichText::new("✓ Скопировано")
-                                                    .color(palette::success_text(dark))
+                                                    .color(palette::success_text(theme))
                                                     .strong(),
                                             );
                                         }
@@ -1388,7 +1392,7 @@ impl DemagogApp {
                                             egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
                                                 if ui
-                                                    .button("📋 Копировать для ComfyUI")
+                                                    .button("📋 Копировать чанк")
                                                     .clicked()
                                                 {
                                                     if let Ok(mut cb) = arboard::Clipboard::new() {
@@ -1462,7 +1466,6 @@ impl DemagogApp {
                             );
                         } else {
                             let filter_low = self.diff_filter.to_lowercase();
-                            let dark = ui.visuals().dark_mode;
                             egui::Grid::new("diff_events_grid")
                                 .striped(true)
                                 .max_col_width(420.0)
@@ -1498,12 +1501,12 @@ impl DemagogApp {
                                         ui.label(RichText::new(&ev.rule_summary).monospace());
                                         ui.label(
                                             RichText::new(&ev.before_snippet)
-                                                .color(palette::diff_before(dark))
+                                                .color(palette::diff_before(theme))
                                                 .font(editor_font.clone()),
                                         );
                                         ui.label(
                                             RichText::new(&ev.after_snippet)
-                                                .color(palette::diff_after(dark))
+                                                .color(palette::diff_after(theme))
                                                 .font(editor_font.clone()),
                                         );
                                         ui.end_row();
@@ -1554,16 +1557,29 @@ impl DemagogApp {
                             ui.end_row();
 
                             ui.label("Тема оформления:");
-                            if ui
-                                .checkbox(&mut self.settings.dark_mode, "Тёмная тема (Dark Mode)")
-                                .changed()
-                            {
+                            let mut selected_theme = self.settings.theme();
+                            egui::ComboBox::from_id_salt("theme_combo")
+                                .selected_text(selected_theme.label())
+                                .show_ui(ui, |ui| {
+                                    for candidate in [
+                                        ThemeMode::Dark,
+                                        ThemeMode::Light,
+                                        ThemeMode::Warm,
+                                    ] {
+                                        ui.selectable_value(
+                                            &mut selected_theme,
+                                            candidate,
+                                            candidate.label(),
+                                        );
+                                    }
+                                });
+                            if selected_theme != self.settings.theme() {
+                                self.settings.set_theme(selected_theme);
                                 style_changed = true;
                             }
                             ui.end_row();
 
-                            let chunk_label =
-                                ui.label("Макс. размер чанка для Drama3 / ComfyUI:");
+                            let chunk_label = ui.label("Макс. размер чанка:");
                             if ui
                                 .add(
                                     egui::Slider::new(
@@ -1623,8 +1639,8 @@ fn dictionary_card(
     d: &mut DictionaryMeta,
     changed_any: &mut bool,
     show_tag: bool,
+    theme: ThemeMode,
 ) {
-    let dark = ui.visuals().dark_mode;
     egui::Frame::group(ui.style())
         .inner_margin(egui::Margin::symmetric(10, 6))
         .show(ui, |ui| {
@@ -1637,7 +1653,7 @@ fn dictionary_card(
                 if show_tag {
                     ui.label(
                         RichText::new(format!("[{}]", d.tag.label()))
-                            .color(palette::tag_color(d.tag, dark))
+                            .color(palette::tag_color(d.tag, theme))
                             .strong(),
                     );
                 }
@@ -1645,7 +1661,7 @@ fn dictionary_card(
                 if d.outputs_plus_stress {
                     ui.label(
                         RichText::new("[ставит +]")
-                            .color(palette::warning_text(dark))
+                            .color(palette::warning_text(theme))
                             .strong(),
                     );
                 }
@@ -1674,16 +1690,16 @@ fn dictionary_card(
                     ui.label(
                         RichText::new(format!("⚠ Пропущено правил: {}", d.warnings.len()))
                             .small()
-                            .color(palette::warning_text(dark))
+                            .color(palette::warning_text(theme))
                             .strong(),
                     )
                     .on_hover_text(d.warnings.join("\n"));
                 }
                 if let (Some(ms), Some(repl)) = (d.last_ms, d.last_replacements) {
                     let col = if repl > 0 {
-                        palette::success_text(dark)
+                        palette::success_text(theme)
                     } else {
-                        palette::weak_text(dark)
+                        palette::weak_text(theme)
                     };
                     ui.label(
                         RichText::new(format!("• {ms} мс ({repl} замен)"))
@@ -1697,21 +1713,72 @@ fn dictionary_card(
     ui.add_space(4.0);
 }
 
+fn warm_visuals() -> egui::Visuals {
+    let mut visuals = egui::Visuals::light();
+    visuals.dark_mode = false;
+    visuals.panel_fill = palette::WARM_PANEL;
+    visuals.window_fill = palette::WARM_WINDOW;
+    visuals.extreme_bg_color = palette::WARM_TEXT_EDIT;
+    visuals.text_edit_bg_color = Some(palette::WARM_TEXT_EDIT);
+    visuals.faint_bg_color = palette::WARM_FAINT;
+    visuals.code_bg_color = palette::WARM_CODE;
+    visuals.weak_text_color = Some(palette::weak_text(ThemeMode::Warm));
+    visuals.selection.bg_fill = Color32::from_rgb(224, 198, 154);
+    visuals.selection.stroke = egui::Stroke::new(1.0_f32, Color32::from_rgb(120, 88, 52));
+    visuals.hyperlink_color = Color32::from_rgb(139, 90, 43);
+    visuals.warn_fg_color = Color32::from_rgb(154, 90, 0);
+    visuals.error_fg_color = Color32::from_rgb(161, 58, 46);
+
+    visuals.widgets.noninteractive.weak_bg_fill = palette::WARM_PANEL;
+    visuals.widgets.noninteractive.bg_fill = palette::WARM_PANEL;
+    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, palette::WARM_BORDER);
+    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, palette::WARM_TEXT);
+
+    visuals.widgets.inactive.weak_bg_fill = palette::WARM_WIDGET;
+    visuals.widgets.inactive.bg_fill = palette::WARM_WIDGET;
+    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, Color32::from_rgb(205, 188, 165));
+    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, Color32::from_rgb(72, 60, 46));
+
+    visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(226, 211, 188);
+    visuals.widgets.hovered.bg_fill = Color32::from_rgb(226, 211, 188);
+    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, Color32::from_rgb(160, 135, 105));
+    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.5_f32, Color32::from_rgb(47, 39, 31));
+
+    visuals.widgets.active.weak_bg_fill = Color32::from_rgb(211, 191, 161);
+    visuals.widgets.active.bg_fill = Color32::from_rgb(211, 191, 161);
+    visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0_f32, Color32::BLACK);
+    visuals.widgets.active.fg_stroke = egui::Stroke::new(2.0_f32, Color32::BLACK);
+
+    visuals.widgets.open.weak_bg_fill = Color32::from_rgb(238, 229, 214);
+    visuals.widgets.open.bg_fill = Color32::from_rgb(238, 229, 214);
+    visuals.widgets.open.bg_stroke = egui::Stroke::new(1.0_f32, Color32::from_rgb(200, 185, 165));
+    visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0_f32, Color32::BLACK);
+    visuals
+}
+
 fn apply_style_settings(ctx: &egui::Context, settings: &AppSettings) {
-    let theme = if settings.dark_mode {
+    let theme = settings.theme();
+    let egui_theme = if theme == ThemeMode::Dark {
         egui::Theme::Dark
     } else {
         egui::Theme::Light
     };
-    ctx.set_theme(theme);
+    ctx.set_theme(egui_theme);
 
-    let mut dark = egui::Visuals::dark();
-    dark.weak_text_color = Some(palette::weak_text(true));
-    ctx.set_visuals_of(egui::Theme::Dark, dark);
-
-    let mut light = egui::Visuals::light();
-    light.weak_text_color = Some(palette::weak_text(false));
-    ctx.set_visuals_of(egui::Theme::Light, light);
+    let visuals = match theme {
+        ThemeMode::Dark => {
+            let mut visuals = egui::Visuals::dark();
+            visuals.weak_text_color = Some(palette::weak_text(theme));
+            visuals
+        }
+        ThemeMode::Light => {
+            let mut visuals = egui::Visuals::light();
+            visuals.weak_text_color = Some(palette::weak_text(theme));
+            visuals
+        }
+        ThemeMode::Warm => warm_visuals(),
+    };
+    ctx.set_visuals(visuals);
 
     let base = settings.ui_font_size;
     ctx.all_styles_mut(|style| {
@@ -1826,6 +1893,14 @@ pub fn locate_default_dic_folder() -> PathBuf {
 
 fn text_would_be_lost(text: &str) -> bool {
     !text.trim().is_empty()
+}
+
+fn theme_icon(theme: ThemeMode) -> &'static str {
+    match theme {
+        ThemeMode::Dark => "🌙",
+        ThemeMode::Light => "☀",
+        ThemeMode::Warm => "📖",
+    }
 }
 
 fn window_title(document_title: &str, unsaved: bool) -> String {

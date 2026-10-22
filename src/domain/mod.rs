@@ -1,6 +1,24 @@
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThemeMode {
+    #[default]
+    Dark,
+    Light,
+    Warm,
+}
+
+impl ThemeMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dark => "Тёмная",
+            Self::Light => "Светлая",
+            Self::Warm => "Тёплая для чтения",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StressFormat {
     /// Знак '+' перед ударной гласной: з+амок, +Август (для FishAudio Drama3 / Silero / F5-TTS)
@@ -184,6 +202,8 @@ pub struct AppSettings {
     pub ui_font_size: f32,
     pub editor_font_size: f32,
     pub dark_mode: bool,
+    #[serde(default)]
+    pub warm_mode: bool,
     pub stress_format: StressFormat,
     pub chunk_config: ChunkConfig,
     pub dic_folder: PathBuf,
@@ -200,6 +220,7 @@ impl Default for AppSettings {
             ui_font_size: 16.0,
             editor_font_size: 19.0,
             dark_mode: true,
+            warm_mode: false,
             stress_format: StressFormat::PlusBeforeVowel,
             chunk_config: ChunkConfig::default(),
             dic_folder: PathBuf::from("dic"),
@@ -211,6 +232,21 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
+    pub fn theme(&self) -> ThemeMode {
+        if self.dark_mode {
+            ThemeMode::Dark
+        } else if self.warm_mode {
+            ThemeMode::Warm
+        } else {
+            ThemeMode::Light
+        }
+    }
+
+    pub fn set_theme(&mut self, theme: ThemeMode) {
+        self.dark_mode = theme == ThemeMode::Dark;
+        self.warm_mode = theme == ThemeMode::Warm;
+    }
+
     pub fn settings_path() -> PathBuf {
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
@@ -421,5 +457,22 @@ pub fn describe_dictionary(name: &str, content: &str) -> (DictionaryTag, String,
             "Текстовый словарь замен".into(),
             false,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn theme_roundtrip() {
+        let mut settings = AppSettings::default();
+        assert_eq!(settings.theme(), ThemeMode::Dark);
+        settings.set_theme(ThemeMode::Light);
+        assert_eq!(settings.theme(), ThemeMode::Light);
+        assert!(!settings.dark_mode && !settings.warm_mode);
+        settings.set_theme(ThemeMode::Warm);
+        assert_eq!(settings.theme(), ThemeMode::Warm);
+        assert!(!settings.dark_mode && settings.warm_mode);
     }
 }
