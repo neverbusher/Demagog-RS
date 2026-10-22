@@ -93,7 +93,6 @@ impl ResultState {
     }
 
     fn mark_rechunked(&mut self) {
-        self.dirty = true;
         self.chunks_stale = false;
     }
 
@@ -3011,6 +3010,16 @@ mod tests {
         state.mark_rechunked();
         assert!(state.is_dirty());
         assert!(state.is_edited());
+        assert!(!state.is_chunks_stale());
+    }
+
+    #[test]
+    fn rechunking_does_not_mark_saved_text_as_unsaved() {
+        let mut state = ResultState::new(StressFormat::PlusBeforeVowel);
+        state.mark_computed(StressFormat::PlusBeforeVowel);
+        state.mark_saved();
+        state.mark_rechunked();
+        assert!(!state.is_dirty());
         assert!(!state.is_chunks_stale());
     }
 
