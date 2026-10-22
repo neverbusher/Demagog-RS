@@ -363,7 +363,7 @@ impl DemagogApp {
 
         if self.unsaved_work
             && !confirm_destructive(
-                "Открыть другую книгу? Несохранённая работа будет потеряна.",
+                "Открыть другую книгу?\nНесохранённая работа будет потеряна.",
             )
         {
             return;
@@ -488,7 +488,7 @@ impl DemagogApp {
 
         if ctx.input(|i| i.viewport().close_requested()) && self.unsaved_work {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            if confirm_destructive("Есть несохранённая работа. Выйти без сохранения?") {
+            if confirm_destructive("Есть несохранённая работа.\nВыйти без сохранения?") {
                 self.shutdown();
             }
         }
@@ -918,6 +918,7 @@ impl DemagogApp {
             ui.separator();
 
             let editor_font = FontId::new(self.settings.editor_font_size, FontFamily::Monospace);
+            let line_height = editor_line_height(self.settings.editor_font_size);
 
             match self.active_tab {
                 ActiveTab::RawText => {
@@ -929,7 +930,7 @@ impl DemagogApp {
                                     if !txt.is_empty()
                                         && (!self.unsaved_work
                                             || confirm_destructive(
-                                                "Заменить исходный текст содержимым буфера? Несохранённые изменения будут потеряны.",
+                                                "Заменить исходный текст содержимым буфера?\nНесохранённые изменения будут потеряны.",
                                             ))
                                     {
                                         self.document.raw_text = txt;
@@ -943,7 +944,7 @@ impl DemagogApp {
                             let had_text = text_would_be_lost(&self.document.raw_text);
                             if !had_text
                                 || confirm_destructive(
-                                    "Очистить исходный текст? Текст будет удалён без возможности отмены.",
+                                    "Очистить исходный текст?\nТекст будет удалён без возможности отмены.",
                                 )
                             {
                                 self.document.raw_text.clear();
@@ -954,12 +955,18 @@ impl DemagogApp {
                         }
                     });
                     ui.add_space(4.0);
+                    let mut layouter = editor_layouter(
+                        editor_font.clone(),
+                        ui.visuals().text_color(),
+                        line_height,
+                    );
                     ScrollArea::vertical().show(ui, |ui| {
                         let response = ui.add(
                             egui::TextEdit::multiline(&mut self.document.raw_text)
                                 .desired_width(f32::INFINITY)
                                 .desired_rows(28)
-                                .font(editor_font.clone()),
+                                .margin(egui::Margin::symmetric(14, 12))
+                                .layouter(&mut layouter),
                         );
                         if response.changed() {
                             self.unsaved_work = true;
@@ -993,7 +1000,7 @@ impl DemagogApp {
                             let had_text = text_would_be_lost(&self.document.raw_text);
                             if !had_text
                                 || confirm_destructive(
-                                    "Заменить исходный текст результатом? Текущий исходный текст будет потерян.",
+                                    "Заменить исходный текст результатом?\nТекущий исходный текст будет потерян.",
                                 )
                             {
                                 self.document.raw_text = self.document.processed_text.clone();
@@ -1003,12 +1010,18 @@ impl DemagogApp {
                         }
                     });
                     ui.add_space(4.0);
+                    let mut layouter = editor_layouter(
+                        editor_font.clone(),
+                        ui.visuals().text_color(),
+                        line_height,
+                    );
                     ScrollArea::vertical().show(ui, |ui| {
                         let response = ui.add(
                             egui::TextEdit::multiline(&mut self.document.processed_text)
                                 .desired_width(f32::INFINITY)
                                 .desired_rows(28)
-                                .font(editor_font.clone()),
+                                .margin(egui::Margin::symmetric(14, 12))
+                                .layouter(&mut layouter),
                         );
                         if response.changed() {
                             self.unsaved_work = true;
@@ -1100,7 +1113,11 @@ impl DemagogApp {
                                         );
                                     });
                                     ui.add_space(4.0);
-                                    ui.label(RichText::new(chunk).font(editor_font.clone()));
+                                    ui.label(
+                                        RichText::new(chunk)
+                                            .font(editor_font.clone())
+                                            .line_height(Some(line_height)),
+                                    );
                                 });
                             ui.add_space(6.0);
                         }
@@ -1504,6 +1521,29 @@ fn text_would_be_lost(text: &str) -> bool {
     !text.trim().is_empty()
 }
 
+fn editor_line_height(font_size: f32) -> f32 {
+    font_size * 1.45
+}
+
+fn editor_layouter(
+    font: FontId,
+    text_color: Color32,
+    line_height: f32,
+) -> impl FnMut(&egui::Ui, &dyn egui::TextBuffer, f32) -> Arc<egui::Galley> {
+    move |ui, text, wrap_width| {
+        let mut job = egui::text::LayoutJob::simple(
+            text.as_str().to_owned(),
+            font.clone(),
+            text_color,
+            wrap_width,
+        );
+        for section in &mut job.sections {
+            section.format.line_height = Some(line_height);
+        }
+        ui.fonts_mut(|fonts| fonts.layout_job(job))
+    }
+}
+
 fn confirm_destructive(description: &str) -> bool {
     rfd::MessageDialog::new()
         .set_title("Demagog-RS")
@@ -1526,5 +1566,20 @@ mod tests {
     #[test]
     fn blank_text_does_not_need_confirmation() {
         assert!(!text_would_be_lost(" \n\t"));
+    }
+
+    #[test]
+    fn editor_line_height_stays_comfortable() {
+        for font_size in [12.0, 16.0, 19.0, 28.0, 36.0] {
+            let line_height = editor_line_height(font_size);
+            assert!(
+                line_height >= font_size * 1.4,
+                "{line_height} is too tight for {font_size}"
+            );
+            assert!(
+                line_height <= font_size * 1.6,
+                "{line_height} is too loose for {font_size}"
+            );
+        }
     }
 }
