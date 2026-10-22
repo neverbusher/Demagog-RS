@@ -486,4 +486,21 @@ mod tests {
         assert_eq!(fast.text, diff.text);
         assert_eq!(fast.replacements_count, diff.replacements_count);
     }
+
+    #[test]
+    fn parallel_compile_keeps_indexed_block_order() {
+        let mut content = String::new();
+        for i in 0..6 {
+            content.push_str(&format!("###ключ{i}\nслово{i}=ЗАМЕНА{i}\n"));
+        }
+
+        let processor = RexProcessor::compile("test.rex".to_string(), &content, "UTF-8");
+        assert_eq!(processor.kind(), DictionaryKind::RegexIndexed);
+        assert_eq!(processor.indexed_blocks.len(), 6);
+        for (i, block) in processor.indexed_blocks.iter().enumerate() {
+            assert_eq!(block.keywords, vec![format!("ключ{i}")]);
+            assert_eq!(block.rules.len(), 1);
+            assert_eq!(block.rules[0].replacement, format!("ЗАМЕНА{i}"));
+        }
+    }
 }

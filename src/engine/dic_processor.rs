@@ -112,12 +112,7 @@ impl DicProcessor {
         }
 
         let mut exact_cs = FxHashMap::default();
-        let estimated_rules = content.lines().count();
-        let mut exact_ci = if estimated_rules >= 100_000 {
-            FxHashMap::with_capacity_and_hasher(estimated_rules, Default::default())
-        } else {
-            FxHashMap::default()
-        };
+        let mut exact_ci = FxHashMap::default();
         let mut prefix_cs = FxHashMap::default();
         let mut prefix_ci = FxHashMap::default();
         let mut min_prefix_chars = usize::MAX;
@@ -1186,6 +1181,26 @@ mod tests {
         let output = processor.process("стоящих на столе", false);
         assert_eq!(output.text, "стоЯщих на столе");
         assert_eq!(output.replacements_count, 1);
+    }
+
+    #[test]
+    fn parallel_wildcard_compile_keeps_source_order() {
+        let processor =
+            DicProcessor::compile("test.dic".to_string(), "*во=ПЕРВОЕ\n*во=ВТОРОЕ\n", "UTF-8");
+
+        assert_eq!(processor.unanchored_wildcards.len(), 2);
+        assert!(
+            processor.unanchored_wildcards[0]
+                .compiled
+                .replacement
+                .ends_with("ПЕРВОЕ")
+        );
+        assert!(
+            processor.unanchored_wildcards[1]
+                .compiled
+                .replacement
+                .ends_with("ВТОРОЕ")
+        );
     }
 
     #[test]
