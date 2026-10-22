@@ -619,7 +619,7 @@ impl DemagogApp {
     }
 
     fn update_window_title(&mut self, ctx: &egui::Context) {
-        let title = window_title(&self.document.title, self.has_unsaved_work());
+        let title = window_title(&self.document.title, self.document.source_path.is_some());
         if title != self.last_window_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.last_window_title = title;
@@ -1133,9 +1133,9 @@ impl DemagogApp {
         }
         let (icon, color) = match self.status_level {
             StatusLevel::Info => ("", ui.visuals().text_color()),
-            StatusLevel::Success => ("✓ ", palette::success_text(theme)),
-            StatusLevel::Warning => ("⚠ ", palette::warning_text(theme)),
-            StatusLevel::Error => ("✖ ", palette::diff_before(theme)),
+            StatusLevel::Success => ("✅ ", palette::success_text(theme)),
+            StatusLevel::Warning => ("⚠️ ", palette::warning_text(theme)),
+            StatusLevel::Error => ("❌ ", palette::diff_before(theme)),
         };
         let status = ui.add(
             egui::Label::new(RichText::new(format!("{icon}{}", self.status_line)).color(color))
@@ -2628,9 +2628,12 @@ fn reset_settings_preserving_folder(settings: &AppSettings) -> AppSettings {
     }
 }
 
-fn window_title(document_title: &str, unsaved: bool) -> String {
-    let marker = if unsaved { " *" } else { "" };
-    format!("Demagog-RS — {document_title}{marker}")
+fn window_title(document_title: &str, has_source: bool) -> String {
+    if has_source {
+        format!("Demagog-RS — {document_title}")
+    } else {
+        "Demagog-RS".to_string()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3058,9 +3061,9 @@ mod tests {
     }
 
     #[test]
-    fn window_title_includes_document_and_unsaved_marker() {
-        assert_eq!(window_title("Книга", false), "Demagog-RS — Книга");
-        assert_eq!(window_title("Книга", true), "Demagog-RS — Книга *");
+    fn window_title_uses_document_name_only_for_opened_files() {
+        assert_eq!(window_title("Книга", false), "Demagog-RS");
+        assert_eq!(window_title("Книга", true), "Demagog-RS — Книга");
     }
 
     #[test]
