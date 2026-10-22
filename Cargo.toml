@@ -8,7 +8,6 @@ description = "Text and dictionary processor for TTS and ComfyUI"
 [dependencies]
 eframe = { version = "0.34", optional = true, default-features = false, features = ["accesskit", "default_fonts", "glow"] }
 egui = "0.34"
-egui_extras = { version = "0.34", features = ["all_loaders"] }
 egui_software_backend = { version = "0.0.3", optional = true }
 rfd = { version = "0.15", features = ["common-controls-v6"] }
 rayon = "1.10"
