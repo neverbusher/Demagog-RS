@@ -24,6 +24,9 @@ arboard = "3.4"
 [build-dependencies]
 tauri-winres = "=0.3.6"
 
+[dev-dependencies]
+egui_kittest = "0.34.3"
+
 [features]
 default = ["eframe-backend"]
 eframe-backend = ["dep:eframe"]

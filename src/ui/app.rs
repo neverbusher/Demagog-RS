@@ -230,7 +230,6 @@ impl DemagogApp {
         configure_cyrillic_fonts(&egui_ctx);
         let (settings, settings_warning) = AppSettings::load(initial_dic_folder);
         apply_style_settings(&egui_ctx, &settings);
-        let result_format = settings.stress_format;
 
         let sample_text = concat!(
             "В 1995 году в замке у ворот города стояли все свои. ",
@@ -239,22 +238,38 @@ impl DemagogApp {
             "Веселые места и весеннего ветра шум напоминали о том, что все уже в прошлом."
         )
         .to_string();
-        let sample_chars = sample_text.chars().count();
+        let document = BookDocument {
+            title: "Пример текста".to_string(),
+            source_path: None,
+            raw_text: sample_text,
+            processed_text: String::new(),
+            chunks: Vec::new(),
+        };
 
-        let mut app = Self {
+        let mut app = Self::from_parts(settings, document);
+        app.set_status(
+            StatusLevel::Info,
+            "Загрузка и компиляция словарей на всех ядрах CPU...",
+        );
+        app.reload_dictionaries_async(egui_ctx);
+        if let Some(warning) = settings_warning {
+            app.set_status(StatusLevel::Error, warning);
+        }
+        app
+    }
+
+    fn from_parts(settings: AppSettings, document: BookDocument) -> Self {
+        let result_format = settings.stress_format;
+        let raw_char_count = document.raw_text.chars().count();
+        let processed_char_count = document.processed_text.chars().count();
+        Self {
             settings,
             dictionaries: Vec::new(),
-            document: BookDocument {
-                title: "Пример текста".to_string(),
-                source_path: None,
-                raw_text: sample_text,
-                processed_text: String::new(),
-                chunks: Vec::new(),
-            },
+            document,
             raw_pipeline_output: String::new(),
             active_tab: ActiveTab::RawText,
             report: PipelineReport::default(),
-            status_line: "Загрузка и компиляция словарей на всех ядрах CPU...".to_string(),
+            status_line: String::new(),
             status_level: StatusLevel::Info,
             last_error: None,
             is_busy: false,
@@ -278,8 +293,8 @@ impl DemagogApp {
             find_last_edit: Instant::now(),
             find_current: 0,
             find_go_to: None,
-            raw_char_count: sample_chars,
-            processed_char_count: 0,
+            raw_char_count,
+            processed_char_count,
             chunk_render_limit: CHUNK_BATCH,
             diff_render_limit: DIFF_BATCH,
             diff_filter_cache: String::new(),
@@ -288,13 +303,7 @@ impl DemagogApp {
             focus_find: false,
             last_window_title: "Demagog-RS".to_string(),
             window_icon_applied: false,
-        };
-
-        app.reload_dictionaries_async(egui_ctx);
-        if let Some(warning) = settings_warning {
-            app.set_status(StatusLevel::Error, warning);
         }
-        app
     }
 
     fn reload_dictionaries_async(&mut self, ctx: egui::Context) {
@@ -1991,13 +2000,16 @@ impl DemagogApp {
                         find_current,
                     );
                     ScrollArea::vertical().show(ui, |ui| {
-                        let output = egui::TextEdit::multiline(&mut self.document.raw_text)
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(28)
-                            .margin(egui::Margin::symmetric(14, 12))
-                            .interactive(text_mutations_enabled(self.is_busy))
-                            .layouter(&mut layouter)
-                            .show(ui);
+                        let output = ui
+                            .add_enabled_ui(text_mutations_enabled(self.is_busy), |ui| {
+                                egui::TextEdit::multiline(&mut self.document.raw_text)
+                                    .desired_width(f32::INFINITY)
+                                    .desired_rows(28)
+                                    .margin(egui::Margin::symmetric(14, 12))
+                                    .layouter(&mut layouter)
+                                    .show(ui)
+                            })
+                            .inner;
                         if output.response.changed() {
                             self.source_dirty = true;
                             self.refresh_raw_char_count();
@@ -2084,13 +2096,16 @@ impl DemagogApp {
                         find_current,
                     );
                     ScrollArea::vertical().show(ui, |ui| {
-                        let output = egui::TextEdit::multiline(&mut self.document.processed_text)
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(28)
-                            .margin(egui::Margin::symmetric(14, 12))
-                            .interactive(text_mutations_enabled(self.is_busy))
-                            .layouter(&mut layouter)
-                            .show(ui);
+                        let output = ui
+                            .add_enabled_ui(text_mutations_enabled(self.is_busy), |ui| {
+                                egui::TextEdit::multiline(&mut self.document.processed_text)
+                                    .desired_width(f32::INFINITY)
+                                    .desired_rows(28)
+                                    .margin(egui::Margin::symmetric(14, 12))
+                                    .layouter(&mut layouter)
+                                    .show(ui)
+                            })
+                            .inner;
                         if output.response.changed() {
                             self.result_state.mark_edited();
                             if self.document.processed_text.trim().is_empty() {
@@ -3421,5 +3436,86 @@ mod tests {
         assert_eq!(reset.theme(), ThemeMode::Dark);
         assert_eq!(reset.ui_font_size, 16.0);
         assert!(reset.disabled_dictionaries.is_empty());
+    }
+
+    fn ui_test_app(raw_text: &str, processed_text: &str, chunks: Vec<String>) -> DemagogApp {
+        let document = BookDocument {
+            title: "Тестовая книга".to_string(),
+            source_path: None,
+            raw_text: raw_text.to_string(),
+            processed_text: processed_text.to_string(),
+            chunks,
+        };
+        let mut app = DemagogApp::from_parts(AppSettings::default(), document);
+        app.window_icon_applied = true;
+        app
+    }
+
+    #[test]
+    fn stale_chunk_banner_rebuilds_chunks_through_the_ui() {
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable;
+
+        let mut app = ui_test_app("", "Первое предложение.", Vec::new());
+        app.active_tab = ActiveTab::Chunks;
+        app.result_state
+            .mark_computed(StressFormat::PlusBeforeVowel);
+        app.result_state.mark_edited();
+
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1280.0, 900.0))
+            .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+        harness.run();
+        harness.get_by_label_contains("Пересобрать чанки").click();
+        harness.run();
+
+        assert!(!harness.state().document.chunks.is_empty());
+        assert!(!harness.state().result_state.is_chunks_stale());
+    }
+
+    #[test]
+    fn export_button_is_disabled_for_an_empty_result() {
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::{NodeT, Queryable};
+
+        let app = ui_test_app("", "", vec!["старый чанк".to_string()]);
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1280.0, 900.0))
+            .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+        harness.run();
+
+        let export = harness.get_by_label_contains("Экспорт чанков");
+        assert!(export.accesskit_node().is_disabled());
+    }
+
+    #[test]
+    fn editors_are_disabled_while_processing() {
+        use egui::accesskit::Role;
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::{NodeT, Queryable};
+
+        let mut app = ui_test_app("Исходный текст", "", Vec::new());
+        app.is_busy = true;
+
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1280.0, 900.0))
+            .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+        harness.run_steps(2);
+
+        assert!(
+            harness
+                .get_all_by_role(Role::MultilineTextInput)
+                .any(|node| node.accesskit_node().is_disabled()),
+            "the active text editor must be disabled while processing"
+        );
+
+        harness.state_mut().is_busy = false;
+        harness.run_steps(1);
+        assert!(
+            harness
+                .get_all_by_role(Role::MultilineTextInput)
+                .any(|node| !node.accesskit_node().is_disabled()),
+            "the editor must become editable again after processing"
+        );
     }
 }
