@@ -83,7 +83,6 @@ impl ResultState {
 
     fn mark_saved(&mut self) {
         self.dirty = false;
-        self.edited = false;
     }
 
     fn mark_exported(&mut self) {
@@ -2987,13 +2986,16 @@ mod tests {
     }
 
     #[test]
-    fn saving_clears_both_dirty_and_edited_flags() {
+    fn saving_clears_dirty_but_remembers_manual_edits() {
         let mut state = ResultState::new(StressFormat::PlusBeforeVowel);
         state.mark_computed(StressFormat::PlusBeforeVowel);
         state.mark_edited();
         state.mark_saved();
         assert!(!state.is_dirty());
-        assert!(!state.is_edited());
+        assert!(
+            state.is_edited(),
+            "reformatting must still warn about manual edits after saving"
+        );
         assert!(
             state.is_chunks_stale(),
             "saving TXT does not rebuild the chunks"
