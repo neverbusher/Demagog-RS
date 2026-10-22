@@ -14,6 +14,7 @@ use crate::ports::{DocumentReader, StressFormatter, TextChunker, TextProcessor};
 use crate::services::chunker::SentenceAwareChunker;
 use crate::services::pipeline::ProcessingPipeline;
 use crate::services::stress::RussianStressFormatter;
+use crate::ui::palette;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActiveTab {
@@ -789,7 +790,10 @@ impl DemagogApp {
                                     ui.add_space(4.0);
                                     ui.label(
                                         RichText::new(format!("[{}]", group_key))
-                                            .color(tag_color(tag))
+                                            .color(palette::tag_color(
+                                                tag,
+                                                ui.visuals().dark_mode,
+                                            ))
                                             .strong(),
                                     );
                                     ui.with_layout(
@@ -975,14 +979,16 @@ impl DemagogApp {
                         }
                         for (idx, chunk) in self.document.chunks.iter().enumerate() {
                             let is_copied = self.last_copied_chunk == Some(idx);
-                            let frame_stroke = if is_copied {
-                                egui::Stroke::new(2.0_f32, Color32::from_rgb(90, 210, 120))
-                            } else {
-                                egui::Stroke::new(1.0_f32, Color32::from_gray(70))
-                            };
+                            let dark = ui.visuals().dark_mode;
+                            let mut frame = egui::Frame::group(ui.style());
+                            if is_copied {
+                                frame = frame.stroke(egui::Stroke::new(
+                                    2.0_f32,
+                                    palette::success_text(dark),
+                                ));
+                            }
 
-                            egui::Frame::group(ui.style())
-                                .stroke(frame_stroke)
+                            frame
                                 .inner_margin(egui::Margin::same(10))
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
@@ -998,7 +1004,7 @@ impl DemagogApp {
                                         if is_copied {
                                             ui.label(
                                                 RichText::new("✓ Скопировано")
-                                                    .color(Color32::from_rgb(90, 210, 120))
+                                                    .color(palette::success_text(dark))
                                                     .strong(),
                                             );
                                         }
@@ -1076,6 +1082,7 @@ impl DemagogApp {
                             );
                         } else {
                             let filter_low = self.diff_filter.to_lowercase();
+                            let dark = ui.visuals().dark_mode;
                             egui::Grid::new("diff_events_grid")
                                 .striped(true)
                                 .max_col_width(420.0)
@@ -1111,12 +1118,12 @@ impl DemagogApp {
                                         ui.label(RichText::new(&ev.rule_summary).monospace());
                                         ui.label(
                                             RichText::new(&ev.before_snippet)
-                                                .color(Color32::from_rgb(240, 120, 120))
+                                                .color(palette::diff_before(dark))
                                                 .font(editor_font.clone()),
                                         );
                                         ui.label(
                                             RichText::new(&ev.after_snippet)
-                                                .color(Color32::from_rgb(110, 225, 140))
+                                                .color(palette::diff_after(dark))
                                                 .font(editor_font.clone()),
                                         );
                                         ui.end_row();
@@ -1225,6 +1232,7 @@ impl DemagogApp {
 }
 
 fn dictionary_card(ui: &mut egui::Ui, d: &mut DictionaryMeta, changed_any: &mut bool) {
+    let dark = ui.visuals().dark_mode;
     egui::Frame::group(ui.style())
         .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {
@@ -1238,14 +1246,14 @@ fn dictionary_card(ui: &mut egui::Ui, d: &mut DictionaryMeta, changed_any: &mut 
 
                 ui.label(
                     RichText::new(format!("[{}]", d.tag.label()))
-                        .color(tag_color(d.tag))
+                        .color(palette::tag_color(d.tag, dark))
                         .strong(),
                 );
 
                 if d.outputs_plus_stress {
                     ui.label(
                         RichText::new("[ставит +]")
-                            .color(Color32::from_rgb(255, 175, 70))
+                            .color(palette::warning_text(dark))
                             .strong(),
                     );
                 }
@@ -1270,16 +1278,16 @@ fn dictionary_card(ui: &mut egui::Ui, d: &mut DictionaryMeta, changed_any: &mut 
                     ui.label(
                         RichText::new(format!("⚠ пропущено правил: {}", d.warnings.len()))
                             .small()
-                            .color(Color32::from_rgb(255, 180, 70))
+                            .color(palette::warning_text(dark))
                             .strong(),
                     )
                     .on_hover_text(d.warnings.join("\n"));
                 }
                 if let (Some(ms), Some(repl)) = (d.last_ms, d.last_replacements) {
                     let col = if repl > 0 {
-                        Color32::from_rgb(100, 225, 135)
+                        palette::success_text(dark)
                     } else {
-                        Color32::GRAY
+                        palette::weak_text(dark)
                     };
                     ui.label(
                         RichText::new(format!("• {ms} мс ({repl} замен)"))
@@ -1293,18 +1301,6 @@ fn dictionary_card(ui: &mut egui::Ui, d: &mut DictionaryMeta, changed_any: &mut 
     ui.add_space(4.0);
 }
 
-fn tag_color(tag: DictionaryTag) -> Color32 {
-    match tag {
-        DictionaryTag::NumbersAndDates => Color32::from_rgb(90, 175, 250),
-        DictionaryTag::YoFication => Color32::from_rgb(100, 220, 160),
-        DictionaryTag::HomographsCap => Color32::from_rgb(195, 135, 255),
-        DictionaryTag::CapToPlusConverter => Color32::from_rgb(255, 180, 70),
-        DictionaryTag::PlusStressWords => Color32::from_rgb(255, 125, 110),
-        DictionaryTag::PlusStressOrthoepy => Color32::from_rgb(255, 95, 95),
-        DictionaryTag::CleanupAndTranslit => Color32::from_rgb(150, 200, 210),
-    }
-}
-
 fn apply_style_settings(ctx: &egui::Context, settings: &AppSettings) {
     let theme = if settings.dark_mode {
         egui::Theme::Dark
@@ -1312,8 +1308,14 @@ fn apply_style_settings(ctx: &egui::Context, settings: &AppSettings) {
         egui::Theme::Light
     };
     ctx.set_theme(theme);
-    ctx.set_visuals_of(egui::Theme::Dark, egui::Visuals::dark());
-    ctx.set_visuals_of(egui::Theme::Light, egui::Visuals::light());
+
+    let mut dark = egui::Visuals::dark();
+    dark.weak_text_color = Some(palette::weak_text(true));
+    ctx.set_visuals_of(egui::Theme::Dark, dark);
+
+    let mut light = egui::Visuals::light();
+    light.weak_text_color = Some(palette::weak_text(false));
+    ctx.set_visuals_of(egui::Theme::Light, light);
 
     let base = settings.ui_font_size;
     ctx.all_styles_mut(|style| {
