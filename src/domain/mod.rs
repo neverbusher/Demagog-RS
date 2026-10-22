@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ThemeMode {
@@ -263,21 +263,58 @@ impl AppSettings {
         PathBuf::from("settings.json")
     }
 
-    pub fn load(default_dic_folder: PathBuf) -> Self {
-        let path = Self::settings_path();
-        if let Ok(bytes) = std::fs::read(&path)
-            && let Some(settings) = Self::from_json(&bytes, default_dic_folder.clone())
-        {
-            return settings;
+    pub fn load(default_dic_folder: PathBuf) -> (Self, Option<String>) {
+        Self::load_from_path(&Self::settings_path(), default_dic_folder)
+    }
+
+    fn load_from_path(path: &Path, default_dic_folder: PathBuf) -> (Self, Option<String>) {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return (Self::with_default_folder(default_dic_folder), None);
+            }
+            Err(error) => {
+                return (
+                    Self::with_default_folder(default_dic_folder),
+                    Some(format!(
+                        "Не удалось прочитать настройки {}: {error}",
+                        path.display()
+                    )),
+                );
+            }
+        };
+
+        match Self::from_json(&bytes, default_dic_folder.clone()) {
+            Ok(settings) => (settings, None),
+            Err(error) => {
+                let backup = path.with_extension("json.corrupt");
+                let backup_note = match std::fs::copy(path, &backup) {
+                    Ok(_) => format!("Сохранена копия: {}", backup.display()),
+                    Err(copy_error) => format!(
+                        "Не удалось сохранить копию {}: {copy_error}",
+                        backup.display()
+                    ),
+                };
+                (
+                    Self::with_default_folder(default_dic_folder),
+                    Some(format!(
+                        "Не удалось прочитать настройки {}: {error}. {backup_note}",
+                        path.display()
+                    )),
+                )
+            }
         }
+    }
+
+    fn with_default_folder(default_dic_folder: PathBuf) -> Self {
         Self {
             dic_folder: default_dic_folder,
             ..Self::default()
         }
     }
 
-    fn from_json(bytes: &[u8], default_dic_folder: PathBuf) -> Option<Self> {
-        let mut settings = serde_json::from_slice::<Self>(bytes).ok()?;
+    fn from_json(bytes: &[u8], default_dic_folder: PathBuf) -> Result<Self, serde_json::Error> {
+        let mut settings = serde_json::from_slice::<Self>(bytes)?;
         if let Some(theme) = legacy_theme(settings.dark_mode, settings.warm_mode) {
             settings.theme = theme;
             settings.dark_mode = None;
@@ -292,7 +329,7 @@ impl AppSettings {
         }
         settings.ui_font_size = settings.ui_font_size.clamp(12.0, 28.0);
         settings.editor_font_size = settings.editor_font_size.clamp(12.0, 36.0);
-        Some(settings)
+        Ok(settings)
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -530,5 +567,36 @@ mod tests {
         assert_eq!(loaded.theme(), ThemeMode::Warm);
         assert!(loaded.dark_mode.is_none());
         assert!(loaded.warm_mode.is_none());
+    }
+
+    #[test]
+    fn corrupt_settings_are_reported_and_backed_up() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "demagog-settings-{}-{stamp}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"{not valid json").expect("write corrupt settings");
+
+        let (settings, warning) =
+            AppSettings::load_from_path(&path, PathBuf::from("missing-dic-folder"));
+        assert_eq!(settings.theme(), ThemeMode::Dark);
+        let warning = warning.expect("corrupt settings must be reported");
+        assert!(warning.contains("настройки"), "{warning}");
+
+        let backup = path.with_extension("json.corrupt");
+        assert!(backup.exists(), "corrupt settings must be backed up");
+        assert_eq!(
+            std::fs::read(&backup).expect("read backup"),
+            b"{not valid json"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&backup);
     }
 }

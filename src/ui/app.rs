@@ -228,7 +228,7 @@ impl DemagogApp {
 
     pub fn init(egui_ctx: egui::Context, initial_dic_folder: PathBuf) -> Self {
         configure_cyrillic_fonts(&egui_ctx);
-        let settings = AppSettings::load(initial_dic_folder);
+        let (settings, settings_warning) = AppSettings::load(initial_dic_folder);
         apply_style_settings(&egui_ctx, &settings);
         let result_format = settings.stress_format;
 
@@ -291,6 +291,9 @@ impl DemagogApp {
         };
 
         app.reload_dictionaries_async(egui_ctx);
+        if let Some(warning) = settings_warning {
+            app.set_status(StatusLevel::Error, warning);
+        }
         app
     }
 
