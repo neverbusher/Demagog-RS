@@ -575,7 +575,7 @@ impl DemagogApp {
             );
 
             if ui
-                .button("Закрыть")
+                .button("✖")
                 .on_hover_text("Закрыть поиск (Esc)")
                 .clicked()
             {
@@ -715,7 +715,7 @@ impl DemagogApp {
                 }
 
                 let run_btn = egui::Button::new(
-                    RichText::new("Обработать книгу")
+                    RichText::new("⚡ Обработать книгу")
                         .strong()
                         .color(Color32::from_rgb(15, 25, 15)),
                 )
@@ -732,7 +732,7 @@ impl DemagogApp {
                 if ui
                     .add_enabled(
                         !self.is_busy,
-                        egui::Button::new("С логом замен (Diff)"),
+                        egui::Button::new("🔬 С логом замен (Diff)"),
                     )
                     .on_hover_text("Собрать журнал замен (Ctrl+Shift+Enter)")
                     .clicked()
@@ -764,15 +764,23 @@ impl DemagogApp {
                 ui.separator();
 
                 if ui
-                    .button("Сохранить TXT")
+                    .add_enabled(
+                        !self.document.processed_text.is_empty(),
+                        egui::Button::new("💾 Сохранить TXT"),
+                    )
                     .on_hover_text("Сохранить результат в TXT (Ctrl+S)")
+                    .on_disabled_hover_text("Сначала обработайте текст")
                     .clicked()
                 {
                     self.save_processed_txt();
                 }
                 if ui
-                    .button("Экспорт JSON")
+                    .add_enabled(
+                        !self.document.chunks.is_empty(),
+                        egui::Button::new("📦 Экспорт JSON"),
+                    )
                     .on_hover_text("Экспортировать чанки в JSON (Ctrl+E)")
+                    .on_disabled_hover_text("Сначала обработайте текст")
                     .clicked()
                 {
                     self.export_chunks_json();
@@ -811,12 +819,13 @@ impl DemagogApp {
 
                 ui.separator();
 
+                let theme_icon = if self.settings.dark_mode { "☀" } else { "🌙" };
                 let theme_hint = if self.settings.dark_mode {
                     "Переключить на светлую тему"
                 } else {
                     "Переключить на тёмную тему"
                 };
-                if ui.button("Тема").on_hover_text(theme_hint).clicked() {
+                if ui.button(theme_icon).on_hover_text(theme_hint).clicked() {
                     self.settings.dark_mode = !self.settings.dark_mode;
                     apply_style_settings(&ctx, &self.settings);
                     self.settings.save();
@@ -890,10 +899,10 @@ impl DemagogApp {
             .show_inside(ui, |ui| {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.heading("Словари");
+                    ui.heading("📚 Словари");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
-                            .add_enabled(!self.is_busy, egui::Button::new("Обновить"))
+                            .add_enabled(!self.is_busy, egui::Button::new("🔄 Обновить"))
                             .on_hover_text("Перезагрузить словари с диска")
                             .clicked()
                         {
@@ -968,14 +977,19 @@ impl DemagogApp {
 
                 ui.horizontal(|ui| {
                     let label = ui.label("Фильтр:");
-                    let width = (ui.available_width() - 56.0).max(80.0);
+                    let width = (ui.available_width() - 24.0).max(80.0);
                     ui.add(
                         egui::TextEdit::singleline(&mut self.dic_search_filter)
                             .hint_text("Имя, описание или тип")
                             .desired_width(width),
                     )
                     .labelled_by(label.id);
-                    if !self.dic_search_filter.is_empty() && ui.small_button("Сброс").clicked() {
+                    if !self.dic_search_filter.is_empty()
+                        && ui
+                            .small_button("✖")
+                            .on_hover_text("Сбросить фильтр")
+                            .clicked()
+                    {
                         self.dic_search_filter.clear();
                     }
                 });
@@ -1132,7 +1146,7 @@ impl DemagogApp {
                     &mut self.active_tab,
                     ActiveTab::RawText,
                     format!(
-                        "Исходный текст ({})",
+                        "📝 Исходный текст ({})",
                         format_num(self.document.raw_text.chars().count())
                     ),
                 );
@@ -1140,24 +1154,24 @@ impl DemagogApp {
                     &mut self.active_tab,
                     ActiveTab::ProcessedText,
                     format!(
-                        "Результат ({})",
+                        "✅ Результат ({})",
                         format_num(self.document.processed_text.chars().count())
                     ),
                 );
                 ui.selectable_value(
                     &mut self.active_tab,
                     ActiveTab::DramaChunks,
-                    format!("Чанки Drama3 ({})", self.document.chunks.len()),
+                    format!("🧩 Чанки Drama3 ({})", self.document.chunks.len()),
                 );
                 ui.selectable_value(
                     &mut self.active_tab,
                     ActiveTab::DiffAndStats,
                     format!(
-                        "Отладка замен ({})",
+                        "🔬 Отладка замен ({})",
                         format_num(self.report.total_replacements)
                     ),
                 );
-                ui.selectable_value(&mut self.active_tab, ActiveTab::Settings, "Настройки");
+                ui.selectable_value(&mut self.active_tab, ActiveTab::Settings, "⚙ Настройки");
             });
             ui.separator();
 
@@ -1168,7 +1182,7 @@ impl DemagogApp {
                 ActiveTab::RawText => {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(&self.document.title).strong());
-                        if ui.button("Заменить из буфера").clicked() {
+                        if ui.button("📋 Заменить из буфера").clicked() {
                             if let Ok(mut cb) = arboard::Clipboard::new() {
                                 if let Ok(txt) = cb.get_text() {
                                     if !txt.is_empty()
@@ -1185,7 +1199,7 @@ impl DemagogApp {
                                 }
                             }
                         }
-                        if ui.button("Очистить").clicked() {
+                        if ui.button("🗑 Очистить").clicked() {
                             let had_text = text_would_be_lost(&self.document.raw_text);
                             if !had_text
                                 || confirm_destructive(
@@ -1236,7 +1250,7 @@ impl DemagogApp {
                         if ui
                             .add_enabled(
                                 has_result,
-                                egui::Button::new("Копировать весь результат"),
+                                egui::Button::new("📋 Копировать весь результат"),
                             )
                             .clicked()
                         {
@@ -1249,7 +1263,7 @@ impl DemagogApp {
                         if ui
                             .add_enabled(
                                 has_result,
-                                egui::Button::new("Перенести результат в исходник"),
+                                egui::Button::new("🔄 Перенести результат в исходник"),
                             )
                             .clicked()
                         {
@@ -1266,6 +1280,15 @@ impl DemagogApp {
                             }
                         }
                     });
+                    if self.document.processed_text.is_empty() {
+                        ui.label(
+                            RichText::new(
+                                "Результат появится после обработки. Если не знаете, что выбрать, начните с пресета «Все (полный +)» в меню «Пресеты».",
+                            )
+                            .weak(),
+                        );
+                        ui.add_space(4.0);
+                    }
                     if self.find_open {
                         self.show_find_bar(ui);
                     }
@@ -1356,7 +1379,7 @@ impl DemagogApp {
                                         );
                                         if is_copied {
                                             ui.label(
-                                                RichText::new("Скопировано")
+                                                RichText::new("✓ Скопировано")
                                                     .color(palette::success_text(dark))
                                                     .strong(),
                                             );
@@ -1365,7 +1388,7 @@ impl DemagogApp {
                                             egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
                                                 if ui
-                                                    .button("Копировать для ComfyUI")
+                                                    .button("📋 Копировать для ComfyUI")
                                                     .clicked()
                                                 {
                                                     if let Ok(mut cb) = arboard::Clipboard::new() {
@@ -1432,10 +1455,10 @@ impl DemagogApp {
                             });
 
                         ui.add_space(14.0);
-                        ui.heading("Журнал сработавших правил (Diff)");
+                        ui.heading("🔍 Журнал сработавших правил (Diff)");
                         if self.report.events.is_empty() {
                             ui.label(
-                                "Для записи детальных примеров каждого сработавшего правила нажмите кнопку «С логом замен (Diff)» на верхней панели.",
+                                "Для записи детальных примеров каждого сработавшего правила нажмите кнопку «🔬 С логом замен (Diff)» на верхней панели.",
                             );
                         } else {
                             let filter_low = self.diff_filter.to_lowercase();
@@ -1491,7 +1514,7 @@ impl DemagogApp {
                 }
 
                 ActiveTab::Settings => {
-                    ui.heading("Настройки интерфейса и обработки");
+                    ui.heading("⚙ Настройки интерфейса и обработки");
                     ui.add_space(10.0);
 
                     let mut style_changed = false;
@@ -1579,7 +1602,7 @@ impl DemagogApp {
 
                     ui.add_space(18.0);
                     ui.separator();
-                    egui::CollapsingHeader::new("Справка по категориям словарей")
+                    egui::CollapsingHeader::new("ℹ Справка по категориям словарей")
                         .default_open(false)
                         .show(ui, |ui| {
                             ui.label("• [ЧИСЛА И ДАТЫ] — переводит числа и даты в слова (1995 → тысяча девятьсот девяносто пятом).");
@@ -1587,7 +1610,7 @@ impl DemagogApp {
                             ui.label("• [ОМОГРАФЫ (загл.)] — находит омографы по контексту и выделяет ударную гласную заглавной буквой (зАмок / замОк, зЕмли).");
                             ui.label("• [ЗАГЛАВНЫЕ → '+'] (словари 69 и 70) — переводит заглавные ударные буквы омографов в знак «+» (зЕмли → з+емли).");
                             ui.label("• [УДАРЕНИЯ '+'] и [ОРФОЭПИЯ '+' (2.9М)] (словари 35, 67, 71..75, 95.NEW) — сами напрямую ставят знак «+» в обычных словах. Именно из-за 95.NEW и 67 в тексте остаются «+», если выключить только словарь 69.");
-                            ui.label("Совет: если не нужны знаки «+», выберите в меню «Пресеты» вариант «Числа + Ё (без ударений)» или формат выхода «Без ударений — только Ё» сверху.");
+                            ui.label("💡 Совет: если не нужны знаки «+», выберите в меню «Пресеты» вариант «Числа + Ё (без ударений)» или формат выхода «Без ударений — только Ё» сверху.");
                         });
                 }
             }
@@ -1649,7 +1672,7 @@ fn dictionary_card(
                 );
                 if !d.warnings.is_empty() {
                     ui.label(
-                        RichText::new(format!("Пропущено правил: {}", d.warnings.len()))
+                        RichText::new(format!("⚠ Пропущено правил: {}", d.warnings.len()))
                             .small()
                             .color(palette::warning_text(dark))
                             .strong(),
