@@ -948,6 +948,47 @@ impl DemagogApp {
         }
     }
 
+    fn show_status_left(&mut self, ui: &mut egui::Ui) {
+        if self.is_busy {
+            ui.spinner();
+            ui.add(
+                egui::ProgressBar::new(self.progress_ratio)
+                    .desired_width(180.0)
+                    .show_percentage(),
+            );
+            if let Some(cancel) = self.cancel_flag.clone() {
+                let requested = cancel.load(Ordering::Relaxed);
+                if ui
+                    .add_enabled(!requested, egui::Button::new("Отмена"))
+                    .on_hover_text("Остановить после текущего словаря (Esc)")
+                    .clicked()
+                {
+                    cancel.store(true, Ordering::Relaxed);
+                    self.status_line = "Отмена...".to_string();
+                }
+            }
+        }
+        let status = ui.label(&self.status_line);
+        if !self.dic_load_errors.is_empty() {
+            status.on_hover_text(self.dic_load_errors.join("\n"));
+        }
+    }
+
+    fn show_status_counters(&self, ui: &mut egui::Ui, theme: ThemeMode, counters: &str) {
+        ui.label(RichText::new(counters).weak());
+        if !self.dic_load_errors.is_empty() {
+            ui.label(
+                RichText::new(format!(
+                    "Ошибки загрузки: {}",
+                    self.dic_load_errors.len()
+                ))
+                .color(palette::warning_text(theme))
+                .strong(),
+            )
+            .on_hover_text(self.dic_load_errors.join("\n"));
+        }
+    }
+
     fn show_stale_banner(&self, ui: &mut egui::Ui, theme: ThemeMode) {
         if !self.result_stale {
             return;
@@ -1048,19 +1089,29 @@ impl DemagogApp {
 
                 ui.separator();
 
-                ui.label("Формат выхода:");
                 let prev_fmt = self.settings.stress_format;
-                egui::ComboBox::from_id_salt("stress_format_combo")
-                    .selected_text(self.settings.stress_format.short_label())
-                    .show_ui(ui, |ui| {
-                        for fmt in [
-                            StressFormat::PlusBeforeVowel,
-                            StressFormat::AcuteAccent,
-                            StressFormat::CleanYoOnly,
-                        ] {
-                            ui.selectable_value(&mut self.settings.stress_format, fmt, fmt.label());
-                        }
-                    });
+                ui.add_enabled_ui(!self.is_busy, |ui| {
+                    egui::ComboBox::from_id_salt("stress_format_combo")
+                        .selected_text(format!(
+                            "Формат: {}",
+                            self.settings.stress_format.short_label()
+                        ))
+                        .show_ui(ui, |ui| {
+                            for fmt in [
+                                StressFormat::PlusBeforeVowel,
+                                StressFormat::AcuteAccent,
+                                StressFormat::CleanYoOnly,
+                            ] {
+                                ui.selectable_value(
+                                    &mut self.settings.stress_format,
+                                    fmt,
+                                    fmt.label(),
+                                );
+                            }
+                        })
+                        .response
+                        .on_hover_text("Формат вывода ударений");
+                });
                 if self.settings.stress_format != prev_fmt {
                     if !self.reformat_result() {
                         self.settings.stress_format = prev_fmt;
@@ -1120,60 +1171,42 @@ impl DemagogApp {
 
         // Bottom status bar
         egui::Panel::bottom("bottom_status").show_inside(ui, |ui| {
-            ui.horizontal(|ui| {
-                if self.is_busy {
-                    ui.spinner();
-                    ui.add(
-                        egui::ProgressBar::new(self.progress_ratio)
-                            .desired_width(180.0)
-                            .show_percentage(),
-                    );
-                    if let Some(cancel) = self.cancel_flag.clone() {
-                        let requested = cancel.load(Ordering::Relaxed);
-                        if ui
-                            .add_enabled(!requested, egui::Button::new("Отмена"))
-                            .on_hover_text("Остановить после текущего словаря (Esc)")
-                            .clicked()
-                        {
-                            cancel.store(true, Ordering::Relaxed);
-                            self.status_line = "Отмена...".to_string();
-                        }
-                    }
+            let active_count = self.dictionaries.iter().filter(|d| d.enabled).count();
+            let active_rules: usize = self
+                .dictionaries
+                .iter()
+                .filter(|d| d.enabled)
+                .map(|d| d.rule_count)
+                .sum();
+            let counters = format!(
+                "Активно: {}/{} словарей ({} правил)",
+                active_count,
+                self.dictionaries.len(),
+                format_num(active_rules)
+            );
+
+            // A long status line and the counters do not fit one row on a
+            // narrow window or with a large UI font: stack them instead.
+            let font = self.settings.ui_font_size;
+            let estimate = counters.chars().count() as f32 * font * 0.6
+                + self.status_line.chars().count() as f32 * font * 0.6
+                + if self.dic_load_errors.is_empty() {
+                    0.0
+                } else {
+                    140.0
                 }
-                let status = ui.label(&self.status_line);
-                if !self.dic_load_errors.is_empty() {
-                    status.on_hover_text(self.dic_load_errors.join("\n"));
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let active_count = self.dictionaries.iter().filter(|d| d.enabled).count();
-                    let active_rules: usize = self
-                        .dictionaries
-                        .iter()
-                        .filter(|d| d.enabled)
-                        .map(|d| d.rule_count)
-                        .sum();
-                    ui.label(
-                        RichText::new(format!(
-                            "Активно: {}/{} словарей ({} правил)",
-                            active_count,
-                            self.dictionaries.len(),
-                            format_num(active_rules)
-                        ))
-                        .weak(),
-                    );
-                    if !self.dic_load_errors.is_empty() {
-                        ui.label(
-                            RichText::new(format!(
-                                "Ошибки загрузки: {}",
-                                self.dic_load_errors.len()
-                            ))
-                            .color(palette::warning_text(theme))
-                            .strong(),
-                        )
-                        .on_hover_text(self.dic_load_errors.join("\n"));
-                    }
+                + if self.is_busy { 300.0 } else { 40.0 };
+            if ui.available_width() < estimate {
+                ui.horizontal_wrapped(|ui| self.show_status_left(ui));
+                ui.horizontal_wrapped(|ui| self.show_status_counters(ui, theme, &counters));
+            } else {
+                ui.horizontal(|ui| {
+                    self.show_status_left(ui);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        self.show_status_counters(ui, theme, &counters);
+                    });
                 });
-            });
+            }
         });
 
         // Left sidebar: Dictionary list with semantic tags & descriptions
@@ -1182,68 +1215,29 @@ impl DemagogApp {
             .min_size(340.0)
             .show_inside(ui, |ui| {
                 ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.heading("📚 Словари");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add_enabled(!self.is_busy, egui::Button::new("🔄 Обновить"))
-                            .on_hover_text("Перезагрузить словари с диска")
-                            .clicked()
-                        {
+                ui.heading("📚 Словари");
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .add_enabled(!self.is_busy, egui::Button::new("🔄 Обновить"))
+                        .on_hover_text("Перезагрузить словари с диска")
+                        .clicked()
+                    {
+                        self.reload_dictionaries_async(ctx.clone());
+                    }
+                    if ui
+                        .add_enabled(!self.is_busy, egui::Button::new("Папка..."))
+                        .clicked()
+                    {
+                        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                            self.settings.dic_folder = dir;
+                            self.settings.save();
                             self.reload_dictionaries_async(ctx.clone());
                         }
-                        if ui
-                            .add_enabled(!self.is_busy, egui::Button::new("Папка..."))
-                            .clicked()
-                        {
-                            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                                self.settings.dic_folder = dir;
-                                self.settings.save();
-                                self.reload_dictionaries_async(ctx.clone());
-                            }
-                        }
-                    });
-                });
-
-                ui.horizontal(|ui| {
-                    let mut selected = None;
-                    ui.menu_button("Пресеты", |ui| {
-                        if ui
-                            .button("Все (полный +)")
-                            .on_hover_text(
-                                "Включить все словари, включая полную орфоэпию со знаками '+'",
-                            )
-                            .clicked()
-                        {
-                            selected = Some(DictionaryPreset::All);
-                            ui.close();
-                        }
-                        if ui
-                            .button("Только омографы с '+' (без 95.NEW)")
-                            .on_hover_text(
-                                "Ставит '+' только в омографах и трудных словах, не трогая простые слова из 95.NEW (2.9 млн)",
-                            )
-                            .clicked()
-                        {
-                            selected = Some(DictionaryPreset::HomographsOnly);
-                            ui.close();
-                        }
-                        if ui
-                            .button("Числа + Ё (без ударений)")
-                            .on_hover_text(
-                                "Оставляет числа и даты, ё-фикацию и чистку текста",
-                            )
-                            .clicked()
-                        {
-                            selected = Some(DictionaryPreset::NumbersAndYo);
-                            ui.close();
-                        }
-                        ui.separator();
-                        if ui.button("Снять все").clicked() {
-                            selected = Some(DictionaryPreset::Clear);
-                            ui.close();
-                        }
-                    });
+                    }
+                    ui.separator();
+                    let selected = ui
+                        .add_enabled_ui(!self.is_busy, |ui| presets_menu(ui))
+                        .inner;
                     if let Some(preset) = selected {
                         self.apply_preset(preset);
                     }
@@ -1347,12 +1341,17 @@ impl DemagogApp {
                                         ("часть", palette::warning_text(theme))
                                     };
                                     let mut state_response = ui
-                                        .small_button(RichText::new(state_label).color(state_color))
-                                        .on_hover_text("Включить или отключить всю группу");
+                                        .add_enabled_ui(!self.is_busy, |ui| {
+                                            ui.small_button(
+                                                RichText::new(state_label).color(state_color),
+                                            )
+                                            .on_hover_text("Включить или отключить всю группу")
+                                        })
+                                        .inner;
                                     state_response.widget_info(|| {
                                         egui::WidgetInfo::labeled(
                                             egui::WidgetType::Button,
-                                            true,
+                                            !self.is_busy,
                                             format!(
                                                 "Группа {group_key}: {state_label}. Включить или отключить всю группу"
                                             ),
@@ -1394,6 +1393,7 @@ impl DemagogApp {
                                                 &mut changed_any,
                                                 false,
                                                 theme,
+                                                !self.is_busy,
                                             );
                                         }
                                         ui.add_space(4.0);
@@ -1427,6 +1427,7 @@ impl DemagogApp {
                                     &mut changed_any,
                                     true,
                                     theme,
+                                    !self.is_busy,
                                 );
                             }
                         }
@@ -1480,8 +1481,10 @@ impl DemagogApp {
 
             match self.active_tab {
                 ActiveTab::RawText => {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(&self.document.title).strong());
+                    ui.add(
+                        egui::Label::new(RichText::new(&self.document.title).strong()).truncate(),
+                    );
+                    ui.horizontal_wrapped(|ui| {
                         if ui
                             .button("💾 Сохранить исходник")
                             .on_hover_text("Сохранить исходный текст в TXT (Ctrl+Shift+S)")
@@ -1573,7 +1576,7 @@ impl DemagogApp {
                 }
 
                 ActiveTab::ProcessedText => {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         let has_result = !self.document.processed_text.is_empty();
                         if ui
                             .add_enabled(
@@ -1662,10 +1665,11 @@ impl DemagogApp {
                 }
 
                 ActiveTab::DramaChunks => {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         let label = ui.label("Макс. длина чанка (символов):");
                         let slider = ui
-                            .add(
+                            .add_enabled(
+                                !self.is_busy,
                                 egui::Slider::new(
                                     &mut self.settings.chunk_config.max_chars,
                                     150..=3000,
@@ -1674,13 +1678,16 @@ impl DemagogApp {
                             )
                             .labelled_by(label.id);
                         self.apply_chunk_config_change(ui, slider.changed());
-                        if ui
-                            .checkbox(
-                                &mut self.settings.chunk_config.preserve_paragraphs,
-                                "Не склеивать абзацы",
-                            )
-                            .changed()
-                        {
+                        let paragraphs_changed = ui
+                            .add_enabled_ui(!self.is_busy, |ui| {
+                                ui.checkbox(
+                                    &mut self.settings.chunk_config.preserve_paragraphs,
+                                    "Не склеивать абзацы",
+                                )
+                            })
+                            .inner
+                            .changed();
+                        if paragraphs_changed {
                             self.rechunk_result();
                             self.settings.save();
                         }
@@ -1705,7 +1712,7 @@ impl DemagogApp {
                             frame
                                 .inner_margin(egui::Margin::same(10))
                                 .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
+                                    ui.horizontal_wrapped(|ui| {
                                         ui.label(
                                             RichText::new(format!(
                                                 "Чанк #{}/{} ({} симв.)",
@@ -1722,32 +1729,27 @@ impl DemagogApp {
                                                     .strong(),
                                             );
                                         }
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                if ui
-                                                    .button("📋 Копировать чанк")
-                                                    .clicked()
-                                                {
-                                                    match arboard::Clipboard::new()
-                                                        .and_then(|mut cb| cb.set_text(chunk.clone()))
-                                                    {
-                                                        Ok(()) => {
-                                                            self.last_copied_chunk = Some(idx);
-                                                            self.status_line = format!(
-                                                                "Чанк #{} скопирован в буфер обмена",
-                                                                idx + 1
-                                                            );
-                                                        }
-                                                        Err(err) => {
-                                                            self.status_line = format!(
-                                                                "Не удалось скопировать чанк: {err}"
-                                                            );
-                                                        }
-                                                    }
+                                        if ui
+                                            .button("📋 Копировать чанк")
+                                            .clicked()
+                                        {
+                                            match arboard::Clipboard::new()
+                                                .and_then(|mut cb| cb.set_text(chunk.clone()))
+                                            {
+                                                Ok(()) => {
+                                                    self.last_copied_chunk = Some(idx);
+                                                    self.status_line = format!(
+                                                        "Чанк #{} скопирован в буфер обмена",
+                                                        idx + 1
+                                                    );
                                                 }
-                                            },
-                                        );
+                                                Err(err) => {
+                                                    self.status_line = format!(
+                                                        "Не удалось скопировать чанк: {err}"
+                                                    );
+                                                }
+                                            }
+                                        }
                                     });
                                     ui.add_space(4.0);
                                     ui.label(
@@ -1762,7 +1764,7 @@ impl DemagogApp {
                 }
 
                 ActiveTab::DiffAndStats => {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.label(
                             RichText::new(format!(
                                 "Общее время: {} мс | Всего срабатываний: {}",
@@ -1772,13 +1774,19 @@ impl DemagogApp {
                             .strong(),
                         );
                         ui.separator();
-                        ui.label("Поиск по заменам:");
-                        ui.text_edit_singleline(&mut self.diff_filter);
+                        let filter_label = ui.label("Поиск по заменам:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.diff_filter).desired_width(240.0),
+                        )
+                        .labelled_by(filter_label.id);
                     });
                     self.show_stale_banner(ui, theme);
                     ui.separator();
 
-                    ScrollArea::vertical().show(ui, |ui| {
+                    ScrollArea::both()
+                        .id_salt("diff_scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
                         ui.heading("⏱ Тайминги по словарям");
                         egui::Grid::new("timings_grid")
                             .striped(true)
@@ -1901,7 +1909,8 @@ impl DemagogApp {
 
                             let chunk_label = ui.label("Макс. размер чанка:");
                             let chunk_response = ui
-                                .add(
+                                .add_enabled(
+                                    !self.is_busy,
                                     egui::Slider::new(
                                         &mut self.settings.chunk_config.max_chars,
                                         150..=3000,
@@ -1914,9 +1923,15 @@ impl DemagogApp {
                             ui.end_row();
 
                             ui.label("Папка словарей:");
-                            ui.horizontal(|ui| {
+                            ui.horizontal_wrapped(|ui| {
                                 ui.label(self.settings.dic_folder.display().to_string());
-                                if ui.button("Изменить...").clicked() {
+                                if ui
+                                    .add_enabled(!self.is_busy, egui::Button::new("Изменить..."))
+                                    .on_disabled_hover_text(
+                                        "Доступно после завершения обработки",
+                                    )
+                                    .clicked()
+                                {
                                     if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                                         self.settings.dic_folder = dir;
                                         self.settings.save();
@@ -1956,6 +1971,7 @@ fn dictionary_card(
     changed_any: &mut bool,
     show_tag: bool,
     theme: ThemeMode,
+    interactive: bool,
 ) {
     egui::Frame::group(ui.style())
         .inner_margin(egui::Margin::symmetric(10, 6))
@@ -1964,7 +1980,8 @@ fn dictionary_card(
             // to the longest wrapped line and the right edge is ragged.
             ui.set_width(ui.available_width());
             ui.horizontal_wrapped(|ui| {
-                let mut checkbox_response = ui.checkbox(&mut d.enabled, "");
+                let mut checkbox_response =
+                    ui.add_enabled(interactive, egui::Checkbox::new(&mut d.enabled, ""));
 
                 if show_tag {
                     ui.label(
@@ -2230,6 +2247,44 @@ enum DictionaryPreset {
     HomographsOnly,
     NumbersAndYo,
     Clear,
+}
+
+fn presets_menu(ui: &mut egui::Ui) -> Option<DictionaryPreset> {
+    let mut selected = None;
+    ui.menu_button("Пресеты", |ui| {
+        if ui
+            .button("Все (полный +)")
+            .on_hover_text("Включить все словари, включая полную орфоэпию со знаками '+'")
+            .clicked()
+        {
+            selected = Some(DictionaryPreset::All);
+            ui.close();
+        }
+        if ui
+            .button("Только омографы с '+' (без 95.NEW)")
+            .on_hover_text(
+                "Ставит '+' только в омографах и трудных словах, не трогая простые слова из 95.NEW (2.9 млн)",
+            )
+            .clicked()
+        {
+            selected = Some(DictionaryPreset::HomographsOnly);
+            ui.close();
+        }
+        if ui
+            .button("Числа + Ё (без ударений)")
+            .on_hover_text("Оставляет числа и даты, ё-фикацию и чистку текста")
+            .clicked()
+        {
+            selected = Some(DictionaryPreset::NumbersAndYo);
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Снять все").clicked() {
+            selected = Some(DictionaryPreset::Clear);
+            ui.close();
+        }
+    });
+    selected
 }
 
 fn preset_enables(preset: DictionaryPreset, tag: DictionaryTag, name: &str) -> bool {
