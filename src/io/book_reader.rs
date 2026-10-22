@@ -13,6 +13,9 @@ use crate::ports::DocumentReader;
 pub const SUPPORTED_BOOK_FORMATS: &str =
     "Поддерживаются TXT, MD, LOG, FB2, EPUB, DOCX и ZIP с FB2 внутри.";
 
+const MAX_ARCHIVE_ENTRY_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_ARCHIVE_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+
 pub fn can_read_book(path: &Path) -> bool {
     CompositeBookReader::new().can_read(path)
 }
@@ -72,11 +75,15 @@ impl DocumentReader for Fb2DocumentReader {
             let mut archive = ZipArchive::new(file).map_err(|e| format!("Ошибка ZIP: {e}"))?;
             let mut fb2_bytes = Vec::new();
             for i in 0..archive.len() {
-                let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
-                if entry.name().to_ascii_lowercase().ends_with(".fb2") {
-                    entry
-                        .read_to_end(&mut fb2_bytes)
-                        .map_err(|e| e.to_string())?;
+                let entry = archive.by_index(i).map_err(|e| e.to_string())?;
+                let entry_name = entry.name().to_string();
+                if entry_name.to_ascii_lowercase().ends_with(".fb2") {
+                    if entry.size() > MAX_ARCHIVE_ENTRY_BYTES {
+                        return Err(format!(
+                            "FB2 в архиве больше допустимых {MAX_ARCHIVE_ENTRY_BYTES} байт"
+                        ));
+                    }
+                    fb2_bytes = read_limited(entry, &entry_name, MAX_ARCHIVE_ENTRY_BYTES)?;
                     break;
                 }
             }
@@ -123,13 +130,17 @@ impl DocumentReader for DocxDocumentReader {
         let file = File::open(path).map_err(|e| format!("Ошибка открытия DOCX: {e}"))?;
         let mut archive =
             ZipArchive::new(file).map_err(|e| format!("Ошибка чтения ZIP/DOCX: {e}"))?;
-        let mut doc_xml = Vec::new();
-        {
-            let mut entry = archive
+        let doc_xml = {
+            let entry = archive
                 .by_name("word/document.xml")
                 .map_err(|_| "Не найден word/document.xml в DOCX".to_string())?;
-            entry.read_to_end(&mut doc_xml).map_err(|e| e.to_string())?;
-        }
+            if entry.size() > MAX_ARCHIVE_ENTRY_BYTES {
+                return Err(format!(
+                    "word/document.xml больше допустимых {MAX_ARCHIVE_ENTRY_BYTES} байт"
+                ));
+            }
+            read_limited(entry, "word/document.xml", MAX_ARCHIVE_ENTRY_BYTES)?
+        };
         let (xml_str, _) = decode_text_bytes(&doc_xml);
         let mut reader = Reader::from_str(&xml_str);
         reader.config_mut().trim_text(false);
@@ -196,8 +207,15 @@ impl DocumentReader for EpubDocumentReader {
         let entries = epub_reading_order(&mut archive)?;
 
         let mut full_text = String::new();
+        let mut total_bytes: u64 = 0;
         for name in entries {
             let bytes = read_epub_zip_entry(&mut archive, &name)?;
+            total_bytes = total_bytes.saturating_add(bytes.len() as u64);
+            if total_bytes > MAX_ARCHIVE_TOTAL_BYTES {
+                return Err(format!(
+                    "Суммарный размер распакованных глав больше допустимых {MAX_ARCHIVE_TOTAL_BYTES} байт"
+                ));
+            }
             let part = extract_xml_paragraphs(
                 &bytes,
                 &["p", "h1", "h2", "h3", "h4", "li", "div"],
@@ -448,31 +466,45 @@ fn is_epub_navigation(path: &str) -> bool {
     lower.contains("toc") || lower.contains("nav")
 }
 
-fn read_epub_zip_entry(archive: &mut ZipArchive<File>, name: &str) -> Result<Vec<u8>, String> {
-    let mut entry = archive
-        .by_name(name)
-        .map_err(|e| format!("В EPUB не найден файл «{name}»: {e}"))?;
+fn read_limited<R: Read>(reader: R, name: &str, limit: u64) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
-    entry
+    reader
+        .take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| format!("Ошибка чтения «{name}»: {e}"))?;
+    if bytes.len() as u64 > limit {
+        return Err(format!("Файл «{name}» больше допустимых {limit} байт"));
+    }
     Ok(bytes)
+}
+
+fn read_epub_zip_entry(archive: &mut ZipArchive<File>, name: &str) -> Result<Vec<u8>, String> {
+    let entry = archive
+        .by_name(name)
+        .map_err(|e| format!("В EPUB не найден файл «{name}»: {e}"))?;
+    if entry.size() > MAX_ARCHIVE_ENTRY_BYTES {
+        return Err(format!(
+            "В EPUB файл «{name}» больше допустимых {MAX_ARCHIVE_ENTRY_BYTES} байт"
+        ));
+    }
+    read_limited(entry, name, MAX_ARCHIVE_ENTRY_BYTES)
 }
 
 fn read_epub_zip_entry_optional(
     archive: &mut ZipArchive<File>,
     name: &str,
 ) -> Result<Option<Vec<u8>>, String> {
-    let mut entry = match archive.by_name(name) {
+    let entry = match archive.by_name(name) {
         Ok(entry) => entry,
         Err(zip::result::ZipError::FileNotFound) => return Ok(None),
         Err(error) => return Err(format!("Ошибка открытия «{name}»: {error}")),
     };
-    let mut bytes = Vec::new();
-    entry
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("Ошибка чтения «{name}»: {e}"))?;
-    Ok(Some(bytes))
+    if entry.size() > MAX_ARCHIVE_ENTRY_BYTES {
+        return Err(format!(
+            "В EPUB файл «{name}» больше допустимых {MAX_ARCHIVE_ENTRY_BYTES} байт"
+        ));
+    }
+    read_limited(entry, name, MAX_ARCHIVE_ENTRY_BYTES).map(Some)
 }
 
 fn epub_reading_order(archive: &mut ZipArchive<File>) -> Result<Vec<String>, String> {
@@ -801,5 +833,16 @@ mod tests {
             .read_document(&epub.0)
             .expect_err("missing chapter must not be ignored");
         assert!(error.contains("не найден файл"), "{error}");
+    }
+
+    #[test]
+    fn limited_reader_rejects_entries_above_the_limit() {
+        let exact = read_limited(std::io::Cursor::new(b"1234567890"), "chapter", 10)
+            .expect("entry exactly at the limit");
+        assert_eq!(exact, b"1234567890");
+
+        let error = read_limited(std::io::Cursor::new(b"12345678901"), "chapter", 10)
+            .expect_err("entry above the limit");
+        assert!(error.contains("больше"), "{error}");
     }
 }
