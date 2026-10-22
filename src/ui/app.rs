@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use egui::{self, Color32, FontFamily, FontId, RichText, ScrollArea, TextStyle};
 
 use crate::domain::{
@@ -43,13 +43,21 @@ pub struct DemagogApp {
     last_copied_chunk: Option<usize>,
     capture_diff_on_run: bool,
     dic_load_errors: Vec<String>,
-    unsaved_work: bool,
+    source_dirty: bool,
+    result_dirty: bool,
+    result_stale: bool,
+    result_edited: bool,
+    result_format: StressFormat,
+    chunk_apply_pending: bool,
     cancel_flag: Option<Arc<AtomicBool>>,
     find_open: bool,
     find_query: String,
     find_matches: FindMatches,
     find_for_tab: Option<ActiveTab>,
     find_dirty: bool,
+    find_last_edit: Instant,
+    find_current: usize,
+    find_go_to: Option<usize>,
     focus_find: bool,
     last_window_title: String,
     window_icon_applied: bool,
@@ -76,6 +84,7 @@ impl DemagogApp {
         configure_cyrillic_fonts(&egui_ctx);
         let settings = AppSettings::load(initial_dic_folder);
         apply_style_settings(&egui_ctx, &settings);
+        let result_format = settings.stress_format;
 
         let sample_text = concat!(
             "В 1995 году в замке у ворот города стояли все свои. ",
@@ -108,13 +117,21 @@ impl DemagogApp {
             last_copied_chunk: None,
             capture_diff_on_run: false,
             dic_load_errors: Vec::new(),
-            unsaved_work: false,
+            source_dirty: false,
+            result_dirty: false,
+            result_stale: false,
+            result_edited: false,
+            result_format,
+            chunk_apply_pending: false,
             cancel_flag: None,
             find_open: false,
             find_query: String::new(),
             find_matches: FindMatches::default(),
             find_for_tab: None,
             find_dirty: false,
+            find_last_edit: Instant::now(),
+            find_current: 0,
+            find_go_to: None,
             focus_find: false,
             last_window_title: "Demagog-RS".to_string(),
             window_icon_applied: false,
@@ -164,6 +181,7 @@ impl DemagogApp {
         for d in &mut self.dictionaries {
             d.enabled = preset_enables(preset, d.tag, &d.name);
         }
+        let previous_format = self.settings.stress_format;
         self.settings.stress_format = match preset {
             DictionaryPreset::All | DictionaryPreset::HomographsOnly => {
                 StressFormat::PlusBeforeVowel
@@ -172,6 +190,10 @@ impl DemagogApp {
             DictionaryPreset::Clear => self.settings.stress_format,
         };
         self.settings.sync_disabled_from_metas(&self.dictionaries);
+        self.mark_result_stale();
+        if self.settings.stress_format != previous_format && !self.reformat_result() {
+            self.settings.stress_format = previous_format;
+        }
         self.settings.save();
     }
 
@@ -191,6 +213,13 @@ impl DemagogApp {
             self.status_line = "Не выбран ни один словарь!".to_string();
             return;
         }
+        if self.result_edited
+            && !confirm_destructive(
+                "Запустить обработку заново?\nРучные правки в результате будут потеряны.",
+            )
+        {
+            return;
+        }
 
         self.settings.sync_disabled_from_metas(&self.dictionaries);
         self.settings.save();
@@ -205,6 +234,7 @@ impl DemagogApp {
 
         let input_text = self.document.raw_text.clone();
         let stress_format = self.settings.stress_format;
+        self.result_format = stress_format;
         let chunk_config = self.settings.chunk_config.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancel_flag = Some(Arc::clone(&cancel));
@@ -281,6 +311,11 @@ impl DemagogApp {
                                 }
                                 self.status_line = status;
                                 self.dic_load_errors = errors;
+                                if !self.document.processed_text.is_empty()
+                                    || !self.document.chunks.is_empty()
+                                {
+                                    self.result_stale = true;
+                                }
                                 self.is_busy = false;
                                 self.progress_ratio = 1.0;
                                 finished = true;
@@ -303,7 +338,11 @@ impl DemagogApp {
                                             d.last_ms = None;
                                             d.last_replacements = None;
                                         }
-                                        self.unsaved_work = false;
+                                        self.source_dirty = false;
+                                        self.result_dirty = false;
+                                        self.result_stale = false;
+                                        self.result_edited = false;
+                                        self.last_copied_chunk = None;
                                         self.find_dirty = true;
                                     }
                                     Err(err) => {
@@ -344,7 +383,10 @@ impl DemagogApp {
                                     self.document.chunks = result.chunks;
                                     let had_events = !result.report.events.is_empty();
                                     self.report = result.report;
-                                    self.unsaved_work = true;
+                                    self.result_dirty = true;
+                                    self.result_stale = false;
+                                    self.result_edited = false;
+                                    self.last_copied_chunk = None;
                                     self.find_dirty = true;
                                     self.cancel_flag = None;
                                     self.is_busy = false;
@@ -417,9 +459,9 @@ impl DemagogApp {
         if self.is_busy {
             return;
         }
-        if self.unsaved_work
+        if self.has_unsaved_work()
             && !confirm_destructive(
-                "Открыть другую книгу?\nНесохранённая работа будет потеряна.",
+                "Открыть другую книгу?\nНесохранённые изменения будут потеряны.",
             )
         {
             return;
@@ -444,6 +486,7 @@ impl DemagogApp {
 
         let open = KeyboardShortcut::new(Modifiers::CTRL, Key::O);
         let save = KeyboardShortcut::new(Modifiers::CTRL, Key::S);
+        let save_source = KeyboardShortcut::new(Modifiers::CTRL | Modifiers::SHIFT, Key::S);
         let export = KeyboardShortcut::new(Modifiers::CTRL, Key::E);
         let process = KeyboardShortcut::new(Modifiers::CTRL, Key::Enter);
         let process_diff =
@@ -459,6 +502,9 @@ impl DemagogApp {
         if !self.is_busy && ctx.input_mut(|i| i.consume_shortcut(&process)) {
             self.capture_diff_on_run = false;
             self.start_processing(ctx.clone(), false);
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&save_source)) {
+            self.save_source_txt();
         }
         if ctx.input_mut(|i| i.consume_shortcut(&save)) {
             self.save_processed_txt();
@@ -481,6 +527,16 @@ impl DemagogApp {
             self.find_open = true;
             self.focus_find = true;
             self.find_dirty = true;
+            self.find_last_edit = Instant::now();
+        }
+        if self.find_open {
+            let find_next = KeyboardShortcut::new(Modifiers::NONE, Key::F3);
+            let find_prev = KeyboardShortcut::new(Modifiers::SHIFT, Key::F3);
+            if ctx.input_mut(|i| i.consume_shortcut(&find_prev)) {
+                self.step_find(-1);
+            } else if ctx.input_mut(|i| i.consume_shortcut(&find_next)) {
+                self.step_find(1);
+            }
         }
 
         if let Some(cancel) = self.cancel_flag.clone() {
@@ -498,7 +554,7 @@ impl DemagogApp {
     }
 
     fn update_window_title(&mut self, ctx: &egui::Context) {
-        let title = window_title(&self.document.title, self.unsaved_work);
+        let title = window_title(&self.document.title, self.has_unsaved_work());
         if title != self.last_window_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.last_window_title = title;
@@ -540,7 +596,69 @@ impl DemagogApp {
         };
         let matches = find_matches(text, &query);
         self.find_matches = matches;
+        self.find_current = 0;
+        self.find_go_to = None;
         self.find_for_tab = Some(self.active_tab);
+    }
+
+    fn step_find(&mut self, delta: isize) {
+        if self.find_dirty {
+            self.refresh_find_matches();
+            self.find_dirty = false;
+            if !self.find_matches.ranges.is_empty() {
+                self.find_current = 0;
+                self.find_go_to = Some(0);
+            }
+            return;
+        }
+        let total = self.find_matches.ranges.len();
+        if total == 0 {
+            return;
+        }
+        let current = self.find_current.min(total - 1);
+        self.find_current = (current as isize + delta).rem_euclid(total as isize) as usize;
+        self.find_go_to = Some(self.find_current);
+    }
+
+    fn scroll_to_find_match(
+        &mut self,
+        ui: &egui::Ui,
+        output: &egui::widgets::text_edit::TextEditOutput,
+    ) {
+        let Some(index) = self.find_go_to else {
+            return;
+        };
+        let char_positions = {
+            let text = match self.active_tab {
+                ActiveTab::RawText => &self.document.raw_text,
+                ActiveTab::ProcessedText => &self.document.processed_text,
+                _ => "",
+            };
+            self.find_matches.ranges.get(index).and_then(|&(start, end)| {
+                Some((
+                    text.get(..start)?.chars().count(),
+                    text.get(..end)?.chars().count(),
+                ))
+            })
+        };
+        self.find_go_to = None;
+        let Some((char_start, char_end)) = char_positions else {
+            return;
+        };
+        let mut state = output.state.clone();
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+            egui::text::CCursor::new(char_start),
+            egui::text::CCursor::new(char_end),
+        )));
+        state.store(ui.ctx(), output.response.id);
+        let layout_cursor = output
+            .galley
+            .layout_from_cursor(egui::text::CCursor::new(char_start));
+        let rect = output
+            .galley
+            .pos_from_layout_cursor(&layout_cursor)
+            .translate(output.galley_pos.to_vec2());
+        ui.scroll_to_rect(rect, Some(egui::Align::Center));
     }
 
     fn show_find_bar(&mut self, ui: &mut egui::Ui) {
@@ -559,28 +677,79 @@ impl DemagogApp {
             }
             if response.changed() {
                 self.find_dirty = true;
+                self.find_last_edit = Instant::now();
             }
+            let debounce = Duration::from_millis(150);
             if self.find_dirty || self.find_for_tab != Some(self.active_tab) {
-                self.refresh_find_matches();
-                self.find_dirty = false;
+                if self.find_query.trim().is_empty() || self.find_last_edit.elapsed() >= debounce {
+                    self.refresh_find_matches();
+                    self.find_dirty = false;
+                } else {
+                    ui.ctx().request_repaint_after(debounce);
+                }
+            }
+            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                let step = if ui.input(|i| i.modifiers.shift) {
+                    -1
+                } else {
+                    1
+                };
+                self.step_find(step);
+                self.focus_find = true;
             }
 
-            let count = self.find_matches.ranges.len();
-            let suffix = if self.find_matches.truncated { "+" } else { "" };
-            ui.label(
-                RichText::new(if self.find_query.trim().is_empty() {
-                    "Введите строку".to_string()
-                } else {
-                    format!("Совпадений: {}{}", format_num(count), suffix)
-                })
-                .weak(),
-            );
+            let total = self.find_matches.ranges.len();
+            let counter = if self.find_query.trim().is_empty() {
+                "Введите строку".to_string()
+            } else if total == 0 {
+                "Совпадений не найдено".to_string()
+            } else {
+                format!(
+                    "{} из {}",
+                    format_num(self.find_current + 1),
+                    format_num(total)
+                )
+            };
+            ui.label(RichText::new(counter).weak());
 
-            if ui
-                .button("✖")
-                .on_hover_text("Закрыть поиск (Esc)")
-                .clicked()
-            {
+            let prev = ui
+                .add_enabled(total > 0, egui::Button::new("◀"))
+                .on_hover_text("Предыдущее совпадение (Shift+Enter)");
+            prev.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    total > 0,
+                    "Предыдущее совпадение",
+                )
+            });
+            if prev.clicked() {
+                self.step_find(-1);
+            }
+            let next = ui
+                .add_enabled(total > 0, egui::Button::new("▶"))
+                .on_hover_text("Следующее совпадение (Enter, F3)");
+            next.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, total > 0, "Следующее совпадение")
+            });
+            if next.clicked() {
+                self.step_find(1);
+            }
+            if self.find_matches.truncated {
+                ui.label(
+                    RichText::new(format!(
+                        "показаны первые {}",
+                        format_num(MAX_FIND_MATCHES)
+                    ))
+                    .small()
+                    .weak(),
+                );
+            }
+
+            let close = ui.button("✖").on_hover_text("Закрыть поиск (Esc)");
+            close.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Закрыть поиск")
+            });
+            if close.clicked() {
                 self.find_open = false;
             }
         });
@@ -591,6 +760,9 @@ impl DemagogApp {
             self.status_line = "Сначала выполните обработку текста!".to_string();
             return;
         }
+        if !self.confirm_stale_result("Сохранить его всё равно") {
+            return;
+        }
         let default_name = format!("{}_drama3.txt", self.document.title);
         if let Some(path) = rfd::FileDialog::new()
             .set_file_name(&default_name)
@@ -599,7 +771,7 @@ impl DemagogApp {
         {
             match std::fs::write(&path, &self.document.processed_text) {
                 Ok(_) => {
-                    self.unsaved_work = false;
+                    self.result_dirty = false;
                     self.status_line = format!("Сохранено в {}", path.display());
                 }
                 Err(e) => {
@@ -609,9 +781,33 @@ impl DemagogApp {
         }
     }
 
+    fn save_source_txt(&mut self) {
+        if self.document.raw_text.trim().is_empty() {
+            self.status_line = "Исходный текст пуст — нечего сохранять".to_string();
+            return;
+        }
+        let default_name = format!("{}_source.txt", self.document.title);
+        if let Some(path) = rfd::FileDialog::new()
+            .set_file_name(&default_name)
+            .add_filter("Текстовый файл UTF-8", &["txt"])
+            .save_file()
+        {
+            match std::fs::write(&path, &self.document.raw_text) {
+                Ok(_) => {
+                    self.source_dirty = false;
+                    self.status_line = format!("Исходный текст сохранён в {}", path.display());
+                }
+                Err(e) => self.status_line = format!("Ошибка сохранения: {e}"),
+            }
+        }
+    }
+
     fn export_chunks_json(&mut self) {
         if self.document.chunks.is_empty() {
             self.status_line = "Нет чанков для экспорта — запустите обработку!".to_string();
+            return;
+        }
+        if !self.confirm_stale_result("Экспортировать его всё равно") {
             return;
         }
         let default_name = format!("{}_chunks.json", self.document.title);
@@ -629,14 +825,14 @@ impl DemagogApp {
             }
             let payload = ExportPayload {
                 title: &self.document.title,
-                stress_format: self.settings.stress_format.label(),
+                stress_format: self.result_format.label(),
                 chunk_count: self.document.chunks.len(),
                 chunks: &self.document.chunks,
             };
             if let Ok(json) = serde_json::to_string_pretty(&payload) {
                 match std::fs::write(&path, json) {
                     Ok(_) => {
-                        self.unsaved_work = false;
+                        self.result_dirty = false;
                         self.status_line = format!("Чанки экспортированы в {}", path.display());
                     }
                     Err(e) => self.status_line = format!("Ошибка записи JSON: {e}"),
@@ -645,24 +841,64 @@ impl DemagogApp {
         }
     }
 
-    fn reformat_and_rechunk_existing(&mut self) {
-        if !self.raw_pipeline_output.is_empty() {
-            let formatter = RussianStressFormatter;
-            self.document.processed_text =
-                formatter.format_stress(&self.raw_pipeline_output, self.settings.stress_format);
-            let chunker = SentenceAwareChunker;
-            self.document.chunks = chunker
-                .split_into_chunks(&self.document.processed_text, &self.settings.chunk_config);
-        } else if !self.document.processed_text.is_empty() {
-            let chunker = SentenceAwareChunker;
-            self.document.chunks = chunker
-                .split_into_chunks(&self.document.processed_text, &self.settings.chunk_config);
+    /// Rebuild the result from the pipeline output using the current stress format.
+    /// Returns false when the user declined or the text can no longer be reformatted.
+    fn reformat_result(&mut self) -> bool {
+        if self.document.processed_text.is_empty() && self.raw_pipeline_output.is_empty() {
+            return true;
         }
+        if self.raw_pipeline_output.is_empty() {
+            self.result_stale = true;
+            self.status_line =
+                "Результат нельзя пересобрать: он уже снят с конвейера — обработайте книгу заново"
+                    .to_string();
+            return false;
+        }
+        if self.result_edited
+            && !confirm_destructive(
+                "Пересобрать результат по текущему формату?\nРучные правки в результате будут потеряны.",
+            )
+        {
+            return false;
+        }
+        let formatter = RussianStressFormatter;
+        self.document.processed_text =
+            formatter.format_stress(&self.raw_pipeline_output, self.settings.stress_format);
+        self.result_format = self.settings.stress_format;
+        self.rechunk_result();
+        self.result_edited = false;
+        true
+    }
 
-        if !self.document.processed_text.is_empty() || !self.document.chunks.is_empty() {
-            self.unsaved_work = true;
-            self.find_dirty = true;
+    /// Re-chunk the current result without touching its text.
+    fn rechunk_result(&mut self) {
+        if self.document.processed_text.is_empty() && self.document.chunks.is_empty() {
+            return;
         }
+        if !self.document.processed_text.is_empty() {
+            let chunker = SentenceAwareChunker;
+            self.document.chunks = chunker
+                .split_into_chunks(&self.document.processed_text, &self.settings.chunk_config);
+        }
+        self.last_copied_chunk = None;
+        self.result_dirty = true;
+        self.find_dirty = true;
+    }
+
+    /// Apply chunk settings when a drag ends instead of on every slider tick.
+    fn apply_chunk_config_change(&mut self, ui: &egui::Ui, changed: bool) {
+        if changed {
+            self.chunk_apply_pending = true;
+        }
+        if !self.chunk_apply_pending {
+            return;
+        }
+        if ui.ctx().input(|i| i.pointer.primary_down()) {
+            return;
+        }
+        self.chunk_apply_pending = false;
+        self.rechunk_result();
+        self.settings.save();
     }
 }
 
@@ -678,6 +914,54 @@ impl eframe::App for DemagogApp {
 }
 
 impl DemagogApp {
+    fn has_unsaved_work(&self) -> bool {
+        self.source_dirty || self.result_dirty
+    }
+
+    fn mark_result_stale(&mut self) {
+        if !self.document.processed_text.is_empty() || !self.document.chunks.is_empty() {
+            self.result_stale = true;
+        }
+    }
+
+    fn confirm_stale_result(&self, action: &str) -> bool {
+        if !self.result_stale {
+            return true;
+        }
+        confirm_destructive(&format!(
+            "Результат устарел: исходный текст или набор словарей изменились.\n{action}?"
+        ))
+    }
+
+    fn copy_to_clipboard(&mut self, text: &str, success: String, chunk: Option<usize>) {
+        match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text.to_string()))
+        {
+            Ok(()) => {
+                if let Some(index) = chunk {
+                    self.last_copied_chunk = Some(index);
+                }
+                self.status_line = success;
+            }
+            Err(err) => {
+                self.status_line = format!("Не удалось скопировать в буфер обмена: {err}");
+            }
+        }
+    }
+
+    fn show_stale_banner(&self, ui: &mut egui::Ui, theme: ThemeMode) {
+        if !self.result_stale {
+            return;
+        }
+        ui.label(
+            RichText::new(
+                "⚠ Результат устарел: исходный текст или набор словарей изменились. Обработайте книгу заново.",
+            )
+            .color(palette::warning_text(theme))
+            .strong(),
+        );
+        ui.add_space(4.0);
+    }
+
     pub(crate) fn shutdown(&mut self) {
         self.settings.sync_disabled_from_metas(&self.dictionaries);
         self.settings.save();
@@ -695,9 +979,11 @@ impl DemagogApp {
         }
         let theme = self.settings.theme();
 
-        if ctx.input(|i| i.viewport().close_requested()) && self.unsaved_work {
+        if ctx.input(|i| i.viewport().close_requested()) && self.has_unsaved_work() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            if confirm_destructive("Есть несохранённая работа.\nВыйти без сохранения?") {
+            if confirm_destructive(
+                "Есть несохранённые изменения исходника или результата.\nВыйти без сохранения?",
+            ) {
                 self.shutdown();
             }
         }
@@ -715,11 +1001,20 @@ impl DemagogApp {
                         !self.is_busy,
                         egui::Button::new("Открыть книгу"),
                     )
-                    .on_hover_text("Открыть TXT, FB2, FB2.ZIP, EPUB или DOCX (Ctrl+O)")
+                    .on_hover_text("Открыть TXT, FB2, FB2.ZIP, EPUB, DOCX, ZIP или MD (Ctrl+O)")
                     .clicked()
                 {
                     self.open_book_dialog(ctx.clone());
                 }
+
+                let enabled_dictionaries =
+                    self.dictionaries.iter().filter(|d| d.enabled).count();
+                let can_run = !self.is_busy && enabled_dictionaries > 0;
+                let run_disabled_hint = if enabled_dictionaries == 0 {
+                    "Включите хотя бы один словарь"
+                } else {
+                    "Дождитесь завершения текущей операции"
+                };
 
                 let (primary_fill, primary_text) = palette::primary_button(theme);
                 let run_btn = egui::Button::new(
@@ -730,8 +1025,9 @@ impl DemagogApp {
                 .fill(primary_fill);
 
                 let run_response = ui
-                    .add_enabled(!self.is_busy, run_btn)
-                    .on_hover_text("Обработать книгу (Ctrl+Enter)");
+                    .add_enabled(can_run, run_btn)
+                    .on_hover_text("Обработать книгу (Ctrl+Enter)")
+                    .on_disabled_hover_text(run_disabled_hint);
                 if run_response.clicked() {
                     self.capture_diff_on_run = false;
                     self.start_processing(ctx.clone(), false);
@@ -739,10 +1035,11 @@ impl DemagogApp {
 
                 if ui
                     .add_enabled(
-                        !self.is_busy,
+                        can_run,
                         egui::Button::new("🔬 С логом замен (Diff)"),
                     )
                     .on_hover_text("Собрать журнал замен (Ctrl+Shift+Enter)")
+                    .on_disabled_hover_text(run_disabled_hint)
                     .clicked()
                 {
                     self.capture_diff_on_run = true;
@@ -765,7 +1062,9 @@ impl DemagogApp {
                         }
                     });
                 if self.settings.stress_format != prev_fmt {
-                    self.reformat_and_rechunk_existing();
+                    if !self.reformat_result() {
+                        self.settings.stress_format = prev_fmt;
+                    }
                     self.settings.save();
                 }
 
@@ -796,7 +1095,7 @@ impl DemagogApp {
 
                 ui.separator();
 
-                ui.menu_button(theme_icon(theme), |ui| {
+                let theme_menu = ui.menu_button(theme_icon(theme), |ui| {
                     for candidate in [ThemeMode::Dark, ThemeMode::Light, ThemeMode::Warm] {
                         let label = format!("{} {}", theme_icon(candidate), candidate.label());
                         if ui.selectable_label(candidate == theme, label).clicked() {
@@ -806,9 +1105,15 @@ impl DemagogApp {
                             ui.close();
                         }
                     }
-                })
-                .response
-                .on_hover_text("Тема оформления");
+                });
+                theme_menu.response.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        true,
+                        format!("Тема: {}", theme.label()),
+                    )
+                });
+                theme_menu.response.on_hover_text("Тема оформления");
             });
             ui.add_space(4.0);
         });
@@ -963,13 +1268,18 @@ impl DemagogApp {
                             .desired_width(width),
                     )
                     .labelled_by(label.id);
-                    if !self.dic_search_filter.is_empty()
-                        && ui
-                            .small_button("✖")
-                            .on_hover_text("Сбросить фильтр")
-                            .clicked()
-                    {
-                        self.dic_search_filter.clear();
+                    if !self.dic_search_filter.is_empty() {
+                        let clear = ui.small_button("✖").on_hover_text("Сбросить фильтр");
+                        clear.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                true,
+                                "Сбросить фильтр словарей",
+                            )
+                        });
+                        if clear.clicked() {
+                            self.dic_search_filter.clear();
+                        }
                     }
                 });
 
@@ -1039,6 +1349,15 @@ impl DemagogApp {
                                     let mut state_response = ui
                                         .small_button(RichText::new(state_label).color(state_color))
                                         .on_hover_text("Включить или отключить всю группу");
+                                    state_response.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::WidgetType::Button,
+                                            true,
+                                            format!(
+                                                "Группа {group_key}: {state_label}. Включить или отключить всю группу"
+                                            ),
+                                        )
+                                    });
                                     ui.add_space(4.0);
                                     let tag_response = ui.label(
                                         RichText::new(format!("[{}]", group_key))
@@ -1115,6 +1434,7 @@ impl DemagogApp {
 
                 if changed_any {
                     self.settings.sync_disabled_from_metas(&self.dictionaries);
+                    self.mark_result_stale();
                     self.settings.save();
                 }
             });
@@ -1162,35 +1482,55 @@ impl DemagogApp {
                 ActiveTab::RawText => {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(&self.document.title).strong());
+                        if ui
+                            .button("💾 Сохранить исходник")
+                            .on_hover_text("Сохранить исходный текст в TXT (Ctrl+Shift+S)")
+                            .clicked()
+                        {
+                            self.save_source_txt();
+                        }
                         if ui.button("📋 Заменить из буфера").clicked() {
-                            if let Ok(mut cb) = arboard::Clipboard::new() {
-                                if let Ok(txt) = cb.get_text() {
-                                    if !txt.is_empty()
-                                        && (!self.unsaved_work
-                                            || confirm_destructive(
-                                                "Заменить исходный текст содержимым буфера?\nНесохранённые изменения будут потеряны.",
-                                            ))
+                            match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
+                                Ok(txt) if !txt.is_empty() => {
+                                    if !self.has_unsaved_work()
+                                        || confirm_destructive(
+                                            "Заменить исходный текст содержимым буфера?\nНесохранённые изменения будут потеряны.",
+                                        )
                                     {
                                         self.document.raw_text = txt;
                                         self.document.title = "Из буфера обмена".to_string();
-                                        self.unsaved_work = true;
+                                        self.document.source_path = None;
+                                        self.source_dirty = true;
+                                        self.mark_result_stale();
                                         self.find_dirty = true;
+                                        self.find_last_edit = Instant::now();
                                     }
+                                }
+                                Ok(_) => {
+                                    self.status_line = "Буфер обмена пуст".to_string();
+                                }
+                                Err(err) => {
+                                    self.status_line =
+                                        format!("Не удалось прочитать буфер обмена: {err}");
                                 }
                             }
                         }
                         if ui.button("🗑 Очистить").clicked() {
                             let had_text = text_would_be_lost(&self.document.raw_text);
+                            let needs_confirm =
+                                self.source_dirty || self.document.source_path.is_some();
                             if !had_text
+                                || !needs_confirm
                                 || confirm_destructive(
-                                    "Очистить исходный текст?\nТекст будет удалён без возможности отмены.",
+                                    "Очистить исходный текст?\nНесохранённые изменения будут потеряны.",
                                 )
                             {
                                 self.document.raw_text.clear();
+                                self.document.source_path = None;
+                                self.source_dirty = false;
+                                self.mark_result_stale();
                                 self.find_dirty = true;
-                                if had_text {
-                                    self.unsaved_work = true;
-                                }
+                                self.find_last_edit = Instant::now();
                             }
                         }
                     });
@@ -1203,24 +1543,32 @@ impl DemagogApp {
                     } else {
                         Vec::new()
                     };
+                    let find_current = if self.find_open {
+                        Some(self.find_current)
+                    } else {
+                        None
+                    };
                     let mut layouter = editor_layouter(
                         editor_font.clone(),
                         ui.visuals().text_color(),
                         line_height,
                         &find_ranges,
+                        find_current,
                     );
                     ScrollArea::vertical().show(ui, |ui| {
-                        let response = ui.add(
-                            egui::TextEdit::multiline(&mut self.document.raw_text)
-                                .desired_width(f32::INFINITY)
-                                .desired_rows(28)
-                                .margin(egui::Margin::symmetric(14, 12))
-                                .layouter(&mut layouter),
-                        );
-                        if response.changed() {
-                            self.unsaved_work = true;
+                        let output = egui::TextEdit::multiline(&mut self.document.raw_text)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(28)
+                            .margin(egui::Margin::symmetric(14, 12))
+                            .layouter(&mut layouter)
+                            .show(ui);
+                        if output.response.changed() {
+                            self.source_dirty = true;
+                            self.mark_result_stale();
                             self.find_dirty = true;
+                            self.find_last_edit = Instant::now();
                         }
+                        self.scroll_to_find_match(ui, &output);
                     });
                 }
 
@@ -1234,16 +1582,20 @@ impl DemagogApp {
                             )
                             .clicked()
                         {
-                            if let Ok(mut cb) = arboard::Clipboard::new() {
-                                let _ = cb.set_text(self.document.processed_text.clone());
-                                self.status_line =
-                                    "Весь обработанный текст скопирован в буфер обмена!".to_string();
-                            }
+                            let text = self.document.processed_text.clone();
+                            self.copy_to_clipboard(
+                                &text,
+                                "Весь обработанный текст скопирован в буфер обмена!".to_string(),
+                                None,
+                            );
                         }
                         if ui
                             .add_enabled(
                                 has_result,
-                                egui::Button::new("🔄 Перенести результат в исходник"),
+                                egui::Button::new("🔄 Заменить исходник результатом"),
+                            )
+                            .on_hover_text(
+                                "Результат останется на месте, исходный текст будет заменён им",
                             )
                             .clicked()
                         {
@@ -1255,11 +1607,13 @@ impl DemagogApp {
                             {
                                 self.document.raw_text = self.document.processed_text.clone();
                                 self.raw_pipeline_output.clear();
-                                self.unsaved_work = true;
+                                self.source_dirty = true;
                                 self.find_dirty = true;
+                                self.find_last_edit = Instant::now();
                             }
                         }
                     });
+                    self.show_stale_banner(ui, theme);
                     if self.document.processed_text.is_empty() {
                         ui.label(
                             RichText::new(
@@ -1278,31 +1632,39 @@ impl DemagogApp {
                     } else {
                         Vec::new()
                     };
+                    let find_current = if self.find_open {
+                        Some(self.find_current)
+                    } else {
+                        None
+                    };
                     let mut layouter = editor_layouter(
                         editor_font.clone(),
                         ui.visuals().text_color(),
                         line_height,
                         &find_ranges,
+                        find_current,
                     );
                     ScrollArea::vertical().show(ui, |ui| {
-                        let response = ui.add(
-                            egui::TextEdit::multiline(&mut self.document.processed_text)
-                                .desired_width(f32::INFINITY)
-                                .desired_rows(28)
-                                .margin(egui::Margin::symmetric(14, 12))
-                                .layouter(&mut layouter),
-                        );
-                        if response.changed() {
-                            self.unsaved_work = true;
+                        let output = egui::TextEdit::multiline(&mut self.document.processed_text)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(28)
+                            .margin(egui::Margin::symmetric(14, 12))
+                            .layouter(&mut layouter)
+                            .show(ui);
+                        if output.response.changed() {
+                            self.result_dirty = true;
+                            self.result_edited = true;
                             self.find_dirty = true;
+                            self.find_last_edit = Instant::now();
                         }
+                        self.scroll_to_find_match(ui, &output);
                     });
                 }
 
                 ActiveTab::DramaChunks => {
                     ui.horizontal(|ui| {
                         let label = ui.label("Макс. длина чанка (символов):");
-                        if ui
+                        let slider = ui
                             .add(
                                 egui::Slider::new(
                                     &mut self.settings.chunk_config.max_chars,
@@ -1310,12 +1672,8 @@ impl DemagogApp {
                                 )
                                 .step_by(50.0),
                             )
-                            .labelled_by(label.id)
-                            .changed()
-                        {
-                            self.reformat_and_rechunk_existing();
-                            self.settings.save();
-                        }
+                            .labelled_by(label.id);
+                        self.apply_chunk_config_change(ui, slider.changed());
                         if ui
                             .checkbox(
                                 &mut self.settings.chunk_config.preserve_paragraphs,
@@ -1323,10 +1681,11 @@ impl DemagogApp {
                             )
                             .changed()
                         {
-                            self.reformat_and_rechunk_existing();
+                            self.rechunk_result();
                             self.settings.save();
                         }
                     });
+                    self.show_stale_banner(ui, theme);
                     ui.separator();
 
                     ScrollArea::vertical().show(ui, |ui| {
@@ -1370,13 +1729,21 @@ impl DemagogApp {
                                                     .button("📋 Копировать чанк")
                                                     .clicked()
                                                 {
-                                                    if let Ok(mut cb) = arboard::Clipboard::new() {
-                                                        let _ = cb.set_text(chunk.clone());
-                                                        self.last_copied_chunk = Some(idx);
-                                                        self.status_line = format!(
-                                                            "Чанк #{} скопирован в буфер обмена",
-                                                            idx + 1
-                                                        );
+                                                    match arboard::Clipboard::new()
+                                                        .and_then(|mut cb| cb.set_text(chunk.clone()))
+                                                    {
+                                                        Ok(()) => {
+                                                            self.last_copied_chunk = Some(idx);
+                                                            self.status_line = format!(
+                                                                "Чанк #{} скопирован в буфер обмена",
+                                                                idx + 1
+                                                            );
+                                                        }
+                                                        Err(err) => {
+                                                            self.status_line = format!(
+                                                                "Не удалось скопировать чанк: {err}"
+                                                            );
+                                                        }
                                                     }
                                                 }
                                             },
@@ -1408,6 +1775,7 @@ impl DemagogApp {
                         ui.label("Поиск по заменам:");
                         ui.text_edit_singleline(&mut self.diff_filter);
                     });
+                    self.show_stale_banner(ui, theme);
                     ui.separator();
 
                     ScrollArea::vertical().show(ui, |ui| {
@@ -1532,7 +1900,7 @@ impl DemagogApp {
                             ui.end_row();
 
                             let chunk_label = ui.label("Макс. размер чанка:");
-                            if ui
+                            let chunk_response = ui
                                 .add(
                                     egui::Slider::new(
                                         &mut self.settings.chunk_config.max_chars,
@@ -1541,12 +1909,8 @@ impl DemagogApp {
                                     .step_by(50.0)
                                     .suffix(" симв."),
                                 )
-                                .labelled_by(chunk_label.id)
-                                .changed()
-                            {
-                                self.reformat_and_rechunk_existing();
-                                self.settings.save();
-                            }
+                                .labelled_by(chunk_label.id);
+                            self.apply_chunk_config_change(ui, chunk_response.changed());
                             ui.end_row();
 
                             ui.label("Папка словарей:");
@@ -1905,15 +2269,32 @@ struct FindMatches {
     truncated: bool,
 }
 
-fn find_matches(text: &str, query: &str) -> FindMatches {
+/// Build a search pattern that ignores stress marks in the processed text:
+/// a word may contain `+` before a vowel or a combining acute after it.
+fn search_regex(query: &str) -> Option<regex::Regex> {
     let query = query.trim();
     if query.is_empty() {
-        return FindMatches::default();
+        return None;
     }
-    let Ok(regex) = regex::RegexBuilder::new(&regex::escape(query))
+    let mut pattern = String::new();
+    for ch in query.chars() {
+        if ch != '+' {
+            pattern.push_str(r"\+?");
+        }
+        match ch {
+            'е' | 'Е' | 'ё' | 'Ё' => pattern.push_str("[её]"),
+            _ => pattern.push_str(&regex::escape(&ch.to_string())),
+        }
+        pattern.push_str(r"\u{0301}?");
+    }
+    regex::RegexBuilder::new(&pattern)
         .case_insensitive(true)
         .build()
-    else {
+        .ok()
+}
+
+fn find_matches(text: &str, query: &str) -> FindMatches {
+    let Some(regex) = search_regex(query) else {
         return FindMatches::default();
     };
 
@@ -1939,6 +2320,7 @@ fn layout_editor_text(
     color: Color32,
     line_height: f32,
     matches: &[(usize, usize)],
+    current: Option<usize>,
     wrap_width: f32,
 ) -> egui::text::LayoutJob {
     let base = egui::TextFormat {
@@ -1951,7 +2333,7 @@ fn layout_editor_text(
     job.wrap.max_width = wrap_width;
 
     let mut cursor = 0;
-    for &(start, end) in matches {
+    for (index, &(start, end)) in matches.iter().enumerate() {
         if start < cursor
             || start >= end
             || end > text.len()
@@ -1964,7 +2346,11 @@ fn layout_editor_text(
             job.append(&text[cursor..start], 0.0, base.clone());
         }
         let mut highlight = base.clone();
-        highlight.background = palette::find_highlight();
+        highlight.background = if Some(index) == current {
+            palette::find_current_highlight()
+        } else {
+            palette::find_highlight()
+        };
         highlight.color = Color32::BLACK;
         job.append(&text[start..end], 0.0, highlight);
         cursor = end;
@@ -1983,6 +2369,7 @@ fn editor_layouter<'a>(
     text_color: Color32,
     line_height: f32,
     matches: &'a [(usize, usize)],
+    current: Option<usize>,
 ) -> impl FnMut(&egui::Ui, &dyn egui::TextBuffer, f32) -> Arc<egui::Galley> + 'a {
     move |ui, text, wrap_width| {
         let job = layout_editor_text(
@@ -1991,6 +2378,7 @@ fn editor_layouter<'a>(
             text_color,
             line_height,
             matches,
+            current,
             wrap_width,
         );
         ui.fonts_mut(|fonts| fonts.layout_job(job))
@@ -2066,6 +2454,34 @@ mod tests {
     }
 
     #[test]
+    fn find_ignores_stress_marks_in_processed_text() {
+        let plus = "з+амке";
+        let acute = "за\u{0301}мке";
+        let text = format!("В {plus} и {acute}");
+        let found = find_matches(&text, "замке");
+        assert_eq!(found.ranges.len(), 2);
+        assert_eq!(&text[found.ranges[0].0..found.ranges[0].1], plus);
+        assert_eq!(&text[found.ranges[1].0..found.ranges[1].1], acute);
+    }
+
+    #[test]
+    fn find_treats_yo_and_e_as_equivalent() {
+        let text = "все всё";
+        assert_eq!(find_matches(text, "все").ranges.len(), 2);
+        assert_eq!(find_matches(text, "всё").ranges.len(), 2);
+    }
+
+    #[test]
+    fn find_does_not_match_across_letters() {
+        let text = "замок з+амок";
+        let found = find_matches(text, "з+амок");
+        assert!(!found.ranges.is_empty());
+        for &(start, end) in &found.ranges {
+            assert_eq!(&text[start..end], "з+амок");
+        }
+    }
+
+    #[test]
     fn find_caps_the_number_of_highlights() {
         let text = "a".repeat(MAX_FIND_MATCHES + 10);
         let found = find_matches(&text, "a");
@@ -2083,6 +2499,7 @@ mod tests {
             Color32::WHITE,
             20.0,
             &matches,
+            None,
             200.0,
         );
         assert_eq!(job.text, text);
@@ -2109,10 +2526,35 @@ mod tests {
             Color32::WHITE,
             20.0,
             &[],
+            None,
             200.0,
         );
         assert_eq!(job.sections.len(), 1);
         assert_eq!(job.text, "abc");
+    }
+
+    #[test]
+    fn layout_marks_current_match_differently() {
+        let text = "abc abc";
+        let matches = [(0, 3), (4, 7)];
+        let job = layout_editor_text(
+            text,
+            FontId::monospace(14.0),
+            Color32::WHITE,
+            20.0,
+            &matches,
+            Some(1),
+            200.0,
+        );
+        assert_eq!(job.sections.len(), 3);
+        assert_eq!(
+            job.sections[0].format.background,
+            palette::find_highlight()
+        );
+        assert_eq!(
+            job.sections[2].format.background,
+            palette::find_current_highlight()
+        );
     }
 
     #[test]
