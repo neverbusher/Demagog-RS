@@ -9,24 +9,6 @@ use crate::engine::rex_processor::CompiledRexRule;
 use crate::ports::TextProcessor;
 
 const LARGE_DIC_BYTES: usize = 8 * 1024 * 1024;
-const MAX_FAST_PATH_EXCEPTIONS: usize = 50_000;
-
-struct LargeExactParts {
-    exact_cs: FxHashMap<String, String>,
-    exact_ci: FxHashMap<String, String>,
-    rule_count: usize,
-    unsupported: Vec<String>,
-}
-
-enum ExactLine {
-    Ignore,
-    Unsupported,
-    Exact {
-        key: String,
-        rhs: String,
-        case_sensitive: bool,
-    },
-}
 
 #[derive(Debug, Clone)]
 struct ExactPhraseRule {
@@ -105,12 +87,14 @@ impl DicProcessor {
             };
         }
 
-        if content.len() >= LARGE_DIC_BYTES
-            && let Some(parts) = compile_large_exact_dictionary(content)
-        {
-            return Self::from_exact_parts(name, parts);
+        if content.len() >= LARGE_DIC_BYTES {
+            return Self::compile_chunked(name, content);
         }
 
+        Self::compile_sequential(name, content)
+    }
+
+    fn compile_sequential(name: String, content: &str) -> Self {
         let mut exact_cs = FxHashMap::default();
         let mut exact_ci = FxHashMap::default();
         let mut prefix_cs = FxHashMap::default();
@@ -287,60 +271,42 @@ impl DicProcessor {
         }
     }
 
-    fn from_exact_parts(name: String, parts: LargeExactParts) -> Self {
-        let LargeExactParts {
-            exact_cs,
-            exact_ci,
-            rule_count,
-            unsupported,
-        } = parts;
-        let mut fast = Self {
-            name,
-            kind: DictionaryKind::DicStandard,
-            rule_count,
-            is_stress_converter: false,
-            exact_cs,
-            exact_ci,
-            prefix_cs: FxHashMap::default(),
-            prefix_ci: FxHashMap::default(),
-            min_prefix_chars: usize::MAX,
-            max_prefix_chars: 0,
-            phrase_index: FxHashMap::default(),
-            unanchored_phrases: Vec::new(),
-            wildcard_index: FxHashMap::default(),
-            unanchored_wildcards: Vec::new(),
-            compile_warnings: Vec::new(),
-        };
-
-        if !unsupported.is_empty() {
-            let exceptions = unsupported.join("\n");
-            let extra = Self::compile("large-dic-exceptions".to_string(), &exceptions, "UTF-8");
-            fast.merge_exceptional(extra);
+    fn compile_chunked(name: String, content: &str) -> Self {
+        let chunks = line_chunks(content, rayon::current_num_threads().max(1) * 2);
+        let mut parts: Vec<Self> = chunks
+            .par_iter()
+            .map(|chunk| Self::compile_sequential("chunk".to_string(), chunk))
+            .collect();
+        let mut merged = parts.remove(0);
+        merged.name = name;
+        for part in parts {
+            merged.merge_parallel_chunk(part);
         }
-
-        fast
+        merged
     }
 
-    fn merge_exceptional(&mut self, extra: Self) {
-        self.exact_cs.extend(extra.exact_cs);
-        self.exact_ci.extend(extra.exact_ci);
-        self.prefix_cs.extend(extra.prefix_cs);
-        self.prefix_ci.extend(extra.prefix_ci);
-        self.min_prefix_chars = self.min_prefix_chars.min(extra.min_prefix_chars);
-        self.max_prefix_chars = self.max_prefix_chars.max(extra.max_prefix_chars);
-        for (key, mut rules) in extra.phrase_index {
+    fn merge_parallel_chunk(&mut self, part: Self) {
+        self.exact_cs.reserve(part.exact_cs.len());
+        self.exact_cs.extend(part.exact_cs);
+        self.exact_ci.reserve(part.exact_ci.len());
+        self.exact_ci.extend(part.exact_ci);
+        self.prefix_cs.extend(part.prefix_cs);
+        self.prefix_ci.extend(part.prefix_ci);
+        self.min_prefix_chars = self.min_prefix_chars.min(part.min_prefix_chars);
+        self.max_prefix_chars = self.max_prefix_chars.max(part.max_prefix_chars);
+        for (key, mut rules) in part.phrase_index {
             self.phrase_index.entry(key).or_default().append(&mut rules);
         }
-        self.unanchored_phrases.extend(extra.unanchored_phrases);
-        for (key, mut rules) in extra.wildcard_index {
+        self.unanchored_phrases.extend(part.unanchored_phrases);
+        for (key, mut rules) in part.wildcard_index {
             self.wildcard_index
                 .entry(key)
                 .or_default()
                 .append(&mut rules);
         }
-        self.unanchored_wildcards.extend(extra.unanchored_wildcards);
-        self.rule_count += extra.rule_count;
-        for warning in extra.compile_warnings {
+        self.unanchored_wildcards.extend(part.unanchored_wildcards);
+        self.rule_count += part.rule_count;
+        for warning in part.compile_warnings {
             if self.compile_warnings.len() < 50 {
                 self.compile_warnings.push(warning);
             }
@@ -755,119 +721,6 @@ fn line_chunks(content: &str, count: usize) -> Vec<&str> {
         .filter(|chunk| !chunk.is_empty())
         .collect()
 }
-
-fn parse_exact_line(raw_line: &str) -> ExactLine {
-    let line = raw_line.trim_start_matches('\u{feff}');
-    let trimmed = line.trim();
-    if trimmed.is_empty() || (trimmed.starts_with('#') && !trimmed.starts_with("##")) {
-        return ExactLine::Ignore;
-    }
-
-    let Some((raw_lhs, raw_rhs)) = split_dic_rule(line) else {
-        return ExactLine::Ignore;
-    };
-
-    let (lhs, case_sensitive) = if let Some(rest) = raw_lhs.strip_prefix("$$") {
-        (format!("${rest}"), false)
-    } else if let Some(rest) = raw_lhs.strip_prefix("##") {
-        (format!("#{rest}"), false)
-    } else if let Some(rest) = raw_lhs.strip_prefix('$') {
-        (rest.to_string(), true)
-    } else {
-        (raw_lhs.to_string(), false)
-    };
-    let lhs = lhs.trim();
-    if lhs.is_empty() {
-        return ExactLine::Ignore;
-    }
-    if lhs.contains('*') || !is_single_word_token(lhs) {
-        return ExactLine::Unsupported;
-    }
-
-    let mut rhs = if !raw_lhs.ends_with(' ') && raw_rhs.ends_with(' ') && raw_rhs.trim().len() > 1 {
-        raw_rhs.trim_end().to_string()
-    } else {
-        raw_rhs.to_string()
-    };
-    if !case_sensitive {
-        normalize_ci_rhs_initial_case(lhs, &mut rhs);
-    }
-
-    ExactLine::Exact {
-        key: if case_sensitive {
-            lhs.to_string()
-        } else {
-            lhs.to_lowercase()
-        },
-        rhs,
-        case_sensitive,
-    }
-}
-
-/// Large exact-only dictionaries are parsed in parallel; the ordered merge
-/// preserves the last-rule-wins behavior of the sequential compiler.
-fn compile_large_exact_dictionary(content: &str) -> Option<LargeExactParts> {
-    let chunks = line_chunks(content, rayon::current_num_threads().max(1) * 2);
-    let parts: Vec<LargeExactParts> = chunks
-        .par_iter()
-        .map(|chunk| {
-            let mut exact_cs = FxHashMap::default();
-            let mut exact_ci = FxHashMap::default();
-            let mut rule_count = 0usize;
-            let mut unsupported = Vec::new();
-            for line in chunk.lines() {
-                match parse_exact_line(line) {
-                    ExactLine::Ignore => {}
-                    ExactLine::Unsupported => unsupported.push(line.to_string()),
-                    ExactLine::Exact {
-                        key,
-                        rhs,
-                        case_sensitive,
-                    } => {
-                        if case_sensitive {
-                            exact_cs.insert(key, rhs);
-                        } else {
-                            exact_ci.insert(key, rhs);
-                        }
-                        rule_count += 1;
-                    }
-                }
-            }
-            LargeExactParts {
-                exact_cs,
-                exact_ci,
-                rule_count,
-                unsupported,
-            }
-        })
-        .collect();
-
-    let cs_capacity: usize = parts.iter().map(|part| part.exact_cs.len()).sum();
-    let ci_capacity: usize = parts.iter().map(|part| part.exact_ci.len()).sum();
-    let mut exact_cs = FxHashMap::with_capacity_and_hasher(cs_capacity, Default::default());
-    let mut exact_ci = FxHashMap::with_capacity_and_hasher(ci_capacity, Default::default());
-    let mut rule_count = 0usize;
-    let mut unsupported = Vec::new();
-    for part in parts {
-        exact_cs.extend(part.exact_cs);
-        exact_ci.extend(part.exact_ci);
-        rule_count += part.rule_count;
-        unsupported.extend(part.unsupported);
-    }
-
-    let unsupported_bytes: usize = unsupported.iter().map(String::len).sum();
-    if unsupported.len() > MAX_FAST_PATH_EXCEPTIONS || unsupported_bytes >= LARGE_DIC_BYTES {
-        return None;
-    }
-
-    Some(LargeExactParts {
-        exact_cs,
-        exact_ci,
-        rule_count,
-        unsupported,
-    })
-}
-
 #[inline]
 fn is_word_token_char(c: char) -> bool {
     c.is_alphabetic() || c == '+' || c == '\''
@@ -1204,82 +1057,35 @@ mod tests {
     }
 
     #[test]
-    fn parallel_exact_path_matches_the_sequential_compiler() {
-        let alphabet: Vec<char> = "абвгдежзиклмнопрстуфхцчшщыэюя".chars().collect();
-        let make_word = |mut n: usize| {
-            let mut word = String::from("слово");
-            loop {
-                word.push(alphabet[n % alphabet.len()]);
-                n /= alphabet.len();
-                if n == 0 {
-                    break;
-                }
-            }
-            word
-        };
-
-        let mut content = String::new();
-        for i in 0..5000 {
-            content.push_str(&format!("{}=форм+а{i}\n", make_word(i)));
-        }
-        let duplicate_key = make_word(42);
-        content.push_str(&format!("{duplicate_key}=последнее\n"));
-        content.push_str("$Слово=Заглавное\n");
-
-        let parts = compile_large_exact_dictionary(&content).expect("exact-only dictionary");
-        let sequential = DicProcessor::compile("test.dic".to_string(), &content, "UTF-8");
-
-        assert!(parts.unsupported.is_empty());
-        assert_eq!(parts.rule_count, 5002);
-        assert_eq!(parts.exact_ci.len(), sequential.exact_ci.len());
-        assert_eq!(parts.exact_cs.len(), sequential.exact_cs.len());
-        assert_eq!(
-            parts.exact_ci.get(&duplicate_key).map(String::as_str),
-            Some("последнее")
-        );
-        assert_eq!(
-            sequential.exact_ci.get(&duplicate_key).map(String::as_str),
-            Some("последнее")
-        );
-        assert_eq!(
-            parts.exact_cs.get("Слово"),
-            sequential.exact_cs.get("Слово")
-        );
-    }
-
-    #[test]
-    fn parallel_exact_path_collects_phrases_and_wildcards_as_exceptions() {
-        let parts = compile_large_exact_dictionary("два слова=два\nсло*во=слово\n")
-            .expect("fast path can still handle exceptions");
-        assert!(parts.exact_ci.is_empty());
-        assert_eq!(parts.unsupported.len(), 2);
-    }
-
-    #[test]
-    fn hybrid_fast_path_matches_the_full_compiler_with_exceptions() {
+    fn chunked_compile_matches_the_sequential_compiler() {
         let content = concat!(
             "дом=д+ом\n",
             "кот=к+от\n",
-            "сон=с+он\n",
+            "дом=д+ОМ\n",
+            "$Слово=Заглавное\n",
             "два слова=ДВА СЛОВА\n",
-            "сло*во=СЛОВО\n"
+            "сло*во=СЛОВО\n",
+            "стоящих на стол*=стоЯщих на стол\n"
         );
 
-        let parts = compile_large_exact_dictionary(content).expect("fast path");
-        assert_eq!(parts.exact_ci.len(), 3);
-        assert_eq!(parts.unsupported.len(), 2);
+        let sequential = DicProcessor::compile_sequential("test.dic".to_string(), content);
+        let chunked = DicProcessor::compile_chunked("test.dic".to_string(), content);
 
-        let hybrid = DicProcessor::from_exact_parts("test.dic".to_string(), parts);
-        let sequential = DicProcessor::compile("test.dic".to_string(), content, "UTF-8");
-
-        assert_eq!(hybrid.rule_count, sequential.rule_count);
-        assert_eq!(hybrid.exact_ci.len(), sequential.exact_ci.len());
-        assert_eq!(hybrid.phrase_index.len(), sequential.phrase_index.len());
-        assert_eq!(hybrid.wildcard_index.len(), sequential.wildcard_index.len());
-
-        let text = "дом кот два слова слово";
+        assert_eq!(chunked.rule_count, sequential.rule_count);
+        assert_eq!(chunked.exact_ci.len(), sequential.exact_ci.len());
+        assert_eq!(chunked.exact_cs.len(), sequential.exact_cs.len());
+        assert_eq!(chunked.prefix_ci.len(), sequential.prefix_ci.len());
+        assert_eq!(chunked.min_prefix_chars, sequential.min_prefix_chars);
+        assert_eq!(chunked.max_prefix_chars, sequential.max_prefix_chars);
+        assert_eq!(chunked.phrase_index.len(), sequential.phrase_index.len());
         assert_eq!(
-            hybrid.process(text, false).text,
+            chunked.wildcard_index.len(),
+            sequential.wildcard_index.len()
+        );
+
+        let text = "дом кот два слова слово стоящих на столе";
+        assert_eq!(
+            chunked.process(text, false).text,
             sequential.process(text, false).text
         );
     }
