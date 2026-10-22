@@ -285,14 +285,6 @@ impl AppSettings {
     pub fn is_dic_enabled(&self, name: &str) -> bool {
         !self.disabled_dictionaries.iter().any(|d| d == name)
     }
-
-    pub fn sync_disabled_from_metas(&mut self, metas: &[DictionaryMeta]) {
-        self.disabled_dictionaries = metas
-            .iter()
-            .filter(|m| !m.enabled)
-            .map(|m| m.name.clone())
-            .collect();
-    }
 }
 
 pub fn describe_dictionary(name: &str, content: &str) -> (DictionaryTag, String, bool) {

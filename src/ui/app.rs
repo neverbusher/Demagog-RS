@@ -150,6 +150,11 @@ fn text_mutations_enabled(is_busy: bool) -> bool {
     !is_busy
 }
 
+struct LoadedDictionary {
+    meta: DictionaryMeta,
+    processor: Arc<dyn TextProcessor>,
+}
+
 fn chunks_for_text(text: &str, config: &ChunkConfig) -> Vec<String> {
     if text.trim().is_empty() {
         return Vec::new();
@@ -163,8 +168,7 @@ fn can_export_chunks(text: &str, chunks: &[String]) -> bool {
 
 pub struct DemagogApp {
     settings: AppSettings,
-    dictionaries: Vec<DictionaryMeta>,
-    processors: Vec<Arc<dyn TextProcessor>>,
+    dictionaries: Vec<LoadedDictionary>,
     document: BookDocument,
     raw_pipeline_output: String,
     active_tab: ActiveTab,
@@ -240,7 +244,6 @@ impl DemagogApp {
         let mut app = Self {
             settings,
             dictionaries: Vec::new(),
-            processors: Vec::new(),
             document: BookDocument {
                 title: "Пример текста".to_string(),
                 source_path: None,
@@ -330,7 +333,7 @@ impl DemagogApp {
 
     fn apply_preset(&mut self, preset: DictionaryPreset) {
         for d in &mut self.dictionaries {
-            d.enabled = preset_enables(preset, d.tag, &d.name);
+            d.meta.enabled = preset_enables(preset, d.meta.tag, &d.meta.name);
         }
         let previous_format = self.settings.stress_format;
         self.settings.stress_format = match preset {
@@ -340,7 +343,7 @@ impl DemagogApp {
             DictionaryPreset::NumbersAndYo => StressFormat::CleanYoOnly,
             DictionaryPreset::Clear => self.settings.stress_format,
         };
-        self.settings.sync_disabled_from_metas(&self.dictionaries);
+        self.sync_disabled_dictionaries();
         self.mark_result_stale();
         if self.settings.stress_format != previous_format && !self.reformat_result() {
             self.settings.stress_format = previous_format;
@@ -355,9 +358,8 @@ impl DemagogApp {
         let active_processors: Vec<Arc<dyn TextProcessor>> = self
             .dictionaries
             .iter()
-            .zip(self.processors.iter())
-            .filter(|(meta, _)| meta.enabled)
-            .map(|(_, proc)| Arc::clone(proc))
+            .filter(|d| d.meta.enabled)
+            .map(|d| Arc::clone(&d.processor))
             .collect();
 
         if active_processors.is_empty() {
@@ -372,7 +374,7 @@ impl DemagogApp {
             return;
         }
 
-        self.settings.sync_disabled_from_metas(&self.dictionaries);
+        self.sync_disabled_dictionaries();
         self.save_settings();
 
         self.is_busy = true;
@@ -380,8 +382,8 @@ impl DemagogApp {
         self.report = PipelineReport::default();
         self.reset_long_list_state();
         for d in &mut self.dictionaries {
-            d.last_ms = None;
-            d.last_replacements = None;
+            d.meta.last_ms = None;
+            d.meta.last_replacements = None;
         }
 
         let input_text = self.document.raw_text.clone();
@@ -446,16 +448,18 @@ impl DemagogApp {
                             } => {
                                 let total_rules: usize =
                                     compiled.iter().map(|c| c.meta.rule_count).sum();
+                                let settings = &self.settings;
                                 self.dictionaries = compiled
-                                    .iter()
-                                    .map(|c| {
-                                        let mut m = c.meta.clone();
-                                        m.enabled = self.settings.is_dic_enabled(&m.name);
-                                        m
+                                    .into_iter()
+                                    .map(|compiled| {
+                                        let mut meta = compiled.meta;
+                                        meta.enabled = settings.is_dic_enabled(&meta.name);
+                                        LoadedDictionary {
+                                            meta,
+                                            processor: compiled.processor,
+                                        }
                                     })
                                     .collect();
-                                self.processors =
-                                    compiled.into_iter().map(|c| c.processor).collect();
                                 let mut status = format!(
                                     "Готово: загружено {} словарей ({} правил) за {} мс",
                                     self.dictionaries.len(),
@@ -507,8 +511,8 @@ impl DemagogApp {
                                         self.last_copied_chunk = None;
                                         self.report = PipelineReport::default();
                                         for d in &mut self.dictionaries {
-                                            d.last_ms = None;
-                                            d.last_replacements = None;
+                                            d.meta.last_ms = None;
+                                            d.meta.last_replacements = None;
                                         }
                                         self.source_dirty = false;
                                         self.result_state.reset();
@@ -534,10 +538,10 @@ impl DemagogApp {
                                     if let Some(d) = self
                                         .dictionaries
                                         .iter_mut()
-                                        .find(|d| d.name == step.dictionary_name)
+                                        .find(|d| d.meta.name == step.dictionary_name)
                                     {
-                                        d.last_ms = Some(step.elapsed_ms);
-                                        d.last_replacements = Some(step.replacements_count);
+                                        d.meta.last_ms = Some(step.elapsed_ms);
+                                        d.meta.last_replacements = Some(step.replacements_count);
                                     }
                                 }
                                 PipelineProgress::Completed(result) => {
@@ -1186,6 +1190,15 @@ impl DemagogApp {
         }
     }
 
+    fn sync_disabled_dictionaries(&mut self) {
+        self.settings.disabled_dictionaries = self
+            .dictionaries
+            .iter()
+            .filter(|d| !d.meta.enabled)
+            .map(|d| d.meta.name.clone())
+            .collect();
+    }
+
     fn save_settings(&mut self) {
         if let Err(err) = self.settings.save() {
             self.set_status(
@@ -1366,7 +1379,7 @@ impl DemagogApp {
     }
 
     pub(crate) fn shutdown(&mut self) {
-        self.settings.sync_disabled_from_metas(&self.dictionaries);
+        self.sync_disabled_dictionaries();
         self.save_settings();
         // Exit immediately so Windows reclaims the ~6.6M heap-allocated dictionary strings
         // in 1ms instead of running sequential HeapFree destructors for 5 seconds.
@@ -1406,7 +1419,8 @@ impl DemagogApp {
                     self.open_book_dialog(ctx.clone());
                 }
 
-                let enabled_dictionaries = self.dictionaries.iter().filter(|d| d.enabled).count();
+                let enabled_dictionaries =
+                    self.dictionaries.iter().filter(|d| d.meta.enabled).count();
                 let can_run = !self.is_busy && enabled_dictionaries > 0;
                 let run_disabled_hint = if enabled_dictionaries == 0 {
                     "Включите хотя бы один словарь"
@@ -1522,12 +1536,12 @@ impl DemagogApp {
 
         // Bottom status bar
         egui::Panel::bottom("bottom_status").show_inside(ui, |ui| {
-            let active_count = self.dictionaries.iter().filter(|d| d.enabled).count();
+            let active_count = self.dictionaries.iter().filter(|d| d.meta.enabled).count();
             let active_rules: usize = self
                 .dictionaries
                 .iter()
-                .filter(|d| d.enabled)
-                .map(|d| d.rule_count)
+                .filter(|d| d.meta.enabled)
+                .map(|d| d.meta.rule_count)
                 .sum();
             let counters = format!(
                 "Активно: {}/{} словарей ({} правил)",
@@ -1641,9 +1655,9 @@ impl DemagogApp {
                     .enumerate()
                     .filter(|(_, d)| {
                         filter_low.is_empty()
-                            || d.name.to_lowercase().contains(&filter_low)
-                            || d.description.to_lowercase().contains(&filter_low)
-                            || d.tag.label().to_lowercase().contains(&filter_low)
+                            || d.meta.name.to_lowercase().contains(&filter_low)
+                            || d.meta.description.to_lowercase().contains(&filter_low)
+                            || d.meta.tag.label().to_lowercase().contains(&filter_low)
                     })
                     .map(|(idx, _)| idx)
                     .collect();
@@ -1695,19 +1709,19 @@ impl DemagogApp {
                                 let mut indices: Vec<usize> = visible
                                     .iter()
                                     .copied()
-                                    .filter(|&i| self.dictionaries[i].tag == tag)
+                                    .filter(|&i| self.dictionaries[i].meta.tag == tag)
                                     .collect();
                                 if indices.is_empty() {
                                     continue;
                                 }
                                 indices.sort_by_cached_key(|&i| {
-                                    dictionary_display_key(&self.dictionaries[i].name)
+                                    dictionary_display_key(&self.dictionaries[i].meta.name)
                                 });
 
                                 let total = indices.len();
                                 let active = indices
                                     .iter()
-                                    .filter(|&&i| self.dictionaries[i].enabled)
+                                    .filter(|&&i| self.dictionaries[i].meta.enabled)
                                     .count();
                                 let group_key = tag.label();
                                 let collapsed = self
@@ -1760,7 +1774,7 @@ impl DemagogApp {
                                     if state_response.clicked() {
                                         let enable = active < total;
                                         for &i in &indices {
-                                            self.dictionaries[i].enabled = enable;
+                                            self.dictionaries[i].meta.enabled = enable;
                                         }
                                         changed_any = true;
                                     }
@@ -1782,7 +1796,7 @@ impl DemagogApp {
                                         for idx in indices {
                                             dictionary_card(
                                                 ui,
-                                                &mut self.dictionaries[idx],
+                                                &mut self.dictionaries[idx].meta,
                                                 &mut changed_any,
                                                 false,
                                                 theme,
@@ -1816,7 +1830,7 @@ impl DemagogApp {
                             for idx in &visible {
                                 dictionary_card(
                                     ui,
-                                    &mut self.dictionaries[*idx],
+                                    &mut self.dictionaries[*idx].meta,
                                     &mut changed_any,
                                     true,
                                     theme,
@@ -1827,7 +1841,7 @@ impl DemagogApp {
                     });
 
                 if changed_any {
-                    self.settings.sync_disabled_from_metas(&self.dictionaries);
+                    self.sync_disabled_dictionaries();
                     self.mark_result_stale();
                     self.save_settings();
                 }
@@ -2456,9 +2470,9 @@ impl DemagogApp {
                     {
                         self.settings = reset_settings_preserving_folder(&self.settings);
                         for d in &mut self.dictionaries {
-                            d.enabled = true;
+                            d.meta.enabled = true;
                         }
-                        self.settings.sync_disabled_from_metas(&self.dictionaries);
+                        self.sync_disabled_dictionaries();
                         self.save_settings();
                         self.mark_result_stale();
                         apply_style_settings(&ctx, &self.settings);
