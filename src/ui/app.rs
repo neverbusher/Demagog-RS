@@ -52,6 +52,7 @@ pub struct DemagogApp {
     find_dirty: bool,
     focus_find: bool,
     last_window_title: String,
+    window_icon_applied: bool,
 }
 
 enum WorkerMessage {
@@ -116,6 +117,7 @@ impl DemagogApp {
             find_dirty: false,
             focus_find: false,
             last_window_title: "Demagog-RS".to_string(),
+            window_icon_applied: false,
         };
 
         app.reload_dictionaries_async(egui_ctx);
@@ -687,6 +689,10 @@ impl DemagogApp {
     pub(crate) fn update_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.poll_worker();
+        if !self.window_icon_applied {
+            self.window_icon_applied =
+                super::window::apply_window_icon(&super::window::app_icon());
+        }
         let theme = self.settings.theme();
 
         if ctx.input(|i| i.viewport().close_requested()) && self.unsaved_work {
