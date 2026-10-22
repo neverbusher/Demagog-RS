@@ -132,3 +132,61 @@ fn pipeline_sort_key(path: &Path) -> (u8, u32, String) {
         (3, 999, lower)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    #[ignore]
+    fn measure_dictionary_compile() {
+        let dir = Path::new("dic");
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
+            .expect("dic dir")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                p.is_file()
+                    && matches!(
+                        p.extension()
+                            .and_then(|s| s.to_str())
+                            .map(|s| s.to_ascii_lowercase())
+                            .as_deref(),
+                        Some("rex" | "dic")
+                    )
+            })
+            .collect();
+        paths.sort_by_key(|p| pipeline_sort_key(p));
+
+        let started = Instant::now();
+        let mut timings: Vec<(String, u128, usize, u64)> = paths
+            .par_iter()
+            .map(|path| {
+                let name = path.file_name().unwrap().to_string_lossy().to_string();
+                let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                let started = Instant::now();
+                let rules = compile_single_dictionary(path)
+                    .map(|d| d.meta.rule_count)
+                    .unwrap_or(0);
+                (name, started.elapsed().as_millis(), rules, size)
+            })
+            .collect();
+        let wall = started.elapsed();
+        timings.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+        println!("parallel compile wall: {wall:?}");
+        for (name, ms, rules, size) in timings {
+            println!(
+                "{ms:5} ms {rules:8} rules {:6.1} MB  {name}",
+                size as f64 / 1_048_576.0
+            );
+        }
+
+        let started = Instant::now();
+        let report = load_dictionaries_parallel(dir).expect("load dictionaries");
+        println!(
+            "load_dictionaries_parallel: {:?}, {} dictionaries",
+            started.elapsed(),
+            report.compiled.len()
+        );
+    }
+}
