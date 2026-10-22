@@ -58,6 +58,10 @@ pub fn diff_before(dark: bool) -> Color32 {
     }
 }
 
+pub fn find_highlight() -> Color32 {
+    Color32::from_rgb(255, 221, 87)
+}
+
 pub fn diff_after(dark: bool) -> Color32 {
     if dark {
         Color32::from_rgb(110, 225, 140)
@@ -133,5 +137,14 @@ mod tests {
     fn contrast_helper_reports_black_and_white_as_21_to_1() {
         let ratio = contrast(Color32::WHITE, Color32::BLACK);
         assert!((ratio - 21.0).abs() < 0.01, "ratio was {ratio:.2}");
+    }
+
+    #[test]
+    fn find_highlight_keeps_black_text_readable() {
+        let ratio = contrast(Color32::BLACK, find_highlight());
+        assert!(
+            ratio >= WCAG_AA_NORMAL_TEXT,
+            "find highlight has contrast {ratio:.2}:1 with black text"
+        );
     }
 }

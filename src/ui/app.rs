@@ -45,6 +45,12 @@ pub struct DemagogApp {
     dic_load_errors: Vec<String>,
     unsaved_work: bool,
     cancel_flag: Option<Arc<AtomicBool>>,
+    find_open: bool,
+    find_query: String,
+    find_matches: FindMatches,
+    find_for_tab: Option<ActiveTab>,
+    find_dirty: bool,
+    focus_find: bool,
 }
 
 enum WorkerMessage {
@@ -102,6 +108,12 @@ impl DemagogApp {
             dic_load_errors: Vec::new(),
             unsaved_work: false,
             cancel_flag: None,
+            find_open: false,
+            find_query: String::new(),
+            find_matches: FindMatches::default(),
+            find_for_tab: None,
+            find_dirty: false,
+            focus_find: false,
         };
 
         app.reload_dictionaries_async(egui_ctx);
@@ -142,6 +154,21 @@ impl DemagogApp {
             }
             ctx.request_repaint();
         });
+    }
+
+    fn apply_preset(&mut self, preset: DictionaryPreset) {
+        for d in &mut self.dictionaries {
+            d.enabled = preset_enables(preset, d.tag, &d.name);
+        }
+        self.settings.stress_format = match preset {
+            DictionaryPreset::All | DictionaryPreset::HomographsOnly => {
+                StressFormat::PlusBeforeVowel
+            }
+            DictionaryPreset::NumbersAndYo => StressFormat::CleanYoOnly,
+            DictionaryPreset::Clear => self.settings.stress_format,
+        };
+        self.settings.sync_disabled_from_metas(&self.dictionaries);
+        self.settings.save();
     }
 
     fn start_processing(&mut self, ctx: egui::Context, capture_diff: bool) {
@@ -273,6 +300,7 @@ impl DemagogApp {
                                             d.last_replacements = None;
                                         }
                                         self.unsaved_work = false;
+                                        self.find_dirty = true;
                                     }
                                     Err(err) => {
                                         self.status_line = err;
@@ -313,6 +341,7 @@ impl DemagogApp {
                                     let had_events = !result.report.events.is_empty();
                                     self.report = result.report;
                                     self.unsaved_work = true;
+                                    self.find_dirty = true;
                                     self.cancel_flag = None;
                                     self.is_busy = false;
                                     self.progress_ratio = 1.0;
@@ -434,6 +463,22 @@ impl DemagogApp {
             self.export_chunks_json();
         }
 
+        let find = KeyboardShortcut::new(Modifiers::CTRL, Key::F);
+        if ctx.input_mut(|i| i.consume_shortcut(&find)) {
+            if self.active_tab != ActiveTab::RawText
+                && self.active_tab != ActiveTab::ProcessedText
+            {
+                self.active_tab = if self.document.processed_text.is_empty() {
+                    ActiveTab::RawText
+                } else {
+                    ActiveTab::ProcessedText
+                };
+            }
+            self.find_open = true;
+            self.focus_find = true;
+            self.find_dirty = true;
+        }
+
         if let Some(cancel) = self.cancel_flag.clone() {
             if !cancel.load(Ordering::Relaxed)
                 && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
@@ -441,6 +486,10 @@ impl DemagogApp {
                 cancel.store(true, Ordering::Relaxed);
                 self.status_line = "Отмена...".to_string();
             }
+        } else if self.find_open
+            && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+        {
+            self.find_open = false;
         }
     }
 
@@ -468,6 +517,59 @@ impl DemagogApp {
             return;
         };
         self.load_book(path, ctx.clone());
+    }
+
+    fn refresh_find_matches(&mut self) {
+        let query = self.find_query.clone();
+        let text = match self.active_tab {
+            ActiveTab::RawText => self.document.raw_text.as_str(),
+            ActiveTab::ProcessedText => self.document.processed_text.as_str(),
+            _ => "",
+        };
+        let matches = find_matches(text, &query);
+        self.find_matches = matches;
+        self.find_for_tab = Some(self.active_tab);
+    }
+
+    fn show_find_bar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Найти:");
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.find_query)
+                    .hint_text("Строка или фрагмент")
+                    .desired_width(240.0),
+            );
+            if self.focus_find {
+                response.request_focus();
+                self.focus_find = false;
+            }
+            if response.changed() {
+                self.find_dirty = true;
+            }
+            if self.find_dirty || self.find_for_tab != Some(self.active_tab) {
+                self.refresh_find_matches();
+                self.find_dirty = false;
+            }
+
+            let count = self.find_matches.ranges.len();
+            let suffix = if self.find_matches.truncated { "+" } else { "" };
+            ui.label(
+                RichText::new(if self.find_query.trim().is_empty() {
+                    "Введите строку".to_string()
+                } else {
+                    format!("Совпадений: {}{}", format_num(count), suffix)
+                })
+                .weak(),
+            );
+
+            if ui
+                .button("✖")
+                .on_hover_text("Закрыть поиск (Esc)")
+                .clicked()
+            {
+                self.find_open = false;
+            }
+        });
     }
 
     fn save_processed_txt(&mut self) {
@@ -545,6 +647,7 @@ impl DemagogApp {
 
         if !self.document.processed_text.is_empty() || !self.document.chunks.is_empty() {
             self.unsaved_work = true;
+            self.find_dirty = true;
         }
     }
 }
@@ -785,66 +888,53 @@ impl DemagogApp {
                     });
                 });
 
-                // Preset buttons
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .button("✅ Все (полный +)")
-                        .on_hover_text("Включить все словари, включая полную орфоэпию со знаками '+'")
-                        .clicked()
-                    {
-                        for d in &mut self.dictionaries {
-                            d.enabled = true;
-                        }
-                        self.settings.stress_format = StressFormat::PlusBeforeVowel;
-                        self.settings.sync_disabled_from_metas(&self.dictionaries);
-                        self.settings.save();
-                    }
-                    if ui
-                        .button("⚡ Только Омографы с '+' (без 95.NEW)")
-                        .on_hover_text("Ставит '+' только в омографах и трудных словах, не трогая простые слова из 95.NEW (2.9 млн)")
-                        .clicked()
-                    {
-                        for d in &mut self.dictionaries {
-                            d.enabled = !d.name.starts_with("95.");
-                        }
-                        self.settings.stress_format = StressFormat::PlusBeforeVowel;
-                        self.settings.sync_disabled_from_metas(&self.dictionaries);
-                        self.settings.save();
-                    }
-                    if ui
-                        .button("🚫 Выкл. все с '+' (только Числа + Ё)")
-                        .on_hover_text("Отключает ВСЕ словари, которые ставят знак ударения '+' или заглавные в омографах")
-                        .clicked()
-                    {
-                        for d in &mut self.dictionaries {
-                            d.enabled = matches!(
-                                d.tag,
-                                DictionaryTag::NumbersAndDates
-                                    | DictionaryTag::YoFication
-                                    | DictionaryTag::CleanupAndTranslit
-                            );
-                        }
-                        self.settings.stress_format = StressFormat::CleanYoOnly;
-                        self.settings.sync_disabled_from_metas(&self.dictionaries);
-                        self.settings.save();
-                    }
-                    if ui.button("❌ Снять все").clicked() {
-                        for d in &mut self.dictionaries {
-                            d.enabled = false;
-                        }
-                        self.settings.sync_disabled_from_metas(&self.dictionaries);
-                        self.settings.save();
-                    }
-                });
-
                 ui.horizontal(|ui| {
+                    let mut selected = None;
+                    ui.menu_button("Пресеты", |ui| {
+                        if ui
+                            .button("Все (полный +)")
+                            .on_hover_text(
+                                "Включить все словари, включая полную орфоэпию со знаками '+'",
+                            )
+                            .clicked()
+                        {
+                            selected = Some(DictionaryPreset::All);
+                            ui.close();
+                        }
+                        if ui
+                            .button("Только омографы с '+' (без 95.NEW)")
+                            .on_hover_text(
+                                "Ставит '+' только в омографах и трудных словах, не трогая простые слова из 95.NEW (2.9 млн)",
+                            )
+                            .clicked()
+                        {
+                            selected = Some(DictionaryPreset::HomographsOnly);
+                            ui.close();
+                        }
+                        if ui
+                            .button("Числа + Ё (без ударений)")
+                            .on_hover_text(
+                                "Оставляет числа и даты, ё-фикацию и чистку текста",
+                            )
+                            .clicked()
+                        {
+                            selected = Some(DictionaryPreset::NumbersAndYo);
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui.button("Снять все").clicked() {
+                            selected = Some(DictionaryPreset::Clear);
+                            ui.close();
+                        }
+                    });
+                    if let Some(preset) = selected {
+                        self.apply_preset(preset);
+                    }
+
                     if ui
-                        .checkbox(
-                            &mut self.settings.group_dictionaries_by_type,
-                            "Группировать по типу",
-                        )
+                        .checkbox(&mut self.settings.group_dictionaries_by_type, "Группы")
                         .on_hover_text(
-                            "Меняет только отображение: порядок обработки остаётся по нумерации файлов конвейера",
+                            "Группировать словари по типу. Порядок обработки остаётся по нумерации файлов конвейера",
                         )
                         .changed()
                     {
@@ -854,7 +944,12 @@ impl DemagogApp {
 
                 ui.horizontal(|ui| {
                     ui.label("Фильтр:");
-                    ui.text_edit_singleline(&mut self.dic_search_filter);
+                    let width = (ui.available_width() - 24.0).max(80.0);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.dic_search_filter)
+                            .hint_text("Имя, описание или тип")
+                            .desired_width(width),
+                    );
                     if !self.dic_search_filter.is_empty() && ui.small_button("✖").clicked() {
                         self.dic_search_filter.clear();
                     }
@@ -956,6 +1051,7 @@ impl DemagogApp {
                                                 ui,
                                                 &mut self.dictionaries[idx],
                                                 &mut changed_any,
+                                                false,
                                             );
                                         }
                                         ui.add_space(4.0);
@@ -983,7 +1079,12 @@ impl DemagogApp {
                             }
                         } else {
                             for idx in &visible {
-                                dictionary_card(ui, &mut self.dictionaries[*idx], &mut changed_any);
+                                dictionary_card(
+                                    ui,
+                                    &mut self.dictionaries[*idx],
+                                    &mut changed_any,
+                                    true,
+                                );
                             }
                         }
                     });
@@ -1049,6 +1150,7 @@ impl DemagogApp {
                                         self.document.raw_text = txt;
                                         self.document.title = "Из буфера обмена".to_string();
                                         self.unsaved_work = true;
+                                        self.find_dirty = true;
                                     }
                                 }
                             }
@@ -1061,17 +1163,27 @@ impl DemagogApp {
                                 )
                             {
                                 self.document.raw_text.clear();
+                                self.find_dirty = true;
                                 if had_text {
                                     self.unsaved_work = true;
                                 }
                             }
                         }
                     });
+                    if self.find_open {
+                        self.show_find_bar(ui);
+                    }
                     ui.add_space(4.0);
+                    let find_ranges = if self.find_open {
+                        self.find_matches.ranges.clone()
+                    } else {
+                        Vec::new()
+                    };
                     let mut layouter = editor_layouter(
                         editor_font.clone(),
                         ui.visuals().text_color(),
                         line_height,
+                        &find_ranges,
                     );
                     ScrollArea::vertical().show(ui, |ui| {
                         let response = ui.add(
@@ -1083,6 +1195,7 @@ impl DemagogApp {
                         );
                         if response.changed() {
                             self.unsaved_work = true;
+                            self.find_dirty = true;
                         }
                     });
                 }
@@ -1119,14 +1232,24 @@ impl DemagogApp {
                                 self.document.raw_text = self.document.processed_text.clone();
                                 self.raw_pipeline_output.clear();
                                 self.unsaved_work = true;
+                                self.find_dirty = true;
                             }
                         }
                     });
+                    if self.find_open {
+                        self.show_find_bar(ui);
+                    }
                     ui.add_space(4.0);
+                    let find_ranges = if self.find_open {
+                        self.find_matches.ranges.clone()
+                    } else {
+                        Vec::new()
+                    };
                     let mut layouter = editor_layouter(
                         editor_font.clone(),
                         ui.visuals().text_color(),
                         line_height,
+                        &find_ranges,
                     );
                     ScrollArea::vertical().show(ui, |ui| {
                         let response = ui.add(
@@ -1138,6 +1261,7 @@ impl DemagogApp {
                         );
                         if response.changed() {
                             self.unsaved_work = true;
+                            self.find_dirty = true;
                         }
                     });
                 }
@@ -1433,10 +1557,15 @@ impl DemagogApp {
     }
 }
 
-fn dictionary_card(ui: &mut egui::Ui, d: &mut DictionaryMeta, changed_any: &mut bool) {
+fn dictionary_card(
+    ui: &mut egui::Ui,
+    d: &mut DictionaryMeta,
+    changed_any: &mut bool,
+    show_tag: bool,
+) {
     let dark = ui.visuals().dark_mode;
     egui::Frame::group(ui.style())
-        .inner_margin(egui::Margin::symmetric(10, 8))
+        .inner_margin(egui::Margin::symmetric(10, 6))
         .show(ui, |ui| {
             // Force equal card width: otherwise the frame shrinks
             // to the longest wrapped line and the right edge is ragged.
@@ -1446,11 +1575,13 @@ fn dictionary_card(ui: &mut egui::Ui, d: &mut DictionaryMeta, changed_any: &mut 
                     *changed_any = true;
                 }
 
-                ui.label(
-                    RichText::new(format!("[{}]", d.tag.label()))
-                        .color(palette::tag_color(d.tag, dark))
-                        .strong(),
-                );
+                if show_tag {
+                    ui.label(
+                        RichText::new(format!("[{}]", d.tag.label()))
+                            .color(palette::tag_color(d.tag, dark))
+                            .strong(),
+                    );
+                }
 
                 if d.outputs_plus_stress {
                     ui.label(
@@ -1460,10 +1591,9 @@ fn dictionary_card(ui: &mut egui::Ui, d: &mut DictionaryMeta, changed_any: &mut 
                     );
                 }
 
-                ui.label(RichText::new(&d.name).strong());
+                ui.label(RichText::new(&d.name).strong())
+                    .on_hover_text(&d.description);
             });
-
-            ui.label(RichText::new(&d.description).weak());
 
             ui.horizontal_wrapped(|ui| {
                 ui.label(
@@ -1634,6 +1764,28 @@ fn text_would_be_lost(text: &str) -> bool {
     !text.trim().is_empty()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DictionaryPreset {
+    All,
+    HomographsOnly,
+    NumbersAndYo,
+    Clear,
+}
+
+fn preset_enables(preset: DictionaryPreset, tag: DictionaryTag, name: &str) -> bool {
+    match preset {
+        DictionaryPreset::All => true,
+        DictionaryPreset::HomographsOnly => !name.starts_with("95."),
+        DictionaryPreset::NumbersAndYo => matches!(
+            tag,
+            DictionaryTag::NumbersAndDates
+                | DictionaryTag::YoFication
+                | DictionaryTag::CleanupAndTranslit
+        ),
+        DictionaryPreset::Clear => false,
+    }
+}
+
 fn is_supported_book_path(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -1649,21 +1801,102 @@ fn editor_line_height(font_size: f32) -> f32 {
     font_size * 1.45
 }
 
-fn editor_layouter(
+const MAX_FIND_MATCHES: usize = 5000;
+
+#[derive(Debug, Default)]
+struct FindMatches {
+    ranges: Vec<(usize, usize)>,
+    truncated: bool,
+}
+
+fn find_matches(text: &str, query: &str) -> FindMatches {
+    let query = query.trim();
+    if query.is_empty() {
+        return FindMatches::default();
+    }
+    let Ok(regex) = regex::RegexBuilder::new(&regex::escape(query))
+        .case_insensitive(true)
+        .build()
+    else {
+        return FindMatches::default();
+    };
+
+    let mut ranges = Vec::new();
+    for found in regex.find_iter(text) {
+        if ranges.len() == MAX_FIND_MATCHES {
+            return FindMatches {
+                ranges,
+                truncated: true,
+            };
+        }
+        ranges.push((found.start(), found.end()));
+    }
+    FindMatches {
+        ranges,
+        truncated: false,
+    }
+}
+
+fn layout_editor_text(
+    text: &str,
+    font: FontId,
+    color: Color32,
+    line_height: f32,
+    matches: &[(usize, usize)],
+    wrap_width: f32,
+) -> egui::text::LayoutJob {
+    let base = egui::TextFormat {
+        font_id: font,
+        color,
+        line_height: Some(line_height),
+        ..Default::default()
+    };
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = wrap_width;
+
+    let mut cursor = 0;
+    for &(start, end) in matches {
+        if start < cursor
+            || start >= end
+            || end > text.len()
+            || !text.is_char_boundary(start)
+            || !text.is_char_boundary(end)
+        {
+            continue;
+        }
+        if start > cursor {
+            job.append(&text[cursor..start], 0.0, base.clone());
+        }
+        let mut highlight = base.clone();
+        highlight.background = palette::find_highlight();
+        highlight.color = Color32::BLACK;
+        job.append(&text[start..end], 0.0, highlight);
+        cursor = end;
+    }
+    if cursor < text.len() {
+        job.append(&text[cursor..], 0.0, base.clone());
+    }
+    if job.sections.is_empty() {
+        job.append("", 0.0, base);
+    }
+    job
+}
+
+fn editor_layouter<'a>(
     font: FontId,
     text_color: Color32,
     line_height: f32,
-) -> impl FnMut(&egui::Ui, &dyn egui::TextBuffer, f32) -> Arc<egui::Galley> {
+    matches: &'a [(usize, usize)],
+) -> impl FnMut(&egui::Ui, &dyn egui::TextBuffer, f32) -> Arc<egui::Galley> + 'a {
     move |ui, text, wrap_width| {
-        let mut job = egui::text::LayoutJob::simple(
-            text.as_str().to_owned(),
+        let job = layout_editor_text(
+            text.as_str(),
             font.clone(),
             text_color,
+            line_height,
+            matches,
             wrap_width,
         );
-        for section in &mut job.sections {
-            section.format.line_height = Some(line_height);
-        }
         ui.fonts_mut(|fonts| fonts.layout_job(job))
     }
 }
@@ -1711,6 +1944,130 @@ mod tests {
         for name in ["cover.png", "book", "book.rtf"] {
             assert!(!is_supported_book_path(Path::new(name)), "{name}");
         }
+    }
+
+    #[test]
+    fn find_matches_is_case_insensitive_and_handles_yo() {
+        let text = "Всё всё ВСЁ";
+        let found = find_matches(text, "всё");
+        assert_eq!(found.ranges.len(), 3);
+        assert!(!found.truncated);
+        for &(start, end) in &found.ranges {
+            assert_eq!(&text[start..end].to_lowercase(), "всё");
+        }
+    }
+
+    #[test]
+    fn find_treats_metacharacters_literally() {
+        let text = "a+b aab";
+        let found = find_matches(text, "a+b");
+        assert_eq!(found.ranges, vec![(0, 3)]);
+    }
+
+    #[test]
+    fn blank_query_returns_no_matches() {
+        assert!(find_matches("текст", "   ").ranges.is_empty());
+    }
+
+    #[test]
+    fn find_caps_the_number_of_highlights() {
+        let text = "a".repeat(MAX_FIND_MATCHES + 10);
+        let found = find_matches(&text, "a");
+        assert_eq!(found.ranges.len(), MAX_FIND_MATCHES);
+        assert!(found.truncated);
+    }
+
+    #[test]
+    fn layout_marks_only_matching_sections() {
+        let text = "abc DEF";
+        let matches = [(4, 7)];
+        let job = layout_editor_text(
+            text,
+            FontId::monospace(14.0),
+            Color32::WHITE,
+            20.0,
+            &matches,
+            200.0,
+        );
+        assert_eq!(job.text, text);
+        assert_eq!(job.sections.len(), 2);
+        assert_eq!(job.sections[0].byte_range, 0..4);
+        assert_eq!(job.sections[1].byte_range, 4..7);
+        assert_eq!(
+            job.sections[1].format.background,
+            palette::find_highlight()
+        );
+        assert_eq!(job.sections[1].format.color, Color32::BLACK);
+        assert_ne!(
+            job.sections[0].format.background,
+            palette::find_highlight()
+        );
+        assert_eq!(job.sections[1].format.line_height, Some(20.0));
+    }
+
+    #[test]
+    fn layout_keeps_whole_text_when_nothing_matches() {
+        let job = layout_editor_text(
+            "abc",
+            FontId::monospace(14.0),
+            Color32::WHITE,
+            20.0,
+            &[],
+            200.0,
+        );
+        assert_eq!(job.sections.len(), 1);
+        assert_eq!(job.text, "abc");
+    }
+
+    #[test]
+    fn preset_all_enables_every_dictionary() {
+        assert!(preset_enables(
+            DictionaryPreset::All,
+            DictionaryTag::PlusStressOrthoepy,
+            "95.NEW_Орфоэпия(phoneme).dic"
+        ));
+    }
+
+    #[test]
+    fn homographs_preset_skips_the_95_orthoepy_dictionary() {
+        assert!(!preset_enables(
+            DictionaryPreset::HomographsOnly,
+            DictionaryTag::PlusStressOrthoepy,
+            "95.NEW_Орфоэпия(phoneme).dic"
+        ));
+        assert!(preset_enables(
+            DictionaryPreset::HomographsOnly,
+            DictionaryTag::CapToPlusConverter,
+            "69_TTS_Offline+УДАРЕНИЯ@(phoneme).dic"
+        ));
+    }
+
+    #[test]
+    fn numbers_and_yo_preset_keeps_only_safe_tags() {
+        assert!(preset_enables(
+            DictionaryPreset::NumbersAndYo,
+            DictionaryTag::NumbersAndDates,
+            "10_REX_числа(chisla).rex"
+        ));
+        assert!(preset_enables(
+            DictionaryPreset::NumbersAndYo,
+            DictionaryTag::YoFication,
+            "15_REX_всё-все(vse_vsyo).rex"
+        ));
+        assert!(!preset_enables(
+            DictionaryPreset::NumbersAndYo,
+            DictionaryTag::PlusStressWords,
+            "35_мой словарь.dic"
+        ));
+    }
+
+    #[test]
+    fn clear_preset_disables_every_dictionary() {
+        assert!(!preset_enables(
+            DictionaryPreset::Clear,
+            DictionaryTag::NumbersAndDates,
+            "10_REX_числа(chisla).rex"
+        ));
     }
 
     #[test]
