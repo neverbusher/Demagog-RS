@@ -1,8 +1,8 @@
+use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use rayon::prelude::*;
 
-use crate::domain::{describe_dictionary, DictionaryMeta};
+use crate::domain::{DictionaryMeta, describe_dictionary};
 use crate::engine::dic_processor::DicProcessor;
 use crate::engine::rex_processor::RexProcessor;
 use crate::io::encoding::decode_text_bytes;

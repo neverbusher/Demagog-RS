@@ -33,10 +33,7 @@ fn main() {
 </assembly>"#,
         );
         resources.set("ProductName", "Demagog-RS");
-        resources.set(
-            "FileDescription",
-            "Text and dictionary processor for TTS",
-        );
+        resources.set("FileDescription", "Text and dictionary processor for TTS");
         resources.set("LegalCopyright", "MIT License");
         if let Err(error) = resources.compile() {
             panic!("failed to embed Windows resources and icon: {error}");

@@ -93,9 +93,10 @@ pub fn focus_ring(theme: ThemeMode) -> Color32 {
 
 pub fn primary_button(theme: ThemeMode) -> (Color32, Color32) {
     match theme {
-        ThemeMode::Dark | ThemeMode::Light => {
-            (Color32::from_rgb(90, 215, 120), Color32::from_rgb(15, 25, 15))
-        }
+        ThemeMode::Dark | ThemeMode::Light => (
+            Color32::from_rgb(90, 215, 120),
+            Color32::from_rgb(15, 25, 15),
+        ),
         ThemeMode::Warm => (
             Color32::from_rgb(156, 82, 52),
             Color32::from_rgb(255, 249, 240),
@@ -210,7 +211,10 @@ mod tests {
     #[test]
     fn warm_surface_keeps_body_text_readable() {
         let ratio = contrast(WARM_TEXT, WARM_TEXT_EDIT);
-        assert!(ratio >= WCAG_AA_NORMAL_TEXT, "warm body text has {ratio:.2}:1");
+        assert!(
+            ratio >= WCAG_AA_NORMAL_TEXT,
+            "warm body text has {ratio:.2}:1"
+        );
     }
 
     #[test]

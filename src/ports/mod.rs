@@ -1,5 +1,5 @@
-use std::path::Path;
 use crate::domain::{BookDocument, ChunkConfig, DictionaryKind, ProcessOutput, StressFormat};
+use std::path::Path;
 
 /// Single Responsibility: A compiled dictionary processor that transforms text.
 /// Open/Closed: New dictionary formats can be added by implementing `TextProcessor`.

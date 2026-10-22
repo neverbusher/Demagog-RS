@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThemeMode {
@@ -190,7 +190,11 @@ pub struct PipelineResult {
 
 #[derive(Debug, Clone)]
 pub enum PipelineProgress {
-    StepStarted { index: usize, total: usize, name: String },
+    StepStarted {
+        index: usize,
+        total: usize,
+        name: String,
+    },
     StepFinished(StepReport),
     Completed(PipelineResult),
     Cancelled,
@@ -248,29 +252,26 @@ impl AppSettings {
     }
 
     pub fn settings_path() -> PathBuf {
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                return dir.join("settings.json");
-            }
+        if let Ok(exe) = std::env::current_exe()
+            && let Some(dir) = exe.parent()
+        {
+            return dir.join("settings.json");
         }
         PathBuf::from("settings.json")
     }
 
     pub fn load(default_dic_folder: PathBuf) -> Self {
         let path = Self::settings_path();
-        if let Ok(bytes) = std::fs::read(&path) {
-            if let Ok(mut s) = serde_json::from_slice::<Self>(&bytes) {
-                let is_old_demagog = s
-                    .dic_folder
-                    .to_string_lossy()
-                    .contains("Demagog-x64-Piper");
-                if (!s.dic_folder.is_dir() || is_old_demagog) && default_dic_folder.is_dir() {
-                    s.dic_folder = default_dic_folder;
-                }
-                s.ui_font_size = s.ui_font_size.clamp(12.0, 28.0);
-                s.editor_font_size = s.editor_font_size.clamp(12.0, 36.0);
-                return s;
+        if let Ok(bytes) = std::fs::read(&path)
+            && let Ok(mut s) = serde_json::from_slice::<Self>(&bytes)
+        {
+            let is_old_demagog = s.dic_folder.to_string_lossy().contains("Demagog-x64-Piper");
+            if (!s.dic_folder.is_dir() || is_old_demagog) && default_dic_folder.is_dir() {
+                s.dic_folder = default_dic_folder;
             }
+            s.ui_font_size = s.ui_font_size.clamp(12.0, 28.0);
+            s.editor_font_size = s.editor_font_size.clamp(12.0, 36.0);
+            return s;
         }
         Self {
             dic_folder: default_dic_folder,
@@ -405,13 +406,15 @@ pub fn describe_dictionary(name: &str, content: &str) -> (DictionaryTag, String,
     } else if lower.starts_with("69_") {
         (
             DictionaryTag::CapToPlusConverter,
-            "Конвертер: переводит заглавные ударные из омографов (зЕмли) в знак «+» (з+емли)".into(),
+            "Конвертер: переводит заглавные ударные из омографов (зЕмли) в знак «+» (з+емли)"
+                .into(),
             true,
         )
     } else if lower.starts_with("70_") {
         (
             DictionaryTag::CapToPlusConverter,
-            "Конвертер: ставит «+» перед первой заглавной буквой омографов ($Адреса -> +Адреса)".into(),
+            "Конвертер: ставит «+» перед первой заглавной буквой омографов ($Адреса -> +Адреса)"
+                .into(),
             true,
         )
     } else if lower.starts_with("71_") || lower.starts_with("72_") {
@@ -441,7 +444,8 @@ pub fn describe_dictionary(name: &str, content: &str) -> (DictionaryTag, String,
     } else if lower.starts_with("95.") {
         (
             DictionaryTag::PlusStressOrthoepy,
-            "Главный орфоэпический словарь (2.9 млн форм): ставит «+» в КАЖДОМ обычном слове".into(),
+            "Главный орфоэпический словарь (2.9 млн форм): ставит «+» в КАЖДОМ обычном слове"
+                .into(),
             true,
         )
     } else if has_plus_in_rules {

@@ -4,9 +4,7 @@
 
 use std::path::PathBuf;
 
-use egui_software_backend::{
-    App as SwApp, SoftwareBackend, SoftwareBackendAppConfiguration,
-};
+use egui_software_backend::{App as SwApp, SoftwareBackend, SoftwareBackendAppConfiguration};
 
 use super::app::DemagogApp;
 use super::window::initial_viewport;

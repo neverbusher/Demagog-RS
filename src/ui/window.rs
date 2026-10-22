@@ -183,17 +183,9 @@ pub(crate) fn apply_window_icon(icon: &IconData) -> bool {
         }
     }
 
-    let mask_stride = ((pixel_width + 15) / 16) * 2;
+    let mask_stride = pixel_width.div_ceil(16) * 2;
     let mask_bits = vec![0u8; mask_stride * pixel_height];
-    let mask = unsafe {
-        CreateBitmap(
-            width,
-            height,
-            1,
-            1,
-            mask_bits.as_ptr() as *const c_void,
-        )
-    };
+    let mask = unsafe { CreateBitmap(width, height, 1, 1, mask_bits.as_ptr() as *const c_void) };
     if mask.is_null() {
         unsafe {
             DeleteObject(color);
@@ -233,7 +225,6 @@ pub(crate) fn apply_window_icon(icon: &IconData) -> bool {
 pub(crate) fn apply_window_icon(_icon: &IconData) -> bool {
     true
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct WorkArea {

@@ -12,11 +12,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::domain::{ChunkConfig, StressFormat};
-use crate::engine::loader::{load_dictionaries_parallel, DictionaryLoadReport};
+use crate::engine::loader::{DictionaryLoadReport, load_dictionaries_parallel};
 use crate::io::book_reader::CompositeBookReader;
 use crate::ports::DocumentReader;
 use crate::services::chunker::SentenceAwareChunker;
-use crate::services::pipeline::ProcessingPipeline;
+use crate::services::pipeline::{PipelineOptions, ProcessingPipeline};
 use crate::services::stress::RussianStressFormatter;
 #[cfg(not(any(feature = "eframe-backend", feature = "sw")))]
 compile_error!("Enable either the `eframe-backend` or `sw` feature");
@@ -46,7 +46,6 @@ fn main() {
                 "Не удалось открыть окно Demagog-RS (программный рендер).\n\n{err}"
             ));
         }
-        return;
     }
 
     #[cfg(all(feature = "eframe-backend", not(feature = "sw")))]
@@ -58,7 +57,6 @@ fn main() {
                  он использует программный рендер и не требует OpenGL."
             ));
         }
-        return;
     }
 
     #[cfg(not(any(feature = "sw", feature = "eframe-backend")))]
@@ -113,7 +111,9 @@ fn run_cli_or_bench(args: &[String]) {
         .expect("Укажите входной файл через --input <путь>");
 
     let reader = CompositeBookReader::new();
-    let doc = reader.read_document(&input_path).expect("Не удалось прочитать тестовую книгу");
+    let doc = reader
+        .read_document(&input_path)
+        .expect("Не удалось прочитать тестовую книгу");
     println!(
         "Книга: «{}» ({} байт / {} символов)",
         doc.title,
@@ -130,9 +130,11 @@ fn run_cli_or_bench(args: &[String]) {
     let Some(result) = pipeline.execute(
         &doc.raw_text,
         &processors,
-        StressFormat::PlusBeforeVowel,
-        &ChunkConfig::default(),
-        args.iter().any(|a| a == "--diff"),
+        PipelineOptions {
+            stress_format: StressFormat::PlusBeforeVowel,
+            chunk_config: ChunkConfig::default(),
+            capture_diff: args.iter().any(|a| a == "--diff"),
+        },
         None,
         None,
     ) else {
@@ -164,10 +166,7 @@ fn run_cli_or_bench(args: &[String]) {
         for ev in &result.report.events {
             println!(
                 "{} | {} | {} -> {}",
-                ev.dictionary_name,
-                ev.rule_summary,
-                ev.before_snippet,
-                ev.after_snippet
+                ev.dictionary_name, ev.rule_summary, ev.before_snippet, ev.after_snippet
             );
         }
     }

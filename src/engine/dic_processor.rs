@@ -1,3 +1,5 @@
+use std::cmp::Reverse;
+
 use rayon::prelude::*;
 use regex::RegexBuilder;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -119,11 +121,12 @@ impl DicProcessor {
                 continue;
             }
 
-            let mut rhs = if !raw_lhs.ends_with(' ') && raw_rhs.ends_with(' ') && raw_rhs.trim().len() > 1 {
-                raw_rhs.trim_end().to_string()
-            } else {
-                raw_rhs.to_string()
-            };
+            let mut rhs =
+                if !raw_lhs.ends_with(' ') && raw_rhs.ends_with(' ') && raw_rhs.trim().len() > 1 {
+                    raw_rhs.trim_end().to_string()
+                } else {
+                    raw_rhs.to_string()
+                };
 
             // Normalize case-insensitive rule where author capitalized first letter on both sides (e.g. `Ещё=Ещ+о`)
             if !case_sensitive {
@@ -153,25 +156,31 @@ impl DicProcessor {
                         required_words: words.clone(),
                     };
                     if let Some(first_word) = words.first() {
-                        phrase_index.entry(first_word.clone()).or_default().push(rule);
+                        phrase_index
+                            .entry(first_word.clone())
+                            .or_default()
+                            .push(rule);
                     } else {
                         unanchored_phrases.push(rule);
                     }
                 }
             } else {
-                if let Some(stem) = lhs.strip_suffix('*') {
-                    if !stem.is_empty() && !stem.contains('*') && is_single_word_token(stem) && !rhs.contains(' ') {
-                        let char_len = stem.chars().count();
-                        if char_len >= 2 {
-                            min_prefix_chars = min_prefix_chars.min(char_len);
-                            max_prefix_chars = max_prefix_chars.max(char_len);
-                            if case_sensitive {
-                                prefix_cs.insert(stem.to_string(), rhs);
-                            } else {
-                                prefix_ci.insert(stem.to_lowercase(), rhs);
-                            }
-                            continue;
+                if let Some(stem) = lhs.strip_suffix('*')
+                    && !stem.is_empty()
+                    && !stem.contains('*')
+                    && is_single_word_token(stem)
+                    && !rhs.contains(' ')
+                {
+                    let char_len = stem.chars().count();
+                    if char_len >= 2 {
+                        min_prefix_chars = min_prefix_chars.min(char_len);
+                        max_prefix_chars = max_prefix_chars.max(char_len);
+                        if case_sensitive {
+                            prefix_cs.insert(stem.to_string(), rhs);
+                        } else {
+                            prefix_ci.insert(stem.to_lowercase(), rhs);
                         }
+                        continue;
                     }
                 }
 
@@ -197,9 +206,9 @@ impl DicProcessor {
         }
 
         for list in phrase_index.values_mut() {
-            list.sort_by(|a, b| b.lhs.len().cmp(&a.lhs.len()));
+            list.sort_by_key(|rule| Reverse(rule.lhs.len()));
         }
-        unanchored_phrases.sort_by(|a, b| b.lhs.len().cmp(&a.lhs.len()));
+        unanchored_phrases.sort_by_key(|rule| Reverse(rule.lhs.len()));
 
         Self {
             name,
@@ -233,7 +242,8 @@ impl DicProcessor {
         let mut i = 0;
         while i < chars.len() {
             let c = chars[i];
-            if i + 1 < chars.len() && is_lower_cyrillic(c) && is_upper_cyrillic_vowel(chars[i + 1]) {
+            if i + 1 < chars.len() && is_lower_cyrillic(c) && is_upper_cyrillic_vowel(chars[i + 1])
+            {
                 let lower_v = chars[i + 1].to_lowercase().next().unwrap_or(chars[i + 1]);
                 out.push(c);
                 out.push('+');
@@ -294,15 +304,15 @@ impl DicProcessor {
                 let next = current.replace(&rule.lhs, &rule.rhs);
                 if next != current {
                     count += 1;
-                    if let Some(ev) = events.as_deref_mut() {
-                        if ev.len() < 200 {
-                            ev.push(ReplacementEvent {
-                                dictionary_name: self.name.clone(),
-                                rule_summary: format!("{}={}", rule.lhs, rule.rhs),
-                                before_snippet: rule.lhs.clone(),
-                                after_snippet: rule.rhs.clone(),
-                            });
-                        }
+                    if let Some(ev) = events.as_deref_mut()
+                        && ev.len() < 200
+                    {
+                        ev.push(ReplacementEvent {
+                            dictionary_name: self.name.clone(),
+                            rule_summary: format!("{}={}", rule.lhs, rule.rhs),
+                            before_snippet: rule.lhs.clone(),
+                            after_snippet: rule.rhs.clone(),
+                        });
                     }
                     current = next;
                 }
@@ -334,22 +344,22 @@ impl DicProcessor {
                                 if current_lower.is_empty() {
                                     current_lower = current.to_lowercase();
                                 }
-                                if current_lower.contains(&rule.lhs_lower) {
-                                    if let Some(replaced) = apply_exact_phrase(&current, rule) {
-                                        count += 1;
-                                        if let Some(ev) = events.as_deref_mut() {
-                                            if ev.len() < 200 {
-                                                ev.push(ReplacementEvent {
-                                                    dictionary_name: self.name.clone(),
-                                                    rule_summary: format!("{}={}", rule.lhs, rule.rhs),
-                                                    before_snippet: rule.lhs.clone(),
-                                                    after_snippet: rule.rhs.clone(),
-                                                });
-                                            }
-                                        }
-                                        current = replaced;
-                                        current_lower = current.to_lowercase();
+                                if current_lower.contains(&rule.lhs_lower)
+                                    && let Some(replaced) = apply_exact_phrase(&current, rule)
+                                {
+                                    count += 1;
+                                    if let Some(ev) = events.as_deref_mut()
+                                        && ev.len() < 200
+                                    {
+                                        ev.push(ReplacementEvent {
+                                            dictionary_name: self.name.clone(),
+                                            rule_summary: format!("{}={}", rule.lhs, rule.rhs),
+                                            before_snippet: rule.lhs.clone(),
+                                            after_snippet: rule.rhs.clone(),
+                                        });
                                     }
+                                    current = replaced;
+                                    current_lower = current.to_lowercase();
                                 }
                             }
                         }
@@ -361,26 +371,26 @@ impl DicProcessor {
                 for w in &word_list {
                     if let Some(w_rules) = self.wildcard_index.get(w) {
                         for ar in w_rules {
-                            if ar.required_words.iter().all(|rw| word_set.contains(rw)) {
-                                if ar.compiled.regex.is_match(&current) {
-                                    let next = ar
-                                        .compiled
-                                        .regex
-                                        .replace_all(&current, ar.compiled.replacement.as_str());
-                                    if next != current {
-                                        count += 1;
-                                        if let Some(ev) = events.as_deref_mut() {
-                                            if ev.len() < 200 {
-                                                ev.push(ReplacementEvent {
-                                                    dictionary_name: self.name.clone(),
-                                                    rule_summary: ar.compiled.raw_rule.clone(),
-                                                    before_snippet: ar.compiled.raw_rule.clone(),
-                                                    after_snippet: ar.compiled.replacement.clone(),
-                                                });
-                                            }
-                                        }
-                                        current = next.into_owned();
+                            if ar.required_words.iter().all(|rw| word_set.contains(rw))
+                                && ar.compiled.regex.is_match(&current)
+                            {
+                                let next = ar
+                                    .compiled
+                                    .regex
+                                    .replace_all(&current, ar.compiled.replacement.as_str());
+                                if next != current {
+                                    count += 1;
+                                    if let Some(ev) = events.as_deref_mut()
+                                        && ev.len() < 200
+                                    {
+                                        ev.push(ReplacementEvent {
+                                            dictionary_name: self.name.clone(),
+                                            rule_summary: ar.compiled.raw_rule.clone(),
+                                            before_snippet: ar.compiled.raw_rule.clone(),
+                                            after_snippet: ar.compiled.replacement.clone(),
+                                        });
                                     }
+                                    current = next.into_owned();
                                 }
                             }
                         }
@@ -402,15 +412,15 @@ impl DicProcessor {
                         .replace_all(&current, sw.compiled.replacement.as_str());
                     if next != current {
                         count += 1;
-                        if let Some(ev) = events.as_deref_mut() {
-                            if ev.len() < 200 {
-                                ev.push(ReplacementEvent {
-                                    dictionary_name: self.name.clone(),
-                                    rule_summary: sw.compiled.raw_rule.clone(),
-                                    before_snippet: sw.compiled.raw_rule.clone(),
-                                    after_snippet: sw.compiled.replacement.clone(),
-                                });
-                            }
+                        if let Some(ev) = events.as_deref_mut()
+                            && ev.len() < 200
+                        {
+                            ev.push(ReplacementEvent {
+                                dictionary_name: self.name.clone(),
+                                rule_summary: sw.compiled.raw_rule.clone(),
+                                before_snippet: sw.compiled.raw_rule.clone(),
+                                after_snippet: sw.compiled.replacement.clone(),
+                            });
                         }
                         current = next.into_owned();
                         current_lower = current.to_lowercase();
@@ -445,15 +455,15 @@ impl DicProcessor {
                     if let Some((repl, rule_repr)) = self.lookup_single_word(word) {
                         if repl != word {
                             count += 1;
-                            if let Some(ev) = events.as_deref_mut() {
-                                if ev.len() < 200 {
-                                    ev.push(ReplacementEvent {
-                                        dictionary_name: self.name.clone(),
-                                        rule_summary: rule_repr,
-                                        before_snippet: word.to_string(),
-                                        after_snippet: repl.clone(),
-                                    });
-                                }
+                            if let Some(ev) = events.as_deref_mut()
+                                && ev.len() < 200
+                            {
+                                ev.push(ReplacementEvent {
+                                    dictionary_name: self.name.clone(),
+                                    rule_summary: rule_repr,
+                                    before_snippet: word.to_string(),
+                                    after_snippet: repl.clone(),
+                                });
                             }
                             out.push_str(&repl);
                         } else {
@@ -482,11 +492,9 @@ impl DicProcessor {
         }
 
         let lower = word.to_lowercase();
-        if !already_stressed {
-            if let Some(rhs) = self.exact_ci.get(&lower) {
-                let adapted = preserve_initial_capital(word, rhs);
-                return Some((adapted, format!("{lower}={rhs}")));
-            }
+        if !already_stressed && let Some(rhs) = self.exact_ci.get(&lower) {
+            let adapted = preserve_initial_capital(word, rhs);
+            return Some((adapted, format!("{lower}={rhs}")));
         }
 
         if (!self.prefix_cs.is_empty() || !self.prefix_ci.is_empty()) && !already_stressed {
@@ -755,7 +763,11 @@ fn apply_exact_phrase_regex(text: &str, rule: &ExactPhraseRule) -> Option<String
     let escaped = regex::escape(&rule.lhs);
     let pat = format!(
         "{}{}{}",
-        if rule.word_boundaries_start { r"\b" } else { "" },
+        if rule.word_boundaries_start {
+            r"\b"
+        } else {
+            ""
+        },
         escaped,
         if rule.word_boundaries_end { r"\b" } else { "" }
     );
@@ -898,8 +910,7 @@ mod tests {
 
     #[test]
     fn diff_and_fast_paths_produce_same_text() {
-        let processor =
-            DicProcessor::compile("test.dic".to_string(), "з+амок=замок\n", "UTF-8");
+        let processor = DicProcessor::compile("test.dic".to_string(), "з+амок=замок\n", "UTF-8");
         let text = format!("{}\nз+амок", "з+амок ".repeat(400));
         assert!(text.len() > 2048);
 

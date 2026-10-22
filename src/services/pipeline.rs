@@ -1,6 +1,6 @@
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::Arc;
 use std::time::Instant;
 
 use crate::domain::{
@@ -13,11 +13,14 @@ pub struct ProcessingPipeline {
     chunker: Arc<dyn TextChunker>,
 }
 
+pub struct PipelineOptions {
+    pub stress_format: StressFormat,
+    pub chunk_config: ChunkConfig,
+    pub capture_diff: bool,
+}
+
 impl ProcessingPipeline {
-    pub fn new(
-        stress_formatter: Arc<dyn StressFormatter>,
-        chunker: Arc<dyn TextChunker>,
-    ) -> Self {
+    pub fn new(stress_formatter: Arc<dyn StressFormatter>, chunker: Arc<dyn TextChunker>) -> Self {
         Self {
             stress_formatter,
             chunker,
@@ -28,12 +31,15 @@ impl ProcessingPipeline {
         &self,
         input_text: &str,
         processors: &[Arc<dyn TextProcessor>],
-        stress_format: StressFormat,
-        chunk_config: &ChunkConfig,
-        capture_diff: bool,
+        options: PipelineOptions,
         cancel: Option<&AtomicBool>,
         progress_tx: Option<&Sender<PipelineProgress>>,
     ) -> Option<PipelineResult> {
+        let PipelineOptions {
+            stress_format,
+            chunk_config,
+            capture_diff,
+        } = options;
         let total_start = Instant::now();
         let mut current = input_text.to_string();
         let mut report = PipelineReport::default();
@@ -82,12 +88,16 @@ impl ProcessingPipeline {
         }
 
         let raw_text = current;
-        let processed_text = self.stress_formatter.format_stress(&raw_text, stress_format);
+        let processed_text = self
+            .stress_formatter
+            .format_stress(&raw_text, stress_format);
         if is_cancelled(cancel) {
             notify_cancelled(progress_tx);
             return None;
         }
-        let chunks = self.chunker.split_into_chunks(&processed_text, chunk_config);
+        let chunks = self
+            .chunker
+            .split_into_chunks(&processed_text, &chunk_config);
         report.total_ms = total_start.elapsed().as_millis();
 
         let result = PipelineResult {
@@ -264,17 +274,25 @@ mod tests {
         let result = pipeline.execute(
             "start",
             &processors,
-            StressFormat::CleanYoOnly,
-            &ChunkConfig::default(),
-            false,
+            PipelineOptions {
+                stress_format: StressFormat::CleanYoOnly,
+                chunk_config: ChunkConfig::default(),
+                capture_diff: false,
+            },
             Some(cancel.as_ref()),
             None,
         );
         canceller.join().unwrap();
 
-        assert!(result.is_none(), "cancelled pipeline must not return a result");
+        assert!(
+            result.is_none(),
+            "cancelled pipeline must not return a result"
+        );
         let processed = calls.load(Ordering::Relaxed);
-        assert!(processed < 10, "pipeline ignored cancellation after {processed} steps");
+        assert!(
+            processed < 10,
+            "pipeline ignored cancellation after {processed} steps"
+        );
     }
 
     #[test]
@@ -297,14 +315,19 @@ mod tests {
         let result = pipeline.execute(
             "start",
             &processors,
-            StressFormat::CleanYoOnly,
-            &ChunkConfig::default(),
-            false,
+            PipelineOptions {
+                stress_format: StressFormat::CleanYoOnly,
+                chunk_config: ChunkConfig::default(),
+                capture_diff: false,
+            },
             Some(cancel.as_ref()),
             None,
         );
 
-        assert!(result.is_none(), "cancelled pipeline must not return a result");
+        assert!(
+            result.is_none(),
+            "cancelled pipeline must not return a result"
+        );
         assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
 
@@ -320,9 +343,11 @@ mod tests {
             .execute(
                 "замок",
                 &processors,
-                StressFormat::CleanYoOnly,
-                &ChunkConfig::default(),
-                false,
+                PipelineOptions {
+                    stress_format: StressFormat::CleanYoOnly,
+                    chunk_config: ChunkConfig::default(),
+                    capture_diff: false,
+                },
                 None,
                 None,
             )

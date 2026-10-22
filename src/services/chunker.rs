@@ -69,7 +69,9 @@ fn split_into_sentences(paragraph: &str) -> Vec<String> {
         let c = chars[i];
         cur.push(c);
         if matches!(c, '.' | '!' | '?' | '…') {
-            while i + 1 < chars.len() && matches!(chars[i + 1], '.' | '!' | '?' | '…' | '"' | '»' | ')') {
+            while i + 1 < chars.len()
+                && matches!(chars[i + 1], '.' | '!' | '?' | '…' | '"' | '»' | ')')
+            {
                 i += 1;
                 cur.push(chars[i]);
             }

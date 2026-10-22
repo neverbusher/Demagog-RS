@@ -1,19 +1,19 @@
+use egui::{self, Color32, FontFamily, FontId, RichText, ScrollArea, TextStyle};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
-use egui::{self, Color32, FontFamily, FontId, RichText, ScrollArea, TextStyle};
 
 use crate::domain::{
-    AppSettings, BookDocument, DictionaryMeta, DictionaryTag, PipelineProgress,
-    PipelineReport, StressFormat, ThemeMode,
+    AppSettings, BookDocument, DictionaryMeta, DictionaryTag, PipelineProgress, PipelineReport,
+    StressFormat, ThemeMode,
 };
-use crate::engine::loader::{load_dictionaries_parallel, CompiledDictionary, DictionaryLoadReport};
+use crate::engine::loader::{CompiledDictionary, DictionaryLoadReport, load_dictionaries_parallel};
 use crate::io::book_reader::{CompositeBookReader, SUPPORTED_BOOK_FORMATS, can_read_book};
 use crate::ports::{DocumentReader, StressFormatter, TextChunker, TextProcessor};
 use crate::services::chunker::SentenceAwareChunker;
-use crate::services::pipeline::ProcessingPipeline;
+use crate::services::pipeline::{PipelineOptions, ProcessingPipeline};
 use crate::services::stress::RussianStressFormatter;
 use crate::ui::palette;
 
@@ -354,9 +354,11 @@ impl DemagogApp {
             let _ = pipeline.execute(
                 &input_text,
                 &active_processors,
-                stress_format,
-                &chunk_config,
-                capture_diff,
+                PipelineOptions {
+                    stress_format,
+                    chunk_config,
+                    capture_diff,
+                },
                 Some(cancel.as_ref()),
                 Some(&ptx),
             );
@@ -458,8 +460,7 @@ impl DemagogApp {
                             }
                             WorkerMessage::Pipeline(progress) => match progress {
                                 PipelineProgress::StepStarted { index, total, name } => {
-                                    self.progress_ratio =
-                                        index as f32 / total.max(1) as f32;
+                                    self.progress_ratio = index as f32 / total.max(1) as f32;
                                     pending_status = Some((
                                         StatusLevel::Info,
                                         format!("[{index}/{total}] Обработка: {name}..."),
@@ -472,8 +473,7 @@ impl DemagogApp {
                                         .find(|d| d.name == step.dictionary_name)
                                     {
                                         d.last_ms = Some(step.elapsed_ms);
-                                        d.last_replacements =
-                                            Some(step.replacements_count);
+                                        d.last_replacements = Some(step.replacements_count);
                                     }
                                 }
                                 PipelineProgress::Completed(result) => {
@@ -496,8 +496,7 @@ impl DemagogApp {
                                     self.diff_cache_valid = false;
                                     let had_events = !result.report.events.is_empty();
                                     self.report = result.report;
-                                    self.result_state
-                                        .mark_computed(self.settings.stress_format);
+                                    self.result_state.mark_computed(self.settings.stress_format);
                                     self.last_copied_chunk = None;
                                     self.find_dirty = true;
                                     self.cancel_flag = None;
@@ -511,8 +510,10 @@ impl DemagogApp {
                                     finished = true;
                                 }
                                 PipelineProgress::Cancelled => {
-                                    pending_status =
-                                        Some((StatusLevel::Warning, "Обработка отменена".to_string()));
+                                    pending_status = Some((
+                                        StatusLevel::Warning,
+                                        "Обработка отменена".to_string(),
+                                    ));
                                     self.cancel_flag = None;
                                     self.is_busy = false;
                                     self.progress_ratio = 0.0;
@@ -596,10 +597,7 @@ impl DemagogApp {
 
         self.is_busy = true;
         self.progress_ratio = 0.0;
-        self.set_status(
-            StatusLevel::Info,
-            format!("Чтение «{}»...", path.display()),
-        );
+        self.set_status(StatusLevel::Info, format!("Чтение «{}»...", path.display()));
 
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
@@ -619,8 +617,7 @@ impl DemagogApp {
         let save_source = KeyboardShortcut::new(Modifiers::CTRL | Modifiers::SHIFT, Key::S);
         let export = KeyboardShortcut::new(Modifiers::CTRL, Key::E);
         let process = KeyboardShortcut::new(Modifiers::CTRL, Key::Enter);
-        let process_diff =
-            KeyboardShortcut::new(Modifiers::CTRL | Modifiers::SHIFT, Key::Enter);
+        let process_diff = KeyboardShortcut::new(Modifiers::CTRL | Modifiers::SHIFT, Key::Enter);
 
         if !self.is_busy && ctx.input_mut(|i| i.consume_shortcut(&open)) {
             self.open_book_dialog(ctx.clone());
@@ -645,8 +642,7 @@ impl DemagogApp {
 
         let find = KeyboardShortcut::new(Modifiers::CTRL, Key::F);
         if ctx.input_mut(|i| i.consume_shortcut(&find)) {
-            if self.active_tab != ActiveTab::RawText
-                && self.active_tab != ActiveTab::ProcessedText
+            if self.active_tab != ActiveTab::RawText && self.active_tab != ActiveTab::ProcessedText
             {
                 self.active_tab = if self.document.processed_text.is_empty() {
                     ActiveTab::RawText
@@ -676,9 +672,7 @@ impl DemagogApp {
                 cancel.store(true, Ordering::Relaxed);
                 self.set_status(StatusLevel::Warning, "Отмена...");
             }
-        } else if self.find_open
-            && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
-        {
+        } else if self.find_open && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
             self.find_open = false;
         }
     }
@@ -709,10 +703,7 @@ impl DemagogApp {
             );
             return;
         }
-        let Some(path) = dropped
-            .into_iter()
-            .find(|path| can_read_book(path))
-        else {
+        let Some(path) = dropped.into_iter().find(|path| can_read_book(path)) else {
             self.set_status(StatusLevel::Warning, SUPPORTED_BOOK_FORMATS.to_string());
             return;
         };
@@ -798,22 +789,27 @@ impl DemagogApp {
                 ActiveTab::ProcessedText => &self.document.processed_text,
                 _ => "",
             };
-            self.find_matches.ranges.get(index).and_then(|&(start, end)| {
-                Some((
-                    text.get(..start)?.chars().count(),
-                    text.get(..end)?.chars().count(),
-                ))
-            })
+            self.find_matches
+                .ranges
+                .get(index)
+                .and_then(|&(start, end)| {
+                    Some((
+                        text.get(..start)?.chars().count(),
+                        text.get(..end)?.chars().count(),
+                    ))
+                })
         };
         self.find_go_to = None;
         let Some((char_start, char_end)) = char_positions else {
             return;
         };
         let mut state = output.state.clone();
-        state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
-            egui::text::CCursor::new(char_start),
-            egui::text::CCursor::new(char_end),
-        )));
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(char_start),
+                egui::text::CCursor::new(char_end),
+            )));
         state.store(ui.ctx(), output.response.id);
         let layout_cursor = output
             .galley
@@ -893,19 +889,20 @@ impl DemagogApp {
                 .add_enabled(total > 0, egui::Button::new("▶"))
                 .on_hover_text("Следующее совпадение (Enter, F3)");
             next.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Button, total > 0, "Следующее совпадение")
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    total > 0,
+                    "Следующее совпадение",
+                )
             });
             if next.clicked() {
                 self.step_find(1);
             }
             if self.find_matches.truncated {
                 ui.label(
-                    RichText::new(format!(
-                        "показаны первые {}",
-                        format_num(MAX_FIND_MATCHES)
-                    ))
-                    .small()
-                    .weak(),
+                    RichText::new(format!("показаны первые {}", format_num(MAX_FIND_MATCHES)))
+                        .small()
+                        .weak(),
                 );
             }
 
@@ -921,10 +918,7 @@ impl DemagogApp {
 
     fn save_processed_txt(&mut self) {
         if self.document.processed_text.is_empty() {
-            self.set_status(
-                StatusLevel::Warning,
-                "Сначала выполните обработку текста!",
-            );
+            self.set_status(StatusLevel::Warning, "Сначала выполните обработку текста!");
             return;
         }
         if !self.confirm_stale_result("Сохранить его всё равно") {
@@ -945,10 +939,7 @@ impl DemagogApp {
                     );
                 }
                 Err(e) => {
-                    self.set_status(
-                        StatusLevel::Error,
-                        format!("Ошибка сохранения: {e}"),
-                    );
+                    self.set_status(StatusLevel::Error, format!("Ошибка сохранения: {e}"));
                 }
             }
         }
@@ -976,10 +967,7 @@ impl DemagogApp {
                         format!("Исходный текст сохранён в {}", path.display()),
                     );
                 }
-                Err(e) => self.set_status(
-                    StatusLevel::Error,
-                    format!("Ошибка сохранения: {e}"),
-                ),
+                Err(e) => self.set_status(StatusLevel::Error, format!("Ошибка сохранения: {e}")),
             }
         }
     }
@@ -1025,10 +1013,9 @@ impl DemagogApp {
                             format!("Чанки экспортированы в {}", path.display()),
                         );
                     }
-                    Err(e) => self.set_status(
-                        StatusLevel::Error,
-                        format!("Ошибка записи JSON: {e}"),
-                    ),
+                    Err(e) => {
+                        self.set_status(StatusLevel::Error, format!("Ошибка записи JSON: {e}"))
+                    }
                 }
             }
         }
@@ -1059,8 +1046,7 @@ impl DemagogApp {
         self.document.processed_text =
             formatter.format_stress(&self.raw_pipeline_output, self.settings.stress_format);
         self.refresh_processed_char_count();
-        self.result_state
-            .mark_computed(self.settings.stress_format);
+        self.result_state.mark_computed(self.settings.stress_format);
         self.rechunk_result();
         true
     }
@@ -1158,7 +1144,8 @@ impl DemagogApp {
     }
 
     fn copy_to_clipboard(&mut self, text: &str, success: String, chunk: Option<usize>) {
-        match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text.to_string()))
+        match arboard::Clipboard::new()
+            .and_then(|mut clipboard| clipboard.set_text(text.to_string()))
         {
             Ok(()) => {
                 if let Some(index) = chunk {
@@ -1206,11 +1193,7 @@ impl DemagogApp {
                 .selectable(true),
         );
         status.widget_info(|| {
-            egui::WidgetInfo::labeled(
-                egui::WidgetType::Label,
-                true,
-                self.status_line.clone(),
-            )
+            egui::WidgetInfo::labeled(egui::WidgetType::Label, true, self.status_line.clone())
         });
         ui.ctx().accesskit_node_builder(status.id, |node| {
             node.set_role(egui::accesskit::Role::Status);
@@ -1221,33 +1204,33 @@ impl DemagogApp {
         if !self.dic_load_errors.is_empty() {
             status.on_hover_text(self.dic_load_errors.join("\n"));
         }
-        if self.status_level != StatusLevel::Error {
-            if let Some(error) = self.last_error.clone() {
-                let chip = ui
-                    .add(
-                        egui::Button::new(
-                            RichText::new("⚠ Ошибка")
-                                .color(palette::diff_before(theme))
-                                .strong(),
-                        )
-                        .frame(false),
+        if self.status_level != StatusLevel::Error
+            && let Some(error) = self.last_error.clone()
+        {
+            let chip = ui
+                .add(
+                    egui::Button::new(
+                        RichText::new("⚠ Ошибка")
+                            .color(palette::diff_before(theme))
+                            .strong(),
                     )
-                    .on_hover_text(&error);
-                if chip.clicked() {
-                    rfd::MessageDialog::new()
-                        .set_title("Demagog-RS — ошибка")
-                        .set_level(rfd::MessageLevel::Error)
-                        .set_buttons(rfd::MessageButtons::Ok)
-                        .set_description(&error)
-                        .show();
-                }
-                if ui
-                    .small_button("✖")
-                    .on_hover_text("Скрыть ошибку")
-                    .clicked()
-                {
-                    self.last_error = None;
-                }
+                    .frame(false),
+                )
+                .on_hover_text(&error);
+            if chip.clicked() {
+                rfd::MessageDialog::new()
+                    .set_title("Demagog-RS — ошибка")
+                    .set_level(rfd::MessageLevel::Error)
+                    .set_buttons(rfd::MessageButtons::Ok)
+                    .set_description(&error)
+                    .show();
+            }
+            if ui
+                .small_button("✖")
+                .on_hover_text("Скрыть ошибку")
+                .clicked()
+            {
+                self.last_error = None;
             }
         }
     }
@@ -1258,12 +1241,9 @@ impl DemagogApp {
             let details = self.dic_load_errors.join("\n");
             let errors = ui.add(
                 egui::Label::new(
-                    RichText::new(format!(
-                        "Ошибки загрузки: {}",
-                        self.dic_load_errors.len()
-                    ))
-                    .color(palette::warning_text(theme))
-                    .strong(),
+                    RichText::new(format!("Ошибки загрузки: {}", self.dic_load_errors.len()))
+                        .color(palette::warning_text(theme))
+                        .strong(),
                 )
                 .sense(egui::Sense::click()),
             );
@@ -1315,8 +1295,7 @@ impl DemagogApp {
         let ctx = ui.ctx().clone();
         self.poll_worker();
         if !self.window_icon_applied {
-            self.window_icon_applied =
-                super::window::apply_window_icon(&super::window::app_icon());
+            self.window_icon_applied = super::window::apply_window_icon(&super::window::app_icon());
         }
         let theme = self.settings.theme();
 
@@ -1338,18 +1317,14 @@ impl DemagogApp {
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
                 if ui
-                    .add_enabled(
-                        !self.is_busy,
-                        egui::Button::new("Открыть книгу"),
-                    )
+                    .add_enabled(!self.is_busy, egui::Button::new("Открыть книгу"))
                     .on_hover_text("Открыть TXT, FB2, FB2.ZIP, EPUB, DOCX, ZIP или MD (Ctrl+O)")
                     .clicked()
                 {
                     self.open_book_dialog(ctx.clone());
                 }
 
-                let enabled_dictionaries =
-                    self.dictionaries.iter().filter(|d| d.enabled).count();
+                let enabled_dictionaries = self.dictionaries.iter().filter(|d| d.enabled).count();
                 let can_run = !self.is_busy && enabled_dictionaries > 0;
                 let run_disabled_hint = if enabled_dictionaries == 0 {
                     "Включите хотя бы один словарь"
@@ -1358,12 +1333,9 @@ impl DemagogApp {
                 };
 
                 let (primary_fill, primary_text) = palette::primary_button(theme);
-                let run_btn = egui::Button::new(
-                    RichText::new("⚡ Обработать")
-                        .strong()
-                        .color(primary_text),
-                )
-                .fill(primary_fill);
+                let run_btn =
+                    egui::Button::new(RichText::new("⚡ Обработать").strong().color(primary_text))
+                        .fill(primary_fill);
 
                 let run_response = ui
                     .add_enabled(can_run, run_btn)
@@ -1375,10 +1347,7 @@ impl DemagogApp {
                 }
 
                 if ui
-                    .add_enabled(
-                        can_run,
-                        egui::Button::new("🔬 С журналом замен"),
-                    )
+                    .add_enabled(can_run, egui::Button::new("🔬 С журналом замен"))
                     .on_hover_text("Собрать журнал замен (Ctrl+Shift+Enter)")
                     .on_disabled_hover_text(run_disabled_hint)
                     .clicked()
@@ -1391,10 +1360,8 @@ impl DemagogApp {
 
                 let prev_fmt = self.settings.stress_format;
                 ui.add_enabled_ui(!self.is_busy, |ui| {
-                    let format_label = format!(
-                        "Формат: {} ▼",
-                        self.settings.stress_format.short_label()
-                    );
+                    let format_label =
+                        format!("Формат: {} ▼", self.settings.stress_format.short_label());
                     ui.menu_button(format_label, |ui| {
                         for fmt in [
                             StressFormat::PlusBeforeVowel,
@@ -1539,7 +1506,7 @@ impl DemagogApp {
                         }
                         ui.separator();
                         let selected = ui
-                            .add_enabled_ui(!self.is_busy, |ui| presets_menu(ui))
+                            .add_enabled_ui(!self.is_busy, presets_menu)
                             .inner;
                         if let Some(preset) = selected {
                             self.apply_preset(preset);
@@ -2517,12 +2484,14 @@ fn warm_visuals() -> egui::Visuals {
 
     visuals.widgets.inactive.weak_bg_fill = palette::WARM_WIDGET;
     visuals.widgets.inactive.bg_fill = palette::WARM_WIDGET;
-    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, Color32::from_rgb(205, 188, 165));
+    visuals.widgets.inactive.bg_stroke =
+        egui::Stroke::new(1.0_f32, Color32::from_rgb(205, 188, 165));
     visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, Color32::from_rgb(72, 60, 46));
 
     visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(226, 211, 188);
     visuals.widgets.hovered.bg_fill = Color32::from_rgb(226, 211, 188);
-    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, Color32::from_rgb(160, 135, 105));
+    visuals.widgets.hovered.bg_stroke =
+        egui::Stroke::new(1.0_f32, Color32::from_rgb(160, 135, 105));
     visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.5_f32, Color32::from_rgb(47, 39, 31));
 
     visuals.widgets.active.weak_bg_fill = Color32::from_rgb(211, 191, 161);
@@ -2559,8 +2528,7 @@ fn apply_style_settings(ctx: &egui::Context, settings: &AppSettings) {
         }
         ThemeMode::Warm => warm_visuals(),
     };
-    visuals.widgets.active.bg_stroke =
-        egui::Stroke::new(2.0_f32, palette::focus_ring(theme));
+    visuals.widgets.active.bg_stroke = egui::Stroke::new(2.0_f32, palette::focus_ring(theme));
     visuals.widgets.active.expansion = 1.0;
     ctx.set_visuals(visuals);
 
@@ -2570,10 +2538,9 @@ fn apply_style_settings(ctx: &egui::Context, settings: &AppSettings) {
             TextStyle::Heading,
             FontId::new(base + 4.0, FontFamily::Proportional),
         );
-        style.text_styles.insert(
-            TextStyle::Body,
-            FontId::new(base, FontFamily::Proportional),
-        );
+        style
+            .text_styles
+            .insert(TextStyle::Body, FontId::new(base, FontFamily::Proportional));
         style.text_styles.insert(
             TextStyle::Button,
             FontId::new(base, FontFamily::Proportional),
@@ -2654,17 +2621,17 @@ fn format_num(n: usize) -> String {
 }
 
 pub fn locate_default_dic_folder() -> PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let exe_dic = dir.join("dic");
-            if exe_dic.is_dir() {
-                return exe_dic;
-            }
-            if let Some(parent) = dir.parent().and_then(|p| p.parent()) {
-                let workspace_dic = parent.join("dic");
-                if workspace_dic.is_dir() {
-                    return workspace_dic;
-                }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let exe_dic = dir.join("dic");
+        if exe_dic.is_dir() {
+            return exe_dic;
+        }
+        if let Some(parent) = dir.parent().and_then(|p| p.parent()) {
+            let workspace_dic = parent.join("dic");
+            if workspace_dic.is_dir() {
+                return workspace_dic;
             }
         }
     }
@@ -3110,15 +3077,9 @@ mod tests {
         assert_eq!(job.sections.len(), 2);
         assert_eq!(job.sections[0].byte_range, 0..4);
         assert_eq!(job.sections[1].byte_range, 4..7);
-        assert_eq!(
-            job.sections[1].format.background,
-            palette::find_highlight()
-        );
+        assert_eq!(job.sections[1].format.background, palette::find_highlight());
         assert_eq!(job.sections[1].format.color, Color32::BLACK);
-        assert_ne!(
-            job.sections[0].format.background,
-            palette::find_highlight()
-        );
+        assert_ne!(job.sections[0].format.background, palette::find_highlight());
         assert_eq!(job.sections[1].format.line_height, Some(20.0));
     }
 
@@ -3151,10 +3112,7 @@ mod tests {
             200.0,
         );
         assert_eq!(job.sections.len(), 3);
-        assert_eq!(
-            job.sections[0].format.background,
-            palette::find_highlight()
-        );
+        assert_eq!(job.sections[0].format.background, palette::find_highlight());
         assert_eq!(
             job.sections[2].format.background,
             palette::find_current_highlight()
@@ -3245,11 +3203,15 @@ mod tests {
 
     #[test]
     fn reset_settings_keeps_folder_and_restores_defaults() {
-        let mut settings = AppSettings::default();
-        settings.dic_folder = PathBuf::from(r"F:\custom\dic");
+        let mut settings = AppSettings {
+            dic_folder: PathBuf::from(r"F:\custom\dic"),
+            ui_font_size: 24.0,
+            ..AppSettings::default()
+        };
         settings.set_theme(ThemeMode::Warm);
-        settings.ui_font_size = 24.0;
-        settings.disabled_dictionaries.push("disabled.dic".to_string());
+        settings
+            .disabled_dictionaries
+            .push("disabled.dic".to_string());
 
         let reset = reset_settings_preserving_folder(&settings);
 

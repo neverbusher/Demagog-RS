@@ -1,8 +1,8 @@
+use quick_xml::events::Event;
+use quick_xml::reader::Reader;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
-use quick_xml::events::Event;
-use quick_xml::reader::Reader;
 use zip::ZipArchive;
 
 use crate::domain::BookDocument;
@@ -21,7 +21,10 @@ pub struct TxtDocumentReader;
 impl DocumentReader for TxtDocumentReader {
     fn can_read(&self, path: &Path) -> bool {
         matches!(
-            path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()).as_deref(),
+            path.extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_ascii_lowercase())
+                .as_deref(),
             Some("txt" | "md" | "log")
         )
     }
@@ -49,12 +52,20 @@ pub struct Fb2DocumentReader;
 
 impl DocumentReader for Fb2DocumentReader {
     fn can_read(&self, path: &Path) -> bool {
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
         name.ends_with(".fb2") || name.ends_with(".zip")
     }
 
     fn read_document(&self, path: &Path) -> Result<BookDocument, String> {
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
         let bytes = if name.ends_with(".zip") {
             let file = File::open(path).map_err(|e| format!("Ошибка открытия архива: {e}"))?;
             let mut archive = ZipArchive::new(file).map_err(|e| format!("Ошибка ZIP: {e}"))?;
@@ -62,7 +73,9 @@ impl DocumentReader for Fb2DocumentReader {
             for i in 0..archive.len() {
                 let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
                 if entry.name().to_ascii_lowercase().ends_with(".fb2") {
-                    entry.read_to_end(&mut fb2_bytes).map_err(|e| e.to_string())?;
+                    entry
+                        .read_to_end(&mut fb2_bytes)
+                        .map_err(|e| e.to_string())?;
                     break;
                 }
             }
@@ -74,7 +87,11 @@ impl DocumentReader for Fb2DocumentReader {
             std::fs::read(path).map_err(|e| format!("Ошибка чтения FB2: {e}"))?
         };
 
-        let text = extract_xml_paragraphs(&bytes, &["p", "v", "subtitle", "title", "text-author"], &["binary", "description"])?;
+        let text = extract_xml_paragraphs(
+            &bytes,
+            &["p", "v", "subtitle", "title", "text-author"],
+            &["binary", "description"],
+        )?;
         if text.trim().is_empty() {
             return Err("В FB2 не найден текст книги.".to_string());
         }
@@ -93,14 +110,18 @@ pub struct DocxDocumentReader;
 impl DocumentReader for DocxDocumentReader {
     fn can_read(&self, path: &Path) -> bool {
         matches!(
-            path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()).as_deref(),
+            path.extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_ascii_lowercase())
+                .as_deref(),
             Some("docx")
         )
     }
 
     fn read_document(&self, path: &Path) -> Result<BookDocument, String> {
         let file = File::open(path).map_err(|e| format!("Ошибка открытия DOCX: {e}"))?;
-        let mut archive = ZipArchive::new(file).map_err(|e| format!("Ошибка чтения ZIP/DOCX: {e}"))?;
+        let mut archive =
+            ZipArchive::new(file).map_err(|e| format!("Ошибка чтения ZIP/DOCX: {e}"))?;
         let mut doc_xml = Vec::new();
         {
             let mut entry = archive
@@ -126,10 +147,8 @@ impl DocumentReader for DocxDocumentReader {
                     let local = e.local_name();
                     if local.as_ref() == b"t" {
                         in_text = false;
-                    } else if local.as_ref() == b"p" {
-                        if !out.ends_with('\n') {
-                            out.push('\n');
-                        }
+                    } else if local.as_ref() == b"p" && !out.ends_with('\n') {
+                        out.push('\n');
                     }
                 }
                 Ok(Event::Text(t)) if in_text => {
@@ -162,7 +181,10 @@ pub struct EpubDocumentReader;
 impl DocumentReader for EpubDocumentReader {
     fn can_read(&self, path: &Path) -> bool {
         matches!(
-            path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()).as_deref(),
+            path.extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_ascii_lowercase())
+                .as_deref(),
             Some("epub")
         )
     }
@@ -185,21 +207,19 @@ impl DocumentReader for EpubDocumentReader {
         let mut full_text = String::new();
         for name in html_entries {
             let mut bytes = Vec::new();
-            if let Ok(mut entry) = archive.by_name(&name) {
-                if entry.read_to_end(&mut bytes).is_ok() {
-                    if let Ok(part) = extract_xml_paragraphs(
-                        &bytes,
-                        &["p", "h1", "h2", "h3", "h4", "li", "div"],
-                        &["head", "style", "script"],
-                    ) {
-                        if !part.trim().is_empty() {
-                            if !full_text.is_empty() {
-                                full_text.push_str("\n\n");
-                            }
-                            full_text.push_str(part.trim());
-                        }
-                    }
+            if let Ok(mut entry) = archive.by_name(&name)
+                && entry.read_to_end(&mut bytes).is_ok()
+                && let Ok(part) = extract_xml_paragraphs(
+                    &bytes,
+                    &["p", "h1", "h2", "h3", "h4", "li", "div"],
+                    &["head", "style", "script"],
+                )
+                && !part.trim().is_empty()
+            {
+                if !full_text.is_empty() {
+                    full_text.push_str("\n\n");
                 }
+                full_text.push_str(part.trim());
             }
         }
 
@@ -244,7 +264,9 @@ impl DocumentReader for CompositeBookReader {
                 return r.read_document(path);
             }
         }
-        Err(format!("Формат файла не поддерживается. {SUPPORTED_BOOK_FORMATS}"))
+        Err(format!(
+            "Формат файла не поддерживается. {SUPPORTED_BOOK_FORMATS}"
+        ))
     }
 }
 
@@ -279,27 +301,36 @@ fn extract_xml_paragraphs(
         match reader.read_event() {
             Ok(Event::Start(e)) => {
                 let local_bytes = e.local_name();
-                let local = std::str::from_utf8(local_bytes.as_ref()).unwrap_or("").to_ascii_lowercase();
+                let local = std::str::from_utf8(local_bytes.as_ref())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
                 if local == "body" {
                     in_body = true;
                 }
                 if skip_tags.iter().any(|&t| t == local) {
                     skip_depth += 1;
-                } else if skip_depth == 0 && in_body && block_tags.iter().any(|&t| t == local) {
-                    if !out.is_empty() && !out.ends_with('\n') {
-                        out.push('\n');
-                    }
+                } else if skip_depth == 0
+                    && in_body
+                    && block_tags.iter().any(|&t| t == local)
+                    && !out.is_empty()
+                    && !out.ends_with('\n')
+                {
+                    out.push('\n');
                 }
             }
             Ok(Event::End(e)) => {
                 let local_bytes = e.local_name();
-                let local = std::str::from_utf8(local_bytes.as_ref()).unwrap_or("").to_ascii_lowercase();
+                let local = std::str::from_utf8(local_bytes.as_ref())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
                 if skip_tags.iter().any(|&t| t == local) {
                     skip_depth = skip_depth.saturating_sub(1);
-                } else if skip_depth == 0 && in_body && block_tags.iter().any(|&t| t == local) {
-                    if !out.ends_with('\n') {
-                        out.push('\n');
-                    }
+                } else if skip_depth == 0
+                    && in_body
+                    && block_tags.iter().any(|&t| t == local)
+                    && !out.ends_with('\n')
+                {
+                    out.push('\n');
                 }
             }
             Ok(Event::Text(t)) if skip_depth == 0 && in_body => {
@@ -355,7 +386,10 @@ mod tests {
 
     #[test]
     fn title_strips_compound_fb2_zip_extension() {
-        assert_eq!(file_stem_title(Path::new("Война и мир.fb2.zip")), "Война и мир");
+        assert_eq!(
+            file_stem_title(Path::new("Война и мир.fb2.zip")),
+            "Война и мир"
+        );
         assert_eq!(file_stem_title(Path::new("BOOK.FB2.ZIP")), "BOOK");
         assert_eq!(file_stem_title(Path::new("book.zip")), "book");
         assert_eq!(file_stem_title(Path::new("book.fb2")), "book");

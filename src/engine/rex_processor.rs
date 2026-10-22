@@ -56,13 +56,13 @@ impl RexProcessor {
                     .collect();
 
                 if !kws.is_empty() {
-                    if let Some(prev_kws) = current_keywords.take() {
-                        if !current_block_rules.is_empty() {
-                            indexed_blocks.push(IndexedRexBlock {
-                                keywords: prev_kws,
-                                rules: std::mem::take(&mut current_block_rules),
-                            });
-                        }
+                    if let Some(prev_kws) = current_keywords.take()
+                        && !current_block_rules.is_empty()
+                    {
+                        indexed_blocks.push(IndexedRexBlock {
+                            keywords: prev_kws,
+                            rules: std::mem::take(&mut current_block_rules),
+                        });
                     }
                     current_keywords = Some(kws);
                 }
@@ -92,10 +92,10 @@ impl RexProcessor {
                 .unicode(true)
                 .build();
 
-            if let Err(err) = &compiled {
-                if compile_warnings.len() < 50 {
-                    compile_warnings.push(format!("{} → {err}", trimmed));
-                }
+            if let Err(err) = &compiled
+                && compile_warnings.len() < 50
+            {
+                compile_warnings.push(format!("{} → {err}", trimmed));
             }
 
             if let Ok(regex) = compiled {
@@ -115,13 +115,13 @@ impl RexProcessor {
             }
         }
 
-        if let Some(prev_kws) = current_keywords.take() {
-            if !current_block_rules.is_empty() {
-                indexed_blocks.push(IndexedRexBlock {
-                    keywords: prev_kws,
-                    rules: current_block_rules,
-                });
-            }
+        if let Some(prev_kws) = current_keywords.take()
+            && !current_block_rules.is_empty()
+        {
+            indexed_blocks.push(IndexedRexBlock {
+                keywords: prev_kws,
+                rules: current_block_rules,
+            });
         }
 
         let is_indexed = indexed_blocks.len() > 5;
@@ -131,8 +131,8 @@ impl RexProcessor {
             }
         }
 
-        let rule_count = unindexed_rules.len()
-            + indexed_blocks.iter().map(|b| b.rules.len()).sum::<usize>();
+        let rule_count =
+            unindexed_rules.len() + indexed_blocks.iter().map(|b| b.rules.len()).sum::<usize>();
 
         Self {
             name,
@@ -240,10 +240,10 @@ impl RexProcessor {
         if rule.needs_digit && !*has_digit {
             return;
         }
-        if let Some(sub) = &rule.required_sub {
-            if !current_lower.contains(sub.as_str()) {
-                return;
-            }
+        if let Some(sub) = &rule.required_sub
+            && !current_lower.contains(sub.as_str())
+        {
+            return;
         }
         if !rule.regex.is_match(current) {
             return;
@@ -254,23 +254,22 @@ impl RexProcessor {
             return;
         }
 
-        if let Some(evs) = events.as_deref_mut() {
-            if evs.len() < 200 {
-                if let Some(m) = rule.regex.find(current) {
-                    let before_snip = snippet_around(current, m.start(), m.end());
-                    let after_snip = snippet_around(
-                        next.as_ref(),
-                        m.start().min(next.len()),
-                        m.start().saturating_add(rule.replacement.len()),
-                    );
-                    evs.push(ReplacementEvent {
-                        dictionary_name: self.name.clone(),
-                        rule_summary: rule.raw_rule.clone(),
-                        before_snippet: before_snip,
-                        after_snippet: after_snip,
-                    });
-                }
-            }
+        if let Some(evs) = events.as_deref_mut()
+            && evs.len() < 200
+            && let Some(m) = rule.regex.find(current)
+        {
+            let before_snip = snippet_around(current, m.start(), m.end());
+            let after_snip = snippet_around(
+                next.as_ref(),
+                m.start().min(next.len()),
+                m.start().saturating_add(rule.replacement.len()),
+            );
+            evs.push(ReplacementEvent {
+                dictionary_name: self.name.clone(),
+                rule_summary: rule.raw_rule.clone(),
+                before_snippet: before_snip,
+                after_snippet: after_snip,
+            });
         }
 
         *current = next.into_owned();
@@ -432,8 +431,7 @@ mod tests {
 
     #[test]
     fn diff_and_fast_paths_produce_same_text() {
-        let processor =
-            RexProcessor::compile("test.rex".to_string(), "слово=СЛОВО\n", "UTF-8");
+        let processor = RexProcessor::compile("test.rex".to_string(), "слово=СЛОВО\n", "UTF-8");
         let text = format!("{}\nСлово.", "Слово и слово.".repeat(100));
         assert!(text.len() > 1024);
 

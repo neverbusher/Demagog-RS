@@ -31,7 +31,7 @@ pub fn decode_text_bytes(bytes: &[u8]) -> (String, &'static str) {
 }
 
 fn looks_like_utf16le_no_bom(bytes: &[u8]) -> bool {
-    if bytes.len() < 8 || bytes.len() % 2 != 0 {
+    if bytes.len() < 8 || !bytes.len().is_multiple_of(2) {
         return false;
     }
     let sample_pairs = (bytes.len() / 2).min(64);

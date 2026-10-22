@@ -73,8 +73,25 @@ fn strip_stress_marks(text: &str) -> String {
 fn is_cyrillic_vowel(c: char) -> bool {
     matches!(
         c,
-        'а' | 'е' | 'ё' | 'и' | 'о' | 'у' | 'ы' | 'э' | 'ю' | 'я'
-        | 'А' | 'Е' | 'Ё' | 'И' | 'О' | 'У' | 'Ы' | 'Э' | 'Ю' | 'Я'
+        'а' | 'е'
+            | 'ё'
+            | 'и'
+            | 'о'
+            | 'у'
+            | 'ы'
+            | 'э'
+            | 'ю'
+            | 'я'
+            | 'А'
+            | 'Е'
+            | 'Ё'
+            | 'И'
+            | 'О'
+            | 'У'
+            | 'Ы'
+            | 'Э'
+            | 'Ю'
+            | 'Я'
     )
 }
 
@@ -94,10 +111,8 @@ mod tests {
 
     #[test]
     fn clean_yo_strips_stress_marks() {
-        let formatted = RussianStressFormatter.format_stress(
-            "з+амок зАмок",
-            StressFormat::CleanYoOnly,
-        );
+        let formatted =
+            RussianStressFormatter.format_stress("з+амок зАмок", StressFormat::CleanYoOnly);
         assert_eq!(formatted, "замок замок");
     }
 
