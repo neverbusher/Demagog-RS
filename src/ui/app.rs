@@ -39,6 +39,7 @@ struct ResultState {
     dirty: bool,
     stale: bool,
     edited: bool,
+    chunks_stale: bool,
     format: StressFormat,
 }
 
@@ -48,6 +49,7 @@ impl ResultState {
             dirty: false,
             stale: false,
             edited: false,
+            chunks_stale: false,
             format,
         }
     }
@@ -56,12 +58,14 @@ impl ResultState {
         self.dirty = false;
         self.stale = false;
         self.edited = false;
+        self.chunks_stale = false;
     }
 
     fn mark_computed(&mut self, format: StressFormat) {
         self.dirty = true;
         self.stale = false;
         self.edited = false;
+        self.chunks_stale = false;
         self.format = format;
     }
 
@@ -74,6 +78,7 @@ impl ResultState {
     fn mark_edited(&mut self) {
         self.dirty = true;
         self.edited = true;
+        self.chunks_stale = true;
     }
 
     fn mark_saved(&mut self) {
@@ -85,10 +90,12 @@ impl ResultState {
         if !self.edited {
             self.dirty = false;
         }
+        self.chunks_stale = false;
     }
 
     fn mark_rechunked(&mut self) {
         self.dirty = true;
+        self.chunks_stale = false;
     }
 
     fn mark_stale(&mut self) {
@@ -105,6 +112,10 @@ impl ResultState {
 
     fn is_edited(&self) -> bool {
         self.edited
+    }
+
+    fn is_chunks_stale(&self) -> bool {
+        self.chunks_stale
     }
 
     fn format(&self) -> StressFormat {
@@ -999,6 +1010,9 @@ impl DemagogApp {
             .add_filter("JSON для ComfyUI", &["json"])
             .save_file()
         {
+            if self.result_state.is_chunks_stale() {
+                self.rechunk_result();
+            }
             #[derive(serde::Serialize)]
             struct ExportPayload<'a> {
                 title: &'a str,
@@ -2023,6 +2037,21 @@ impl DemagogApp {
                         }
                     });
                     self.show_stale_banner(ui, theme);
+                    if self.result_state.is_chunks_stale() && !self.document.chunks.is_empty() {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new(
+                                    "⚠ Результат изменён вручную: чанки пока не учитывают правки. Перед экспортом они будут пересобраны.",
+                                )
+                                .color(palette::warning_text(theme))
+                                .strong(),
+                            );
+                            if ui.button("🔄 Пересобрать чанки").clicked() {
+                                self.rechunk_result();
+                            }
+                        });
+                        ui.add_space(4.0);
+                    }
                     ui.separator();
 
                     let chunk_total = self.document.chunks.len();
@@ -2942,6 +2971,7 @@ mod tests {
         assert!(state.is_dirty());
         assert!(!state.is_stale());
         assert!(!state.is_edited());
+        assert!(!state.is_chunks_stale());
         assert_eq!(state.format(), StressFormat::AcuteAccent);
     }
 
@@ -2953,6 +2983,7 @@ mod tests {
         state.mark_edited();
         assert!(state.is_dirty());
         assert!(state.is_edited());
+        assert!(state.is_chunks_stale());
     }
 
     #[test]
@@ -2963,6 +2994,10 @@ mod tests {
         state.mark_saved();
         assert!(!state.is_dirty());
         assert!(!state.is_edited());
+        assert!(
+            state.is_chunks_stale(),
+            "saving TXT does not rebuild the chunks"
+        );
     }
 
     #[test]
@@ -2974,6 +3009,7 @@ mod tests {
         state.mark_rechunked();
         assert!(state.is_dirty());
         assert!(state.is_edited());
+        assert!(!state.is_chunks_stale());
     }
 
     #[test]
@@ -2997,9 +3033,11 @@ mod tests {
         assert!(!state.is_dirty());
 
         state.mark_edited();
+        state.mark_rechunked();
         state.mark_exported();
         assert!(state.is_dirty());
         assert!(state.is_edited());
+        assert!(!state.is_chunks_stale());
     }
 
     #[test]
@@ -3022,6 +3060,7 @@ mod tests {
         assert!(!state.is_dirty());
         assert!(!state.is_stale());
         assert!(!state.is_edited());
+        assert!(!state.is_chunks_stale());
         assert_eq!(state.format(), StressFormat::AcuteAccent);
     }
 
