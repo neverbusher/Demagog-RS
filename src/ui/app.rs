@@ -409,7 +409,7 @@ impl DemagogApp {
                 Arc::new(RussianStressFormatter),
                 Arc::new(SentenceAwareChunker),
             );
-            let _ = pipeline.execute(
+            if let Some(result) = pipeline.execute(
                 &input_text,
                 &active_processors,
                 PipelineOptions {
@@ -419,7 +419,9 @@ impl DemagogApp {
                 },
                 Some(cancel.as_ref()),
                 Some(&ptx),
-            );
+            ) {
+                let _ = ptx.send(PipelineProgress::Completed(result));
+            }
             drop(ptx);
             let _ = forwarder.join();
         });

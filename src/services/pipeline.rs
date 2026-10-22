@@ -112,10 +112,6 @@ impl ProcessingPipeline {
             return None;
         }
 
-        if let Some(tx) = progress_tx {
-            let _ = tx.send(PipelineProgress::Completed(result.clone()));
-        }
-
         Some(result)
     }
 }
@@ -329,6 +325,38 @@ mod tests {
             "cancelled pipeline must not return a result"
         );
         assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn execute_leaves_result_ownership_to_the_caller() {
+        let pipeline = ProcessingPipeline::new(
+            Arc::new(RussianStressFormatter),
+            Arc::new(SentenceAwareChunker),
+        );
+        let processors: Vec<Arc<dyn TextProcessor>> = vec![Arc::new(StressAddingProcessor)];
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let result = pipeline
+            .execute(
+                "замок",
+                &processors,
+                PipelineOptions {
+                    stress_format: StressFormat::CleanYoOnly,
+                    chunk_config: ChunkConfig::default(),
+                    capture_diff: false,
+                },
+                None,
+                Some(&tx),
+            )
+            .expect("not cancelled");
+        drop(tx);
+
+        assert_eq!(result.processed_text, "замок");
+        assert!(
+            !rx.try_iter()
+                .any(|message| matches!(message, PipelineProgress::Completed(_))),
+            "completion must be sent by the caller, not cloned inside the pipeline"
+        );
     }
 
     #[test]
