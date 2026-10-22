@@ -1335,7 +1335,7 @@ impl DemagogApp {
                 let prev_fmt = self.settings.stress_format;
                 ui.add_enabled_ui(!self.is_busy, |ui| {
                     let format_label = format!(
-                        "Формат: {} ▾",
+                        "Формат: {} ▼",
                         self.settings.stress_format.short_label()
                     );
                     ui.menu_button(format_label, |ui| {

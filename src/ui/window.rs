@@ -234,6 +234,7 @@ pub(crate) fn apply_window_icon(_icon: &IconData) -> bool {
     true
 }
 
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct WorkArea {
     x: f32,

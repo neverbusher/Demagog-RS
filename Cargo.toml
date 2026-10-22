@@ -1,6 +1,6 @@
 [package]
 name = "demagog-rs"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 license = "MIT"
 description = "Text and dictionary processor for TTS (FishAudio Drama3 / ComfyUI)"
@@ -10,7 +10,7 @@ eframe = { version = "0.34", optional = true, default-features = false, features
 egui = "0.34"
 egui_extras = { version = "0.34", features = ["all_loaders"] }
 egui_software_backend = { version = "0.0.3", optional = true }
-rfd = "0.15"
+rfd = { version = "0.15", features = ["common-controls-v6"] }
 rayon = "1.10"
 regex = "1.11"
 rustc-hash = "2.1"
