@@ -1,6 +1,6 @@
 [package]
 name = "demagog-rs"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 license = "MIT"
 description = "Text and dictionary processor for TTS (FishAudio Drama3 / ComfyUI)"
