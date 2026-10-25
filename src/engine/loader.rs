@@ -19,7 +19,7 @@ pub struct DictionaryLoadReport {
     pub errors: Vec<String>,
 }
 
-pub fn load_dictionaries_parallel(dir: &Path) -> Result<DictionaryLoadReport, String> {
+pub fn sorted_dictionary_paths(dir: &Path) -> Result<Vec<PathBuf>, String> {
     let entries = std::fs::read_dir(dir)
         .map_err(|e| format!("Не удалось открыть папку словарей {}: {e}", dir.display()))?;
 
@@ -38,6 +38,11 @@ pub fn load_dictionaries_parallel(dir: &Path) -> Result<DictionaryLoadReport, St
         .collect();
 
     paths.sort_by_key(|p| pipeline_sort_key(p));
+    Ok(paths)
+}
+
+pub fn load_dictionaries_parallel(dir: &Path) -> Result<DictionaryLoadReport, String> {
+    let paths = sorted_dictionary_paths(dir)?;
 
     let results: Vec<Result<CompiledDictionary, String>> = paths
         .par_iter()
@@ -143,6 +148,55 @@ fn pipeline_sort_key(path: &Path) -> (u8, u32, String) {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn sorts_dictionary_paths_in_pipeline_order() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "demagog-loader-order-{}-{stamp}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dic dir");
+        for name in [
+            "96_hard(hard-e).dic",
+            "95_ortho.dic",
+            "77_names.dic",
+            "76_phrases.dic",
+            "33_eyo.dic",
+            "edge_Yo_.dic",
+            "10_nums.rex",
+            "unnumbered.dic",
+            "notes.txt",
+        ] {
+            std::fs::write(dir.join(name), b"").expect("write temp dictionary");
+        }
+
+        let paths = sorted_dictionary_paths(&dir).expect("sort dictionary paths");
+        let names: Vec<&str> = paths
+            .iter()
+            .map(|path| path.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "10_nums.rex",
+                "edge_Yo_.dic",
+                "33_eyo.dic",
+                "76_phrases.dic",
+                "77_names.dic",
+                "95_ortho.dic",
+                "96_hard(hard-e).dic",
+                "unnumbered.dic",
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     #[ignore]

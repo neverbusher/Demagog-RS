@@ -16,6 +16,7 @@ use crate::engine::loader::{DictionaryLoadReport, load_dictionaries_parallel};
 use crate::io::book_reader::CompositeBookReader;
 use crate::ports::DocumentReader;
 use crate::services::chunker::SentenceAwareChunker;
+use crate::services::dictionary_check;
 use crate::services::pipeline::{PipelineOptions, ProcessingPipeline};
 use crate::services::stress::RussianStressFormatter;
 #[cfg(not(any(feature = "eframe-backend", feature = "sw")))]
@@ -32,6 +33,9 @@ use crate::ui::window::initial_viewport;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--check-dictionaries") {
+        std::process::exit(run_dictionary_check());
+    }
     if args.iter().any(|a| a == "--bench" || a == "--cli") {
         run_cli_or_bench(&args);
         std::process::exit(0);
@@ -85,6 +89,48 @@ fn run_eframe(dic_folder: PathBuf) -> eframe::Result<()> {
         native_options,
         Box::new(move |cc| Ok(Box::new(DemagogApp::new(cc, dic_folder)))),
     )
+}
+
+fn run_dictionary_check() -> i32 {
+    let dic_folder = locate_default_dic_folder();
+    println!("Проверка словарей из {}...", dic_folder.display());
+    match dictionary_check::run_check(&dic_folder) {
+        Ok(report) => {
+            println!("Порядок обработки:");
+            for (index, item) in report.order.ordered.iter().enumerate() {
+                println!("{:2}. [{}] {}", index + 1, item.stage, item.name);
+            }
+            for warning in &report.order.warnings {
+                println!("ПРЕДУПРЕЖДЕНИЕ: {warning}");
+            }
+            println!(
+                "Загружено {} словарей ({} правил).",
+                report.loaded, report.total_rules
+            );
+            println!(
+                "Эталонных фраз: {}/{}.",
+                report.passed,
+                dictionary_check::GOLDEN_CASES.len()
+            );
+            if report.success() {
+                if report.order.warnings.is_empty() {
+                    println!("OK: порядок и эталонные фразы совпадают.");
+                } else {
+                    println!("OK: ошибок нет, но есть предупреждения — проверьте строки выше.");
+                }
+                0
+            } else {
+                for failure in &report.order.failures {
+                    eprintln!("ОШИБКА: {failure}");
+                }
+                1
+            }
+        }
+        Err(error) => {
+            eprintln!("Не удалось проверить словари: {error}");
+            1
+        }
+    }
 }
 
 fn run_cli_or_bench(args: &[String]) {
