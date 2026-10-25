@@ -189,6 +189,7 @@ use crate::domain::{ChunkConfig, StressFormat};
 use crate::engine::loader::{load_dictionaries_parallel, sorted_dictionary_paths};
 use crate::ports::TextProcessor;
 use crate::services::chunker::SentenceAwareChunker;
+use crate::services::dictionary_audit::{AuditReport, audit_dictionaries};
 use crate::services::pipeline::{PipelineOptions, ProcessingPipeline};
 use crate::services::stress::RussianStressFormatter;
 
@@ -314,6 +315,7 @@ pub const GOLDEN_CASES: &[GoldenCase] = &[
 #[derive(Debug)]
 pub struct CheckReport {
     pub order: OrderReport,
+    pub audit: AuditReport,
     pub loaded: usize,
     pub total_rules: usize,
     pub passed: usize,
@@ -355,9 +357,19 @@ pub fn run_check(dir: &Path) -> Result<CheckReport, String> {
                 .push(format!("{}: {warning}", dictionary.meta.name));
         }
     }
+    let audit = match audit_dictionaries(dir) {
+        Ok(audit) => audit,
+        Err(error) => {
+            order
+                .warnings
+                .push(format!("Аудит фонетики не выполнен: {error}"));
+            AuditReport::default()
+        }
+    };
     if !order.failures.is_empty() {
         return Ok(CheckReport {
             order,
+            audit,
             loaded,
             total_rules,
             passed: 0,
@@ -401,6 +413,7 @@ pub fn run_check(dir: &Path) -> Result<CheckReport, String> {
 
     Ok(CheckReport {
         order,
+        audit,
         loaded,
         total_rules,
         passed,

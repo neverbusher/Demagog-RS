@@ -1052,6 +1052,25 @@ impl DemagogApp {
                     }
                 });
                 ui.end_row();
+
+                ui.label("Проверка словарей:");
+                ui.horizontal_wrapped(|ui| {
+                    let response = ui
+                        .add_enabled(!self.is_busy, egui::Button::new("🔎 Проверить словари"))
+                        .on_hover_text(
+                            "Порядок этапов, 22 эталонные фразы и аудит фонетических кандидатов",
+                        )
+                        .on_disabled_hover_text("Доступно после завершения обработки");
+                    if response.clicked() {
+                        self.check_dictionaries_async(ctx.clone());
+                    }
+                    ui.label(
+                        RichText::new("Порядок, эталоны и аудит фонетики")
+                            .small()
+                            .weak(),
+                    );
+                });
+                ui.end_row();
             });
 
         if style_changed {

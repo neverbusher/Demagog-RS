@@ -486,3 +486,93 @@ fn editors_are_disabled_while_processing() {
         "the editor must become editable again after processing"
     );
 }
+
+#[test]
+fn settings_show_dictionary_check_button_and_report() {
+    use crate::services::dictionary_audit::{
+        AuditCandidate, AuditKind, AuditReport, DictionaryAudit,
+    };
+    use crate::services::dictionary_check::{
+        CheckReport, GOLDEN_CASES, OrderReport, OrderedDictionary,
+    };
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    let order = OrderReport {
+        ordered: vec![OrderedDictionary {
+            name: "10_REX_числа(chisla).rex".to_string(),
+            stage: "REX",
+        }],
+        warnings: Vec::new(),
+        failures: Vec::new(),
+    };
+    let audit = AuditReport {
+        dictionaries: vec![DictionaryAudit {
+            name: "67_TTS_Offline АВТОР(phoneme).dic".to_string(),
+            purpose: "автор",
+            total_rules: 10,
+            candidates: vec![AuditCandidate {
+                line: 1,
+                lhs: "Всьо".to_string(),
+                rhs: "Всё".to_string(),
+                kind: AuditKind::Letters,
+            }],
+        }],
+        skipped: vec![("65_ЛАТИНИЦА@.dic".to_string(), "транслитерация")],
+        scanned_rules: 10,
+        total_candidates: 1,
+    };
+    let report = CheckReport {
+        order,
+        audit,
+        loaded: 1,
+        total_rules: 10,
+        passed: GOLDEN_CASES.len(),
+    };
+
+    let mut app = ui_test_app("", "", Vec::new());
+    app.active_tab = ActiveTab::Settings;
+    app.check_report = Some(report);
+    app.show_check_window = true;
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1280.0, 900.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+    harness.run();
+
+    harness.get_by_label_contains("Проверить словари");
+    harness.get_by_label_contains("🔎 Проверка словарей");
+    harness.get_by_label_contains("Фонетические кандидаты");
+    harness.get_by_label_contains("Кандидатов: 1 из 10");
+    harness.get_by_label_contains("67_TTS_Offline АВТОР(phoneme).dic");
+}
+
+#[test]
+#[ignore]
+fn clicking_dictionary_check_loads_report() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = ui_test_app("", "", Vec::new());
+    app.active_tab = ActiveTab::Settings;
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1280.0, 900.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+    harness.run();
+
+    harness.get_by_label_contains("Проверить словари").click();
+    harness.run_steps(1);
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while harness.state().check_report.is_none() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+        harness.run_steps(1);
+    }
+
+    assert!(
+        harness.state().check_report.is_some(),
+        "dictionary check did not finish within 60 seconds"
+    );
+    assert!(harness.state().show_check_window);
+    harness.get_by_label_contains("Фонетические кандидаты");
+}

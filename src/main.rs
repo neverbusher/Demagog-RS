@@ -112,6 +112,38 @@ fn run_dictionary_check() -> i32 {
                 report.passed,
                 dictionary_check::GOLDEN_CASES.len()
             );
+            if report.audit.total_candidates == 0 {
+                println!(
+                    "Фонетических кандидатов не найдено ({} правил в обычных словарях).",
+                    report.audit.scanned_rules
+                );
+            } else {
+                println!(
+                    "Фонетических кандидатов: {} из {} правил в обычных словарях.",
+                    report.audit.total_candidates, report.audit.scanned_rules
+                );
+                let mut top: Vec<_> = report
+                    .audit
+                    .dictionaries
+                    .iter()
+                    .filter(|dictionary| !dictionary.candidates.is_empty())
+                    .collect();
+                top.sort_by_key(|dictionary| std::cmp::Reverse(dictionary.candidates.len()));
+                for dictionary in top.iter().take(5) {
+                    println!(
+                        "  {} [{}]: {}",
+                        dictionary.name,
+                        dictionary.purpose,
+                        dictionary.candidates.len()
+                    );
+                }
+            }
+            if !report.audit.skipped.is_empty() {
+                println!(
+                    "Не аудировались по назначению: {} словарей.",
+                    report.audit.skipped.len()
+                );
+            }
             if report.success() {
                 if report.order.warnings.is_empty() {
                     println!("OK: порядок и эталонные фразы совпадают.");

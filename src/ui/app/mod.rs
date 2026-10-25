@@ -15,6 +15,7 @@ use crate::engine::loader::{CompiledDictionary, DictionaryLoadReport, load_dicti
 use crate::io::book_reader::{CompositeBookReader, SUPPORTED_BOOK_FORMATS, can_read_book};
 use crate::ports::{DocumentReader, StressFormatter, TextChunker, TextProcessor};
 use crate::services::chunker::SentenceAwareChunker;
+use crate::services::dictionary_check::{self, CheckReport};
 use crate::services::pipeline::{PipelineOptions, ProcessingPipeline};
 use crate::services::stress::RussianStressFormatter;
 use crate::ui::palette;
@@ -182,6 +183,8 @@ pub struct DemagogApp {
     processing_snapshot: Option<ProcessingSnapshot>,
     progress_ratio: f32,
     rx: Option<Receiver<WorkerMessage>>,
+    check_report: Option<CheckReport>,
+    show_check_window: bool,
     diff_filter: String,
     dic_search_filter: String,
     last_copied_chunk: Option<usize>,
@@ -219,6 +222,7 @@ enum WorkerMessage {
     },
     BookLoaded(Result<BookDocument, String>),
     Pipeline(PipelineProgress),
+    DictionaryCheckFinished(Result<CheckReport, String>),
 }
 
 impl DemagogApp {
@@ -278,6 +282,8 @@ impl DemagogApp {
             processing_snapshot: None,
             progress_ratio: 0.0,
             rx: None,
+            check_report: None,
+            show_check_window: false,
             diff_filter: String::new(),
             dic_search_filter: String::new(),
             last_copied_chunk: None,
@@ -343,6 +349,179 @@ impl DemagogApp {
             }
             ctx.request_repaint();
         });
+    }
+
+    fn check_dictionaries_async(&mut self, ctx: egui::Context) {
+        if self.is_busy {
+            return;
+        }
+        self.is_busy = true;
+        self.progress_ratio = 0.25;
+        self.check_report = None;
+        self.show_check_window = false;
+        self.set_status(
+            StatusLevel::Info,
+            "Проверка порядка словарей и эталонных фраз...",
+        );
+        let folder = self.settings.dic_folder.clone();
+        let (tx, rx) = mpsc::channel();
+        self.rx = Some(rx);
+        std::thread::spawn(move || {
+            let result = dictionary_check::run_check(&folder);
+            let _ = tx.send(WorkerMessage::DictionaryCheckFinished(result));
+            ctx.request_repaint();
+        });
+    }
+
+    fn show_check_window(&mut self, ctx: &egui::Context) {
+        if !self.show_check_window {
+            return;
+        }
+        let Some(report) = self.check_report.as_ref() else {
+            self.show_check_window = false;
+            return;
+        };
+
+        let mut open = true;
+        let mut close_requested = false;
+        let mut copy_text: Option<String> = None;
+        egui::Window::new("🔎 Проверка словарей")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(820.0)
+            .default_height(640.0)
+            .show(ctx, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(format!("Словарей: {}", report.loaded)).strong());
+                    ui.label(format!("Правил: {}", report.total_rules));
+                    ui.label(format!(
+                        "Эталонных фраз: {}/{}",
+                        report.passed,
+                        dictionary_check::GOLDEN_CASES.len()
+                    ));
+                });
+
+                let error_color = ui.visuals().error_fg_color;
+                let warn_color = ui.visuals().warn_fg_color;
+                for failure in &report.order.failures {
+                    ui.add(
+                        egui::Label::new(RichText::new(format!("• {failure}")).color(error_color))
+                            .selectable(true),
+                    );
+                }
+                for warning in &report.order.warnings {
+                    ui.add(
+                        egui::Label::new(RichText::new(format!("• {warning}")).color(warn_color))
+                            .selectable(true),
+                    );
+                }
+
+                ui.add_space(6.0);
+                ui.separator();
+                ui.heading("Порядок обработки");
+                ScrollArea::vertical()
+                    .id_salt("dic_check_order")
+                    .max_height(200.0)
+                    .show(ui, |ui| {
+                        for (index, dictionary) in report.order.ordered.iter().enumerate() {
+                            ui.label(format!(
+                                "{:2}. [{}] {}",
+                                index + 1,
+                                dictionary.stage,
+                                dictionary.name
+                            ));
+                        }
+                    });
+
+                ui.add_space(6.0);
+                ui.separator();
+                ui.heading("Фонетические кандидаты");
+                ui.label(
+                    "Правила, меняющие буквы или границы слов. Это кандидаты, а не обязательно \
+                     ошибки: словари с пометкой «по назначению» меняют текст намеренно.",
+                );
+                ui.label(format!(
+                    "Кандидатов: {} из {} правил в обычных словарях.",
+                    report.audit.total_candidates, report.audit.scanned_rules
+                ));
+                if !report.audit.skipped.is_empty() {
+                    egui::CollapsingHeader::new(format!(
+                        "Не аудировались по назначению: {} словарей",
+                        report.audit.skipped.len()
+                    ))
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        for (name, purpose) in &report.audit.skipped {
+                            ui.label(format!("{name} [{purpose}]"));
+                        }
+                    });
+                }
+
+                let mut dictionaries: Vec<_> = report
+                    .audit
+                    .dictionaries
+                    .iter()
+                    .filter(|dictionary| !dictionary.candidates.is_empty())
+                    .collect();
+                dictionaries
+                    .sort_by_key(|dictionary| std::cmp::Reverse(dictionary.candidates.len()));
+
+                ScrollArea::vertical()
+                    .id_salt("dic_check_audit")
+                    .max_height(260.0)
+                    .show(ui, |ui| {
+                        if dictionaries.is_empty() {
+                            ui.label("Кандидатов не найдено.");
+                        }
+                        for dictionary in dictionaries {
+                            let title = format!(
+                                "{} — {} из {} [{}]",
+                                dictionary.name,
+                                dictionary.candidates.len(),
+                                dictionary.total_rules,
+                                dictionary.purpose
+                            );
+                            egui::CollapsingHeader::new(title)
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    for candidate in dictionary.candidates.iter().take(200) {
+                                        ui.add(
+                                            egui::Label::new(format!(
+                                                "стр. {}: {} → {} [{}]",
+                                                candidate.line,
+                                                candidate.lhs,
+                                                candidate.rhs,
+                                                candidate.kind.label()
+                                            ))
+                                            .selectable(true),
+                                        );
+                                    }
+                                    if dictionary.candidates.len() > 200 {
+                                        ui.label(format!(
+                                            "… ещё {}",
+                                            dictionary.candidates.len() - 200
+                                        ));
+                                    }
+                                });
+                        }
+                    });
+
+                ui.add_space(6.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("📋 Скопировать аудит").clicked() {
+                        copy_text = Some(report.audit.to_text());
+                    }
+                    if ui.button("Закрыть").clicked() {
+                        close_requested = true;
+                    }
+                });
+            });
+
+        self.show_check_window = open && !close_requested;
+        if let Some(text) = copy_text {
+            self.copy_to_clipboard(&text, "Аудит словарей скопирован".to_string(), None);
+        }
     }
 
     fn apply_preset(&mut self, preset: DictionaryPreset) {
@@ -500,6 +679,56 @@ impl DemagogApp {
                                 }
                                 self.is_busy = false;
                                 self.progress_ratio = 1.0;
+                                finished = true;
+                            }
+                            WorkerMessage::DictionaryCheckFinished(result) => {
+                                self.is_busy = false;
+                                self.progress_ratio = 1.0;
+                                match result {
+                                    Ok(report) => {
+                                        let failures = report.order.failures.len();
+                                        let warnings = report.order.warnings.len();
+                                        let total = dictionary_check::GOLDEN_CASES.len();
+                                        let mut status = if failures > 0 {
+                                            format!(
+                                                "Проверка словарей: ошибок {failures} (эталонных фраз {}/{total})",
+                                                report.passed
+                                            )
+                                        } else if warnings > 0 {
+                                            format!(
+                                                "Проверка словарей: OK с предупреждениями (эталонных фраз {}/{total})",
+                                                report.passed
+                                            )
+                                        } else {
+                                            format!(
+                                                "Проверка словарей: OK (эталонных фраз {}/{total})",
+                                                report.passed
+                                            )
+                                        };
+                                        if report.audit.total_candidates > 0 {
+                                            status.push_str(&format!(
+                                                " | фонетических кандидатов: {}",
+                                                report.audit.total_candidates
+                                            ));
+                                        }
+                                        let level = if failures > 0 {
+                                            StatusLevel::Error
+                                        } else if warnings > 0 {
+                                            StatusLevel::Warning
+                                        } else {
+                                            StatusLevel::Success
+                                        };
+                                        pending_status = Some((level, status));
+                                        self.check_report = Some(report);
+                                        self.show_check_window = true;
+                                    }
+                                    Err(error) => {
+                                        pending_status = Some((
+                                            StatusLevel::Error,
+                                            format!("Проверка словарей: {error}"),
+                                        ));
+                                    }
+                                }
                                 finished = true;
                             }
                             WorkerMessage::BookLoaded(result) => {
@@ -1429,6 +1658,8 @@ impl DemagogApp {
         self.show_sidebar(ui, &ctx, theme);
 
         self.show_central_workspace(ui, &ctx, theme);
+
+        self.show_check_window(&ctx);
     }
 }
 
