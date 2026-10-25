@@ -68,6 +68,7 @@ pub enum DictionaryKind {
     RegexIndexed,
     DicStandard,
     DicStressConverter,
+    HardE,
 }
 
 impl DictionaryKind {
@@ -77,6 +78,7 @@ impl DictionaryKind {
             Self::RegexIndexed => "REX-IDX",
             Self::DicStandard => "DIC",
             Self::DicStressConverter => "DIC-STRESS",
+            Self::HardE => "HARD-E",
         }
     }
 }
@@ -89,18 +91,20 @@ pub enum DictionaryTag {
     CapToPlusConverter,
     PlusStressWords,
     PlusStressOrthoepy,
+    HardPronunciation,
     CleanupAndTranslit,
 }
 
 impl DictionaryTag {
     /// Display order of tag groups in the sidebar.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::NumbersAndDates,
         Self::YoFication,
         Self::HomographsCap,
         Self::CapToPlusConverter,
         Self::PlusStressWords,
         Self::PlusStressOrthoepy,
+        Self::HardPronunciation,
         Self::CleanupAndTranslit,
     ];
 
@@ -112,6 +116,7 @@ impl DictionaryTag {
             Self::CapToPlusConverter => "ЗАГЛАВНЫЕ -> '+'",
             Self::PlusStressWords => "УДАРЕНИЯ '+'",
             Self::PlusStressOrthoepy => "ОРФОЭПИЯ '+' (2.9М)",
+            Self::HardPronunciation => "ТВЁРДОЕ «Э»",
             Self::CleanupAndTranslit => "ЧИСТКА / ТРАНСЛИТ",
         }
     }
@@ -354,6 +359,14 @@ pub fn describe_dictionary(name: &str, content: &str) -> (DictionaryTag, String,
             .filter_map(|l| l.split_once('='))
             .any(|(_, rhs)| rhs.contains('+'));
 
+    if lower.contains("(hard-e)") {
+        return (
+            DictionaryTag::HardPronunciation,
+            "Твёрдое «э» в заимствованиях: тест → тэст (1.5 тыс. правил)".into(),
+            false,
+        );
+    }
+
     if lower.starts_with("10_") || lower.contains("числа") || lower.contains("chisla") {
         (
             DictionaryTag::NumbersAndDates,
@@ -388,6 +401,13 @@ pub fn describe_dictionary(name: &str, content: &str) -> (DictionaryTag, String,
         (
             DictionaryTag::YoFication,
             "Словарь Ё-фикации (337 тыс. слов): заменяет «е» на «ё» без знаков «+»".into(),
+            false,
+        )
+    } else if lower.starts_with("33_") || lower.contains("eyo_safe") {
+        (
+            DictionaryTag::YoFication,
+            "Дополнения ё-фикации из eyo-kernel: 2.4 тыс. форм, которых нет в словарях Demagog-RS"
+                .into(),
             false,
         )
     } else if lower.starts_with("35_") {
@@ -486,6 +506,19 @@ pub fn describe_dictionary(name: &str, content: &str) -> (DictionaryTag, String,
             "Словарь имён собственных, городов и фамилий со знаком ударения «+»".into(),
             true,
         )
+    } else if lower.starts_with("76_") {
+        (
+            DictionaryTag::PlusStressWords,
+            "Контекстные ударения из ruvoice-tts: фразы, маски и междометия (11.8 тыс. правил)"
+                .into(),
+            true,
+        )
+    } else if lower.starts_with("77_") {
+        (
+            DictionaryTag::PlusStressWords,
+            "Имена, топонимы и поправки ударений из ruvoice-tts (96.7 тыс. слов)".into(),
+            true,
+        )
     } else if lower.starts_with("95.") {
         (
             DictionaryTag::PlusStressOrthoepy,
@@ -567,6 +600,31 @@ mod tests {
         assert_eq!(loaded.theme(), ThemeMode::Warm);
         assert!(loaded.dark_mode.is_none());
         assert!(loaded.warm_mode.is_none());
+    }
+
+    #[test]
+    fn describes_imported_dictionaries() {
+        let (tag, description, plus) =
+            describe_dictionary("33_eyo_safe_дополнения.dic", "осужденная=осуждённая");
+        assert_eq!(tag, DictionaryTag::YoFication);
+        assert!(!plus);
+        assert!(description.contains("eyo"));
+
+        let (tag, description, plus) = describe_dictionary("76_ruvoice_фразы.dic", "гм=гмм");
+        assert_eq!(tag, DictionaryTag::PlusStressWords);
+        assert!(plus);
+        assert!(description.contains("Контекстные"));
+
+        let (tag, description, plus) =
+            describe_dictionary("77_ruvoice_имена.dic", "апплеты=аппл+еты");
+        assert_eq!(tag, DictionaryTag::PlusStressWords);
+        assert!(plus);
+        assert!(description.contains("Имена"));
+
+        let (tag, description, plus) = describe_dictionary("96_Твёрдое Э(hard-e).dic", "тест=тэст");
+        assert_eq!(tag, DictionaryTag::HardPronunciation);
+        assert!(!plus);
+        assert!(description.contains("э"));
     }
 
     #[test]

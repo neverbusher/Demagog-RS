@@ -20,6 +20,7 @@ pub fn tag_color(tag: DictionaryTag, theme: ThemeMode) -> Color32 {
             DictionaryTag::CapToPlusConverter => Color32::from_rgb(255, 180, 70),
             DictionaryTag::PlusStressWords => Color32::from_rgb(255, 125, 110),
             DictionaryTag::PlusStressOrthoepy => Color32::from_rgb(255, 95, 95),
+            DictionaryTag::HardPronunciation => Color32::from_rgb(235, 205, 110),
             DictionaryTag::CleanupAndTranslit => Color32::from_rgb(150, 200, 210),
         },
         ThemeMode::Light => match tag {
@@ -29,6 +30,7 @@ pub fn tag_color(tag: DictionaryTag, theme: ThemeMode) -> Color32 {
             DictionaryTag::CapToPlusConverter => Color32::from_rgb(166, 90, 0),
             DictionaryTag::PlusStressWords => Color32::from_rgb(176, 58, 46),
             DictionaryTag::PlusStressOrthoepy => Color32::from_rgb(176, 42, 42),
+            DictionaryTag::HardPronunciation => Color32::from_rgb(135, 95, 10),
             DictionaryTag::CleanupAndTranslit => Color32::from_rgb(42, 107, 120),
         },
         ThemeMode::Warm => match tag {
@@ -38,6 +40,7 @@ pub fn tag_color(tag: DictionaryTag, theme: ThemeMode) -> Color32 {
             DictionaryTag::CapToPlusConverter => Color32::from_rgb(128, 68, 0),
             DictionaryTag::PlusStressWords => Color32::from_rgb(140, 44, 34),
             DictionaryTag::PlusStressOrthoepy => Color32::from_rgb(140, 34, 34),
+            DictionaryTag::HardPronunciation => Color32::from_rgb(120, 85, 20),
             DictionaryTag::CleanupAndTranslit => Color32::from_rgb(32, 82, 92),
         },
     }

@@ -246,3 +246,17 @@ Demagog-RS включает сторонние библиотеки с откр�
 | zune-jpeg | 0.5.15 | MIT OR Apache-2.0 OR Zlib | https://github.com/etemesi254/zune-image/tree/dev/crates/zune-jpeg |
 
 Всего пакетов: 238.
+
+## Данные словарей
+
+Раздел ведётся вручную и не входит в вывод `cargo metadata`.
+
+Часть словарей подготовлена из открытых данных проекта ruvoice-tts / RuVoice-Stress-Converter:
+
+| Файл | Источник | Лицензия |
+|---|---|---|
+| `33_eyo_safe_дополнения.dic` | eyo-kernel (© Denis Seleznev) | MIT |
+| `76_ruvoice_фразы.dic`, `77_ruvoice_имена.dic` | словари ruvoice-tts: AOT, Викисловарь, Википедия | LGPL (AOT), CC BY-SA (Викисловарь/Википедия) |
+| `96_Твёрдое Э(hard-e).dic` | Викисловарь по ОЭСРЯ-2010 | CC BY-SA |
+
+Исходные данные и точные условия распространяются вместе с проектом ruvoice-tts; производные файлы распространяются на условиях соответствующих источников.

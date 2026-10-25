@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::domain::{DictionaryMeta, describe_dictionary};
 use crate::engine::dic_processor::DicProcessor;
+use crate::engine::hard_e_processor::HardEProcessor;
 use crate::engine::rex_processor::RexProcessor;
 use crate::io::encoding::decode_text_bytes;
 use crate::ports::TextProcessor;
@@ -78,8 +79,13 @@ pub fn compile_single_dictionary(path: &Path) -> Result<CompiledDictionary, Stri
         .extension()
         .and_then(|s| s.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("rex"));
+    let is_hard_e = name.to_lowercase().contains("(hard-e)");
 
-    let (processor, warnings): (Arc<dyn TextProcessor>, Vec<String>) = if is_rex {
+    let (processor, warnings): (Arc<dyn TextProcessor>, Vec<String>) = if is_hard_e {
+        let hard_e = HardEProcessor::compile(name.clone(), &content);
+        let warnings = hard_e.compile_warnings().to_vec();
+        (Arc::new(hard_e), warnings)
+    } else if is_rex {
         let rex = RexProcessor::compile(name.clone(), &content, encoding);
         let warnings = rex.compile_warnings().to_vec();
         (Arc::new(rex), warnings)
