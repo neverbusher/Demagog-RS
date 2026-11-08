@@ -420,6 +420,375 @@ fn ui_test_app(raw_text: &str, processed_text: &str, chunks: Vec<String>) -> Dem
 }
 
 #[test]
+fn diff_events_render_only_the_visible_rows() {
+    use crate::domain::{DictionaryKind, ReplacementEvent, StepReport};
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = ui_test_app("", "Результат", Vec::new());
+    app.active_tab = ActiveTab::DiffAndStats;
+    app.report.events = (0..1000)
+        .map(|index| ReplacementEvent {
+            dictionary_name: format!("dict-{index}"),
+            rule_summary: format!("rule-{index}"),
+            before_snippet: format!("before-{index}"),
+            after_snippet: format!("after-{index}"),
+        })
+        .collect();
+    app.report.steps = vec![StepReport {
+        dictionary_name: "dict".to_string(),
+        kind: DictionaryKind::DicStandard,
+        rule_count: 1,
+        elapsed_ms: 1,
+        replacements_count: 1000,
+    }];
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(900.0, 640.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+    harness.run();
+
+    let rendered = harness.get_all_by_label_contains("dict-").count();
+    assert!(
+        rendered <= 40,
+        "large diff list must be virtualized instead of rendering {rendered} events"
+    );
+}
+
+#[test]
+fn chunks_render_only_the_visible_rows() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    let chunks = (0..300)
+        .map(|index| format!("Чанк {index}"))
+        .collect::<Vec<_>>();
+    let mut app = ui_test_app("", "Результат", chunks);
+    app.active_tab = ActiveTab::Chunks;
+    app.result_state
+        .mark_computed(StressFormat::PlusBeforeVowel);
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(900.0, 640.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+    harness.run();
+
+    let rendered = harness.get_all_by_label_contains("Чанк #").count();
+    assert!(
+        rendered <= 24,
+        "large chunk list must be virtualized instead of rendering {rendered} cards"
+    );
+}
+
+#[test]
+fn finished_worker_messages_clear_cancel_flag() {
+    use std::sync::mpsc;
+
+    let (tx, rx) = mpsc::channel();
+
+    tx.send(WorkerMessage::BookLoaded(Ok(BookDocument {
+        title: "Книга".to_string(),
+        source_path: None,
+        raw_text: "Текст".to_string(),
+        processed_text: String::new(),
+        chunks: Vec::new(),
+    })))
+    .unwrap();
+
+    let mut app = ui_test_app("", "Результат", Vec::new());
+    app.rx = Some(rx);
+    app.is_busy = true;
+    app.cancel_flag = Some(Arc::new(AtomicBool::new(false)));
+    app.poll_worker();
+
+    assert!(app.cancel_flag.is_none());
+    assert!(!app.is_busy);
+}
+
+#[test]
+fn toolbar_controls_are_reachable_at_smallest_window() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    for font_size in [16.0, 20.0, 28.0] {
+        let mut app = ui_test_app("Исходный текст", "Результат", Vec::new());
+        app.settings.ui_font_size = font_size;
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1000.0, 640.0))
+            .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+        harness.run_steps(2);
+
+        for label in ["Открыть книгу", "Обработать", "Ещё"] {
+            let control = harness.get_by_label_contains(label);
+            let rect = control.rect();
+            assert!(
+                rect.min.y >= 0.0 && rect.max.y <= 640.0 + 0.5,
+                "{label:?} at {font_size} pt is clipped vertically: {rect:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn settings_content_reaches_the_bottom_at_smallest_window() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = ui_test_app("Исходный текст", "Результат", Vec::new());
+    app.active_tab = ActiveTab::Settings;
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1000.0, 640.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+    harness.run_steps(2);
+
+    harness.get_by_label_contains("О программе").scroll_to_me();
+    harness.run_steps(3);
+
+    let rect = harness.get_by_label_contains("О программе").rect();
+    assert!(
+        rect.min.y >= 0.0 && rect.max.y <= 640.0 + 0.5,
+        "About must be reachable in the settings scroll area: {rect:?}"
+    );
+}
+
+#[test]
+fn settings_expose_theme_hotkeys_and_about() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = ui_test_app("Исходный текст", "Результат", Vec::new());
+    app.active_tab = ActiveTab::Settings;
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1280.0, 900.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+    harness.run();
+
+    let app_version = format!("Demagog-RS {APP_VERSION}");
+    for label in [
+        "Тёмная",
+        "Светлая",
+        "Тёплая",
+        "Горячие клавиши",
+        "О программе",
+        app_version.as_str(),
+    ] {
+        assert!(
+            harness.get_all_by_label_contains(label).count() >= 1,
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn status_bar_remains_visible_at_large_user_fonts() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    for font_size in [16.0, 20.0, 28.0] {
+        let mut app = ui_test_app("Исходный текст", "Результат", Vec::new());
+        app.settings.ui_font_size = font_size;
+        app.set_status(StatusLevel::Info, "Готово: загружено 34 словаря");
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1000.0, 640.0))
+            .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+        harness.run_steps(2);
+
+        for label in ["Активно:", "Готово:"] {
+            let counter = harness.get_by_label_contains(label);
+            let rect = counter.rect();
+            assert!(
+                rect.min.y >= 0.0 && rect.max.y <= 640.0 + 0.5,
+                "{label:?} at {font_size} pt is clipped vertically: {rect:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn cancel_button_requests_a_newly_cancelable_operation() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::{NodeT, Queryable};
+    use std::sync::atomic::AtomicBool;
+
+    let mut app = ui_test_app("Исходный текст", "Результат", Vec::new());
+    app.is_busy = true;
+    let cancel = Arc::new(AtomicBool::new(false));
+    app.cancel_flag = Some(Arc::clone(&cancel));
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1120.0, 720.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+    harness.run_steps(2);
+
+    let cancel_button = harness.get_by_label_contains("Отмена");
+    assert!(!cancel_button.accesskit_node().is_disabled());
+    cancel_button.click();
+    harness.run_steps(2);
+    assert!(cancel.load(Ordering::Relaxed));
+}
+
+#[test]
+fn primary_controls_stay_inside_window_at_large_user_fonts() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    for font_size in [16.0, 20.0, 28.0] {
+        let mut app = ui_test_app("Исходный текст", "Результат", Vec::new());
+        app.settings.ui_font_size = font_size;
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1000.0, 640.0))
+            .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+        harness.run();
+
+        for label in [
+            "Исходный текст (",
+            "Результат (",
+            "Чанки (",
+            "Журнал замен",
+            "Настройки",
+            "Активно:",
+        ] {
+            let node = harness.get_by_label_contains(label);
+            let rect = node.rect();
+            assert!(
+                rect.min.x >= 0.0 && rect.max.x <= 1000.0 + 0.5,
+                "{label:?} at {font_size} pt is clipped horizontally: {rect:?}"
+            );
+            assert!(
+                rect.min.y >= 0.0 && rect.max.y <= 640.0 + 0.5,
+                "{label:?} at {font_size} pt is clipped vertically: {rect:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn poll_worker_resets_cancel_flag_on_book_load() {
+    let mut app = ui_test_app("", "", Vec::new());
+    app.is_busy = true;
+    app.cancel_flag = Some(Arc::new(AtomicBool::new(false)));
+    let (tx, rx) = mpsc::channel();
+    tx.send(WorkerMessage::BookLoaded(Ok(BookDocument {
+        title: "Тест".to_string(),
+        source_path: None,
+        raw_text: "Текст".to_string(),
+        processed_text: String::new(),
+        chunks: Vec::new(),
+    })))
+    .unwrap();
+    app.rx = Some(rx);
+
+    app.poll_worker();
+
+    assert!(app.cancel_flag.is_none());
+    assert!(!app.is_busy);
+}
+
+#[test]
+fn settings_about_is_scrollable_at_min_height() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = ui_test_app("", "", Vec::new());
+    app.active_tab = ActiveTab::Settings;
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1000.0, 640.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+    harness.run();
+
+    harness.get_by_label_contains("О программе").scroll_to_me();
+    harness.run();
+
+    let about = harness.get_by_label_contains("О программе");
+    let rect = about.rect();
+    assert!(
+        rect.min.y >= 0.0 && rect.max.y <= 640.0 + 0.5,
+        "about section is not visible in the viewport: {rect:?}"
+    );
+}
+
+#[test]
+fn journal_heading_stays_visible_with_many_steps() {
+    use crate::domain::{DictionaryKind, ReplacementEvent, StepReport};
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = ui_test_app("", "Результат", Vec::new());
+    app.active_tab = ActiveTab::DiffAndStats;
+    app.report.steps = (0..40)
+        .map(|i| StepReport {
+            dictionary_name: format!("dict-{i}"),
+            kind: DictionaryKind::DicStandard,
+            rule_count: 10,
+            elapsed_ms: 1,
+            replacements_count: 1,
+        })
+        .collect();
+    app.report.events = (0..120)
+        .map(|i| ReplacementEvent {
+            dictionary_name: format!("dict-{i}"),
+            rule_summary: format!("rule-{i}"),
+            before_snippet: format!("before-{i}"),
+            after_snippet: format!("after-{i}"),
+        })
+        .collect();
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1000.0, 640.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+    harness.run_steps(2);
+
+    let heading = harness.get_by_label_contains("🔍 Журнал");
+    let heading_rect = heading.rect();
+    assert!(
+        heading_rect.min.y >= 0.0
+            && heading_rect.max.y <= 640.0
+            && heading_rect.min.x >= 0.0
+            && heading_rect.max.x <= 1000.0,
+        "journal heading is clipped or out of view with many timing rows: {heading_rect:?}"
+    );
+
+    let rendered = harness.get_all_by_label_contains("before-").count();
+    assert!(
+        rendered <= 40,
+        "large diff list must be virtualized instead of rendering {rendered} snapshots"
+    );
+}
+
+#[test]
+fn compact_toolbar_keeps_actions_on_one_row_at_limited_width() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    for font_size in [16.0, 20.0, 28.0] {
+        let mut app = ui_test_app("Исходный текст", "Результат", Vec::new());
+        app.settings.ui_font_size = font_size;
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1000.0, 640.0))
+            .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+        harness.run();
+
+        let open = harness.get_by_label_contains("Открыть книгу");
+        let more = harness.get_by_label_contains("Ещё");
+        let open_rect = open.rect();
+        let more_rect = more.rect();
+
+        assert!(
+            more_rect.max.x <= 1000.0 + 0.5,
+            "overflow menu is clipped at {font_size} pt: {more_rect:?}"
+        );
+        assert!(
+            open_rect.min.y >= 0.0
+                && open_rect.max.y <= 640.0
+                && open_rect.min.y < 100.0
+                && more_rect.min.y >= 0.0
+                && more_rect.max.y <= 640.0,
+            "toolbar rows overlap or are clipped at {font_size} pt: open={open_rect:?} more={more_rect:?}"
+        );
+    }
+}
+
+#[test]
 fn stale_chunk_banner_rebuilds_chunks_through_the_ui() {
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;

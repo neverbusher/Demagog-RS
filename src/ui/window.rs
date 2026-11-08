@@ -3,6 +3,8 @@ use std::sync::{Arc, OnceLock};
 use egui::{IconData, ViewportBuilder};
 
 static APP_ICON: OnceLock<Arc<IconData>> = OnceLock::new();
+static RUNTIME_ICONS: OnceLock<(Arc<IconData>, Arc<IconData>)> = OnceLock::new();
+static ICON_FILE: &[u8] = include_bytes!("../../assets/icon.ico");
 
 pub(crate) fn app_icon() -> Arc<IconData> {
     APP_ICON
@@ -31,8 +33,54 @@ pub(crate) fn app_icon() -> Arc<IconData> {
 /// The software backend only calls winit's `set_window_icon`, which sets
 /// `ICON_SMALL`. Set both sizes explicitly so the taskbar and Alt+Tab match
 /// the glow build.
+fn runtime_icon_at(wanted_size: u16) -> IconData {
+    let image_count = u16::from_le_bytes([ICON_FILE[4], ICON_FILE[5]]);
+    for index in 0..image_count {
+        let base = 6 + usize::from(index) * 16;
+        if u16::from(ICON_FILE[base]) != wanted_size {
+            continue;
+        }
+        let byte_count =
+            u32::from_le_bytes(ICON_FILE[base + 8..base + 12].try_into().unwrap()) as usize;
+        let byte_offset =
+            u32::from_le_bytes(ICON_FILE[base + 12..base + 16].try_into().unwrap()) as usize;
+        let decoder = png::Decoder::new(std::io::Cursor::new(
+            &ICON_FILE[byte_offset..byte_offset + byte_count],
+        ));
+        let mut reader = decoder
+            .read_info()
+            .expect("embedded runtime icon must decode");
+        let mut rgba = vec![0; reader.output_buffer_size()];
+        let info = reader
+            .next_frame(&mut rgba)
+            .expect("embedded runtime icon must decode");
+        rgba.truncate(info.buffer_size());
+        assert_eq!(info.color_type, png::ColorType::Rgba);
+        assert_eq!(info.bit_depth, png::BitDepth::Eight);
+        rgba.truncate(usize::try_from(info.width * info.height * 4).unwrap());
+        return IconData {
+            rgba,
+            width: info.width,
+            height: info.height,
+        };
+    }
+    IconData {
+        rgba: Vec::new(),
+        width: 0,
+        height: 0,
+    }
+}
+
+pub(crate) fn runtime_icons() -> (Arc<IconData>, Arc<IconData>) {
+    RUNTIME_ICONS
+        .get_or_init(|| (Arc::new(runtime_icon_at(16)), Arc::new(runtime_icon_at(32))))
+        .clone()
+}
+
+/// The program icon has separate small and large representations. Use both so
+/// the title bar and Alt+Tab/taskbar slots do not scale the same 512px PNG.
 #[cfg(windows)]
-pub(crate) fn apply_window_icon(icon: &IconData) -> bool {
+pub(crate) fn apply_window_icon(_icon: &IconData) -> bool {
     use std::cell::Cell;
     use std::ffi::c_void;
     use std::ptr::null_mut;
@@ -130,6 +178,77 @@ pub(crate) fn apply_window_icon(icon: &IconData) -> bool {
         1
     }
 
+    unsafe fn icon_for(icon: &IconData) -> Hicon {
+        let hdc = unsafe { GetDC(FOUND_WINDOW.with(Cell::get)) };
+        if hdc.is_null() {
+            return null_mut();
+        }
+        let bmi = BitmapInfo {
+            header: BitmapInfoHeader {
+                bi_size: std::mem::size_of::<BitmapInfoHeader>() as u32,
+                bi_width: icon.width as i32,
+                bi_height: icon.height as i32,
+                bi_planes: 1,
+                bi_bit_count: 32,
+                bi_compression: 0,
+                bi_size_image: 0,
+                bi_x_pels_per_meter: 0,
+                bi_y_pels_per_meter: 0,
+                bi_clr_used: 0,
+                bi_clr_important: 0,
+            },
+            colors: [0],
+        };
+        let mut bits: *mut c_void = null_mut();
+        let color = unsafe { CreateDIBSection(hdc, &bmi, 0, &mut bits, null_mut(), 0) };
+        if color.is_null() || bits.is_null() {
+            unsafe { ReleaseDC(FOUND_WINDOW.with(Cell::get), hdc) };
+            return null_mut();
+        }
+
+        let pixel_width = icon.width as usize;
+        let pixel_height = icon.height as usize;
+        let stride = pixel_width * 4;
+        for y in 0..pixel_height {
+            let source = &icon.rgba[(pixel_height - 1 - y) * stride..][..stride];
+            let destination = unsafe { (bits as *mut u8).add(y * stride) };
+            for x in 0..pixel_width {
+                unsafe {
+                    *destination.add(x * 4) = source[x * 4 + 2];
+                    *destination.add(x * 4 + 1) = source[x * 4 + 1];
+                    *destination.add(x * 4 + 2) = source[x * 4];
+                    *destination.add(x * 4 + 3) = source[x * 4 + 3];
+                }
+            }
+        }
+
+        let mask_stride = pixel_width.div_ceil(16) * 2;
+        let mask_bits = vec![0u8; mask_stride * pixel_height];
+        let mask = unsafe {
+            CreateBitmap(
+                icon.width as i32,
+                icon.height as i32,
+                1,
+                1,
+                mask_bits.as_ptr() as *const c_void,
+            )
+        };
+        let info = IconInfo {
+            f_icon: 1,
+            x_hotspot: 0,
+            y_hotspot: 0,
+            hbm_mask: mask,
+            hbm_color: color,
+        };
+        let hicon = unsafe { CreateIconIndirect(&info) };
+        unsafe {
+            DeleteObject(color);
+            DeleteObject(mask);
+            ReleaseDC(FOUND_WINDOW.with(Cell::get), hdc);
+        }
+        hicon
+    }
+
     FOUND_WINDOW.with(|found| found.set(null_mut()));
     unsafe { EnumWindows(find_main_window, std::process::id() as isize) };
     let hwnd = FOUND_WINDOW.with(Cell::get);
@@ -137,77 +256,13 @@ pub(crate) fn apply_window_icon(icon: &IconData) -> bool {
         return false;
     }
 
-    let hdc = unsafe { GetDC(hwnd) };
-    if hdc.is_null() {
+    let (small, big) = runtime_icons();
+    let hicon_small = unsafe { icon_for(&small) };
+    if hicon_small.is_null() {
         return false;
     }
-
-    let width = icon.width as i32;
-    let height = icon.height as i32;
-    let bmi = BitmapInfo {
-        header: BitmapInfoHeader {
-            bi_size: std::mem::size_of::<BitmapInfoHeader>() as u32,
-            bi_width: width,
-            bi_height: height,
-            bi_planes: 1,
-            bi_bit_count: 32,
-            bi_compression: 0,
-            bi_size_image: 0,
-            bi_x_pels_per_meter: 0,
-            bi_y_pels_per_meter: 0,
-            bi_clr_used: 0,
-            bi_clr_important: 0,
-        },
-        colors: [0],
-    };
-    let mut bits: *mut c_void = null_mut();
-    let color = unsafe { CreateDIBSection(hdc, &bmi, 0, &mut bits, null_mut(), 0) };
-    if color.is_null() || bits.is_null() {
-        unsafe { ReleaseDC(hwnd, hdc) };
-        return false;
-    }
-
-    let pixel_width = icon.width as usize;
-    let pixel_height = icon.height as usize;
-    let stride = pixel_width * 4;
-    for y in 0..pixel_height {
-        let source = &icon.rgba[(pixel_height - 1 - y) * stride..][..stride];
-        let destination = unsafe { (bits as *mut u8).add(y * stride) };
-        for x in 0..pixel_width {
-            unsafe {
-                *destination.add(x * 4) = source[x * 4 + 2];
-                *destination.add(x * 4 + 1) = source[x * 4 + 1];
-                *destination.add(x * 4 + 2) = source[x * 4];
-                *destination.add(x * 4 + 3) = source[x * 4 + 3];
-            }
-        }
-    }
-
-    let mask_stride = pixel_width.div_ceil(16) * 2;
-    let mask_bits = vec![0u8; mask_stride * pixel_height];
-    let mask = unsafe { CreateBitmap(width, height, 1, 1, mask_bits.as_ptr() as *const c_void) };
-    if mask.is_null() {
-        unsafe {
-            DeleteObject(color);
-            ReleaseDC(hwnd, hdc);
-        }
-        return false;
-    }
-
-    let info = IconInfo {
-        f_icon: 1,
-        x_hotspot: 0,
-        y_hotspot: 0,
-        hbm_mask: mask,
-        hbm_color: color,
-    };
-    let hicon = unsafe { CreateIconIndirect(&info) };
-    unsafe {
-        DeleteObject(color);
-        DeleteObject(mask);
-        ReleaseDC(hwnd, hdc);
-    }
-    if hicon.is_null() {
+    let hicon_big = unsafe { icon_for(&big) };
+    if hicon_big.is_null() {
         return false;
     }
 
@@ -215,8 +270,8 @@ pub(crate) fn apply_window_icon(icon: &IconData) -> bool {
     const ICON_SMALL: usize = 0;
     const ICON_BIG: usize = 1;
     unsafe {
-        SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon as isize);
-        SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon as isize);
+        SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon_small as isize);
+        SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon_big as isize);
     }
     true
 }
@@ -345,6 +400,17 @@ fn work_area() -> Option<WorkArea> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_icons_use_small_and_big_slots() {
+        let (small, big) = runtime_icons();
+        assert_eq!(small.width, 16);
+        assert_eq!(small.height, 16);
+        assert_eq!(big.width, 32);
+        assert_eq!(big.height, 32);
+        assert_eq!(small.rgba.len(), 16 * 16 * 4);
+        assert_eq!(big.rgba.len(), 32 * 32 * 4);
+    }
 
     fn assert_fits(work_width: f32, work_height: f32) -> WindowMetrics {
         let metrics = fit_to_work_area(work_width, work_height);

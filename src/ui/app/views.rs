@@ -7,57 +7,211 @@ impl DemagogApp {
         ctx: &egui::Context,
         theme: ThemeMode,
     ) {
-        egui::Panel::top("top_toolbar").show_inside(ui, |ui| {
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add_enabled(!self.is_busy, egui::Button::new("Открыть книгу"))
-                    .on_hover_text("Открыть TXT, FB2, FB2.ZIP, EPUB, DOCX, ZIP или MD (Ctrl+O)")
-                    .clicked()
-                {
-                    self.open_book_dialog(ctx.clone());
-                }
+        let compact = ui.available_width() < 1200.0 || self.settings.ui_font_size >= 20.0;
+        if compact {
+            self.show_compact_top_toolbar(ui, ctx, theme);
+        } else {
+            self.show_full_top_toolbar(ui, ctx, theme);
+        }
+    }
 
-                let enabled_dictionaries =
-                    self.dictionaries.iter().filter(|d| d.meta.enabled).count();
-                let can_run = !self.is_busy && enabled_dictionaries > 0;
-                let run_disabled_hint = if enabled_dictionaries == 0 {
-                    "Включите хотя бы один словарь"
-                } else {
-                    "Дождитесь завершения текущей операции"
-                };
+    pub(super) fn show_full_top_toolbar(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        theme: ThemeMode,
+    ) {
+        egui::Frame::side_top_panel(ui.style())
+            .fill(ui.style().visuals.panel_fill)
+            .inner_margin(egui::Margin::symmetric(8, 4))
+            .show(ui, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .add_enabled(!self.is_busy, egui::Button::new("Открыть книгу"))
+                        .on_hover_text("Открыть TXT, FB2, FB2.ZIP, EPUB, DOCX, ZIP или MD (Ctrl+O)")
+                        .clicked()
+                    {
+                        self.open_book_dialog(ctx.clone());
+                    }
 
-                let (primary_fill, primary_text) = palette::primary_button(theme);
-                let run_btn =
-                    egui::Button::new(RichText::new("⚡ Обработать").strong().color(primary_text))
-                        .fill(primary_fill);
+                    let enabled_dictionaries =
+                        self.dictionaries.iter().filter(|d| d.meta.enabled).count();
+                    let can_run = !self.is_busy && enabled_dictionaries > 0;
+                    let run_disabled_hint = if enabled_dictionaries == 0 {
+                        "Включите хотя бы один словарь"
+                    } else {
+                        "Дождитесь завершения текущей операции"
+                    };
 
-                let run_response = ui
-                    .add_enabled(can_run, run_btn)
-                    .on_hover_text("Обработать исходный текст (Ctrl+Enter)")
-                    .on_disabled_hover_text(run_disabled_hint);
-                if run_response.clicked() {
-                    self.capture_diff_on_run = false;
-                    self.start_processing(ctx.clone(), false);
-                }
+                    let (primary_fill, primary_text) = palette::primary_button(theme);
+                    let run_btn = egui::Button::new(
+                        RichText::new("⚡ Обработать").strong().color(primary_text),
+                    )
+                    .fill(primary_fill);
 
-                if ui
-                    .add_enabled(can_run, egui::Button::new("🔬 С журналом замен"))
-                    .on_hover_text("Собрать журнал замен (Ctrl+Shift+Enter)")
-                    .on_disabled_hover_text(run_disabled_hint)
-                    .clicked()
-                {
-                    self.capture_diff_on_run = true;
-                    self.start_processing(ctx.clone(), true);
-                }
+                    let run_response = ui
+                        .add_enabled(can_run, run_btn)
+                        .on_hover_text("Обработать исходный текст (Ctrl+Enter)")
+                        .on_disabled_hover_text(run_disabled_hint);
+                    if run_response.clicked() {
+                        self.capture_diff_on_run = false;
+                        self.start_processing(ctx.clone(), false);
+                    }
 
-                ui.separator();
+                    if ui
+                        .add_enabled(can_run, egui::Button::new("🔬 С журналом замен"))
+                        .on_hover_text("Собрать журнал замен (Ctrl+Shift+Enter)")
+                        .on_disabled_hover_text(run_disabled_hint)
+                        .clicked()
+                    {
+                        self.capture_diff_on_run = true;
+                        self.start_processing(ctx.clone(), true);
+                    }
 
-                let prev_fmt = self.settings.stress_format;
-                ui.add_enabled_ui(!self.is_busy, |ui| {
-                    let format_label =
-                        format!("Формат: {} ▼", self.settings.stress_format.short_label());
-                    ui.menu_button(format_label, |ui| {
+                    ui.separator();
+                    let prev_fmt = self.settings.stress_format;
+                    ui.add_enabled_ui(!self.is_busy, |ui| {
+                        let format_label =
+                            format!("Формат: {} ▼", self.settings.stress_format.short_label());
+                        ui.menu_button(format_label, |ui| {
+                            for fmt in [
+                                StressFormat::PlusBeforeVowel,
+                                StressFormat::AcuteAccent,
+                                StressFormat::CleanYoOnly,
+                            ] {
+                                if ui
+                                    .selectable_value(
+                                        &mut self.settings.stress_format,
+                                        fmt,
+                                        fmt.label(),
+                                    )
+                                    .clicked()
+                                {
+                                    ui.close();
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text("Формат вывода ударений");
+                    });
+                    if self.settings.stress_format != prev_fmt {
+                        if !self.reformat_result() {
+                            self.settings.stress_format = prev_fmt;
+                        }
+                        self.save_settings();
+                    }
+
+                    ui.separator();
+                    if ui
+                        .add_enabled(
+                            !self.document.processed_text.is_empty(),
+                            egui::Button::new("💾 Сохранить результат"),
+                        )
+                        .on_hover_text("Сохранить результат в TXT (Ctrl+S)")
+                        .on_disabled_hover_text("Сначала обработайте текст")
+                        .clicked()
+                    {
+                        self.save_processed_txt();
+                    }
+                    let can_export = !self.document.processed_text.trim().is_empty();
+                    if ui
+                        .add_enabled(can_export, egui::Button::new("📦 Экспорт чанков"))
+                        .on_hover_text("Экспортировать чанки в JSON (Ctrl+E)")
+                        .on_disabled_hover_text("Результат пуст — экспортировать нечего")
+                        .clicked()
+                    {
+                        self.export_chunks_json();
+                    }
+                    ui.separator();
+                    let theme_menu = ui.menu_button(theme_icon(theme), |ui| {
+                        for candidate in [ThemeMode::Dark, ThemeMode::Light, ThemeMode::Warm] {
+                            let label = format!("{} {}", theme_icon(candidate), candidate.label());
+                            if ui.selectable_label(candidate == theme, label).clicked() {
+                                self.settings.set_theme(candidate);
+                                apply_style_settings(ui.ctx(), &self.settings);
+                                self.save_settings();
+                                ui.close();
+                            }
+                        }
+                    });
+                    theme_menu.response.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            true,
+                            format!("Тема: {}", theme.label()),
+                        )
+                    });
+                    theme_menu.response.on_hover_text("Тема оформления");
+                });
+                ui.add_space(4.0);
+            });
+    }
+
+    pub(super) fn show_compact_top_toolbar(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        theme: ThemeMode,
+    ) {
+        egui::Frame::side_top_panel(ui.style())
+            .fill(ui.style().visuals.panel_fill)
+            .inner_margin(egui::Margin::symmetric(8, 4))
+            .show(ui, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    let open_response = ui
+                        .add_enabled(!self.is_busy, egui::Button::new("Открыть"))
+                        .on_hover_text(
+                            "Открыть TXT, FB2, FB2.ZIP, EPUB, DOCX, ZIP или MD (Ctrl+O)",
+                        );
+                    open_response.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            !self.is_busy,
+                            "Открыть книгу",
+                        )
+                    });
+                    if open_response.clicked() {
+                        self.open_book_dialog(ctx.clone());
+                    }
+                    let enabled_dictionaries =
+                        self.dictionaries.iter().filter(|d| d.meta.enabled).count();
+                    let can_run = !self.is_busy && enabled_dictionaries > 0;
+                    let run_disabled_hint = if enabled_dictionaries == 0 {
+                        "Включите хотя бы один словарь"
+                    } else {
+                        "Дождитесь завершения текущей операции"
+                    };
+                    let (primary_fill, primary_text) = palette::primary_button(theme);
+                    let run_btn =
+                        egui::Button::new(RichText::new("Обработать").strong().color(primary_text))
+                            .fill(primary_fill);
+                    let run_response = ui
+                        .add_enabled(can_run, run_btn)
+                        .on_hover_text("Обработать исходный текст (Ctrl+Enter)")
+                        .on_disabled_hover_text(run_disabled_hint);
+                    if run_response.clicked() {
+                        self.capture_diff_on_run = false;
+                        self.start_processing(ctx.clone(), false);
+                    }
+
+                    let prev_fmt = self.settings.stress_format;
+                    ui.menu_button("Ещё", |ui| {
+                        if ui.button("Открыть книгу").clicked() {
+                            self.open_book_dialog(ctx.clone());
+                            ui.close();
+                        }
+                        if ui
+                            .add_enabled(can_run, egui::Button::new("С журналом замен"))
+                            .on_disabled_hover_text(run_disabled_hint)
+                            .clicked()
+                        {
+                            self.capture_diff_on_run = true;
+                            self.start_processing(ctx.clone(), true);
+                            ui.close();
+                        }
+                        ui.separator();
                         for fmt in [
                             StressFormat::PlusBeforeVowel,
                             StressFormat::AcuteAccent,
@@ -74,64 +228,50 @@ impl DemagogApp {
                                 ui.close();
                             }
                         }
-                    })
-                    .response
-                    .on_hover_text("Формат вывода ударений");
-                });
-                if self.settings.stress_format != prev_fmt {
-                    if !self.reformat_result() {
-                        self.settings.stress_format = prev_fmt;
-                    }
-                    self.save_settings();
-                }
-
-                ui.separator();
-
-                if ui
-                    .add_enabled(
-                        !self.document.processed_text.is_empty(),
-                        egui::Button::new("💾 Сохранить результат"),
-                    )
-                    .on_hover_text("Сохранить результат в TXT (Ctrl+S)")
-                    .on_disabled_hover_text("Сначала обработайте текст")
-                    .clicked()
-                {
-                    self.save_processed_txt();
-                }
-                let can_export = !self.document.processed_text.trim().is_empty();
-                if ui
-                    .add_enabled(can_export, egui::Button::new("📦 Экспорт чанков"))
-                    .on_hover_text("Экспортировать чанки в JSON (Ctrl+E)")
-                    .on_disabled_hover_text("Результат пуст — экспортировать нечего")
-                    .clicked()
-                {
-                    self.export_chunks_json();
-                }
-
-                ui.separator();
-
-                let theme_menu = ui.menu_button(theme_icon(theme), |ui| {
-                    for candidate in [ThemeMode::Dark, ThemeMode::Light, ThemeMode::Warm] {
-                        let label = format!("{} {}", theme_icon(candidate), candidate.label());
-                        if ui.selectable_label(candidate == theme, label).clicked() {
-                            self.settings.set_theme(candidate);
-                            apply_style_settings(ui.ctx(), &self.settings);
-                            self.save_settings();
+                        ui.separator();
+                        if ui
+                            .add_enabled(
+                                !self.document.processed_text.is_empty(),
+                                egui::Button::new("Сохранить результат"),
+                            )
+                            .on_disabled_hover_text("Сначала обработайте текст")
+                            .clicked()
+                        {
+                            self.save_processed_txt();
                             ui.close();
+                        }
+                        if ui
+                            .add_enabled(
+                                !self.document.processed_text.trim().is_empty(),
+                                egui::Button::new("Экспорт чанков"),
+                            )
+                            .on_disabled_hover_text("Результат пуст")
+                            .clicked()
+                        {
+                            self.export_chunks_json();
+                            ui.close();
+                        }
+                        ui.separator();
+                        for candidate in [ThemeMode::Dark, ThemeMode::Light, ThemeMode::Warm] {
+                            let label = format!("{} {}", theme_icon(candidate), candidate.label());
+                            if ui.selectable_label(candidate == theme, label).clicked() {
+                                self.settings.set_theme(candidate);
+                                apply_style_settings(ui.ctx(), &self.settings);
+                                self.save_settings();
+                                ui.close();
+                            }
+                        }
+                    });
+                    if self.settings.stress_format != prev_fmt {
+                        if !self.reformat_result() {
+                            self.settings.stress_format = prev_fmt;
+                        } else {
+                            self.save_settings();
                         }
                     }
                 });
-                theme_menu.response.widget_info(|| {
-                    egui::WidgetInfo::labeled(
-                        egui::WidgetType::Button,
-                        true,
-                        format!("Тема: {}", theme.label()),
-                    )
-                });
-                theme_menu.response.on_hover_text("Тема оформления");
+                ui.add_space(4.0);
             });
-            ui.add_space(4.0);
-        });
     }
 
     pub(super) fn show_status_bar(&mut self, ui: &mut egui::Ui, theme: ThemeMode) {
@@ -150,8 +290,6 @@ impl DemagogApp {
                 format_num(active_rules)
             );
 
-            // A long status line and the counters do not fit one row on a
-            // narrow window or with a large UI font: stack them instead.
             let font = self.settings.ui_font_size;
             let estimate = counters.chars().count() as f32 * font * 0.6
                 + self.status_line.chars().count() as f32 * font * 0.6
@@ -161,9 +299,13 @@ impl DemagogApp {
                     140.0
                 }
                 + if self.is_busy { 300.0 } else { 40.0 };
+            // Wrap only when the row is actually tight; otherwise keep the
+            // status and counters on a single line.
             if ui.available_width() < estimate {
-                ui.horizontal_wrapped(|ui| self.show_status_left(ui, theme));
-                ui.horizontal_wrapped(|ui| self.show_status_counters(ui, theme, &counters));
+                ui.vertical(|ui| {
+                    self.show_status_left(ui, theme);
+                    self.show_status_counters(ui, theme, &counters);
+                });
             } else {
                 ui.horizontal(|ui| {
                     self.show_status_left(ui, theme);
@@ -767,105 +909,91 @@ impl DemagogApp {
         ui.separator();
 
         let chunk_total = self.document.chunks.len();
-        let chunk_shown = chunk_total.min(self.chunk_render_limit.max(CHUNK_BATCH));
-        let mut copied_status: Option<(StatusLevel, String)> = None;
-        let chunks_output = ScrollArea::vertical().show(ui, |ui| {
-                        if self.document.chunks.is_empty() {
-                            ui.label("Нажмите «Обработать», чтобы нарезать текст на чанки по границам предложений. Чанк можно скопировать отдельно, а все — экспортировать в JSON для ComfyUI.");
-                        }
-                        for (idx, chunk) in self.document.chunks.iter().take(chunk_shown).enumerate() {
-                            let is_copied = self.last_copied_chunk == Some(idx);
-                            let mut frame = egui::Frame::group(ui.style());
-                            if is_copied {
-                                frame = frame.stroke(egui::Stroke::new(
-                                    2.0_f32,
-                                    palette::success_text(theme),
-                                ));
-                            }
+        let text_width = (ui.available_width() - 44.0).max(120.0);
+        let chars_per_line = (text_width / (editor_font.size * 0.65)).max(8.0);
+        let estimated_lines =
+            ((self.settings.chunk_config.max_chars as f32 / chars_per_line).ceil()).max(1.0);
+        let row_height = line_height * estimated_lines
+            + 64.0
+            + ui.spacing().interact_size.y
+            + ui.spacing().item_spacing.y * 3.0;
 
-                            frame
-                                .inner_margin(egui::Margin::same(10))
-                                .show(ui, |ui| {
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label(
-                                            RichText::new(format!(
-                                                "Чанк #{}/{} ({} симв.)",
-                                                idx + 1,
-                                                self.document.chunks.len(),
-                                                chunk.chars().count()
-                                            ))
+        if chunk_total == 0 {
+            ui.label("Нажмите «Обработать», чтобы нарезать текст на чанки по границам предложений. Чанк можно скопировать отдельно, а все — экспортировать в JSON для ComfyUI.");
+        } else {
+            let mut copied_status: Option<(StatusLevel, String)> = None;
+            ScrollArea::vertical().id_salt("chunks_scroll").show_rows(
+                ui,
+                row_height,
+                chunk_total,
+                |ui, rows| {
+                    for idx in rows {
+                        let chunk = &self.document.chunks[idx];
+                        let is_copied = self.last_copied_chunk == Some(idx);
+                        let mut frame = egui::Frame::group(ui.style());
+                        if is_copied {
+                            frame = frame
+                                .stroke(egui::Stroke::new(2.0_f32, palette::success_text(theme)));
+                        }
+
+                        frame.inner_margin(egui::Margin::same(10)).show(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Чанк #{}/{} ({} симв.)",
+                                        idx + 1,
+                                        chunk_total,
+                                        chunk.chars().count()
+                                    ))
+                                    .strong(),
+                                );
+                                if is_copied {
+                                    ui.label(
+                                        RichText::new("✓ Скопировано")
+                                            .color(palette::success_text(theme))
                                             .strong(),
-                                        );
-                                        if is_copied {
-                                            ui.label(
-                                                RichText::new("✓ Скопировано")
-                                                    .color(palette::success_text(theme))
-                                                    .strong(),
-                                            );
-                                        }
-                                        if ui
-                                            .button("📋 Копировать чанк")
-                                            .clicked()
-                                        {
-                                            match arboard::Clipboard::new()
-                                                .and_then(|mut cb| cb.set_text(chunk.clone()))
-                                            {
-                                                Ok(()) => {
-                                                    self.last_copied_chunk = Some(idx);
-                                                    copied_status = Some((
-                                                        StatusLevel::Success,
-                                                        format!(
-                                                            "Чанк #{} скопирован в буфер обмена",
-                                                            idx + 1
-                                                        ),
-                                                    ));
-                                                }
-                                                Err(err) => {
-                                                    copied_status = Some((
-                                                        StatusLevel::Error,
-                                                        format!(
-                                                            "Не удалось скопировать чанк: {err}"
-                                                        ),
-                                                    ));
-                                                }
-                                            }
-                                        }
-                                    });
-                                    ui.add_space(4.0);
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(chunk)
-                                                .font(editor_font.clone())
-                                                .line_height(Some(line_height)),
-                                        )
-                                        .selectable(true),
                                     );
-                                });
-                            ui.add_space(6.0);
-                        }
-                        if chunk_shown < chunk_total {
+                                }
+                                if ui.button("📋 Копировать чанк").clicked() {
+                                    match arboard::Clipboard::new()
+                                        .and_then(|mut cb| cb.set_text(chunk.clone()))
+                                    {
+                                        Ok(()) => {
+                                            self.last_copied_chunk = Some(idx);
+                                            copied_status = Some((
+                                                StatusLevel::Success,
+                                                format!(
+                                                    "Чанк #{} скопирован в буфер обмена",
+                                                    idx + 1
+                                                ),
+                                            ));
+                                        }
+                                        Err(err) => {
+                                            copied_status = Some((
+                                                StatusLevel::Error,
+                                                format!("Не удалось скопировать чанк: {err}"),
+                                            ));
+                                        }
+                                    }
+                                }
+                            });
                             ui.add_space(4.0);
-                            ui.label(
-                                RichText::new(format!(
-                                    "Показаны первые {} из {} чанков — прокрутите ниже, чтобы догрузить.",
-                                    format_num(chunk_shown),
-                                    format_num(chunk_total)
-                                ))
-                                .weak(),
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(chunk)
+                                        .font(editor_font.clone())
+                                        .line_height(Some(line_height)),
+                                )
+                                .selectable(true),
                             );
-                        }
-                    });
-        if chunk_shown < chunk_total {
-            let near_bottom = chunks_output.state.offset.y + chunks_output.inner_rect.height()
-                >= chunks_output.content_size.y - 120.0;
-            let fits = chunks_output.content_size.y <= chunks_output.inner_rect.height() + 1.0;
-            if near_bottom || fits {
-                self.chunk_render_limit = (chunk_shown + CHUNK_BATCH).min(chunk_total);
-                ui.ctx().request_repaint();
+                        });
+                        ui.add_space(6.0);
+                    }
+                },
+            );
+            if let Some((level, text)) = copied_status {
+                self.set_status(level, text);
             }
-        }
-        if let Some((level, text)) = copied_status {
-            self.set_status(level, text);
         }
     }
 
@@ -892,12 +1020,13 @@ impl DemagogApp {
             self.refresh_diff_visible();
         }
         let diff_total = self.diff_visible.len();
-        let diff_shown = diff_total.min(self.diff_render_limit.max(DIFF_BATCH));
-        let diff_output = ScrollArea::both()
-                        .id_salt("diff_scroll")
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                        ui.heading("⏱ Тайминги по словарям");
+        egui::CollapsingHeader::new("⏱ Тайминги по словарям")
+            .default_open(false)
+            .show(ui, |ui| {
+                ScrollArea::vertical()
+                    .id_salt("diff_timings_scroll")
+                    .max_height(180.0)
+                    .show(ui, |ui| {
                         egui::Grid::new("timings_grid")
                             .striped(true)
                             .min_col_width(90.0)
@@ -918,203 +1047,243 @@ impl DemagogApp {
                                     ui.end_row();
                                 }
                             });
-
-                        ui.add_space(14.0);
-                        ui.heading("🔍 Журнал сработавших правил");
-                        if self.report.events.is_empty() {
-                            ui.label(
-                                "Для записи детальных примеров каждого сработавшего правила нажмите кнопку «🔬 С журналом замен» на верхней панели.",
-                            );
-                        } else if self.diff_visible.is_empty() {
-                            ui.label("Ничего не найдено по фильтру замен.");
-                        } else {
-                            egui::Grid::new("diff_events_grid")
-                                .striped(true)
-                                .max_col_width(420.0)
-                                .show(ui, |ui| {
-                                    ui.label(RichText::new("Словарь").strong());
-                                    ui.label(RichText::new("Правило").strong());
-                                    ui.label(RichText::new("Было").strong());
-                                    ui.label(RichText::new("Стало").strong());
-                                    ui.end_row();
-
-                                    for &event_index in
-                                        self.diff_visible.iter().take(diff_shown)
-                                    {
-                                        let ev = &self.report.events[event_index];
-                                        ui.label(&ev.dictionary_name);
-                                        ui.add(
-                                            egui::Label::new(
-                                                RichText::new(&ev.rule_summary).monospace(),
-                                            )
-                                            .selectable(true),
-                                        );
-                                        ui.add(
-                                            egui::Label::new(
-                                                RichText::new(&ev.before_snippet)
-                                                    .color(palette::diff_before(theme))
-                                                    .font(editor_font.clone()),
-                                            )
-                                            .selectable(true),
-                                        );
-                                        ui.add(
-                                            egui::Label::new(
-                                                RichText::new(&ev.after_snippet)
-                                                    .color(palette::diff_after(theme))
-                                                    .font(editor_font.clone()),
-                                            )
-                                            .selectable(true),
-                                        );
-                                        ui.end_row();
-                                    }
-                                });
-                        }
-                        if diff_shown < diff_total {
-                            ui.add_space(8.0);
-                            ui.label(
-                                RichText::new(format!(
-                                    "Показаны первые {} из {} записей — прокрутите ниже, чтобы догрузить.",
-                                    format_num(diff_shown),
-                                    format_num(diff_total)
-                                ))
-                                .weak(),
-                            );
-                        }
                     });
-        if diff_shown < diff_total {
-            let near_bottom = diff_output.state.offset.y + diff_output.inner_rect.height()
-                >= diff_output.content_size.y - 120.0;
-            let fits = diff_output.content_size.y <= diff_output.inner_rect.height() + 1.0;
-            if near_bottom || fits {
-                self.diff_render_limit = (diff_shown + DIFF_BATCH).min(diff_total);
-                ui.ctx().request_repaint();
-            }
+            });
+
+        ui.add_space(14.0);
+        ui.heading("🔍 Журнал сработавших правил");
+        if self.report.events.is_empty() {
+            ui.label("Для записи детальных примеров каждого сработавшего правила нажмите кнопку «🔬 С журналом замен» на верхней панели.");
+        } else if self.diff_visible.is_empty() {
+            ui.label("Ничего не найдено по фильтру замен.");
+        } else {
+            ScrollArea::both().id_salt("diff_scroll").show_rows(
+                ui,
+                (ui.text_style_height(&TextStyle::Body)
+                    + editor_font.size * 1.45
+                    + ui.spacing().item_spacing.y)
+                    .max(ui.spacing().interact_size.y + ui.spacing().item_spacing.y),
+                diff_total,
+                |ui, rows| {
+                    egui::Grid::new("diff_events_grid")
+                        .start_row(0)
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for &event_index in &self.diff_visible[rows.clone()] {
+                                let ev = &self.report.events[event_index];
+                                ui.label(&ev.dictionary_name);
+                                ui.add(
+                                    egui::Label::new(RichText::new(&ev.rule_summary).monospace())
+                                        .wrap_mode(egui::TextWrapMode::Extend)
+                                        .selectable(true),
+                                );
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&ev.before_snippet)
+                                            .color(palette::diff_before(theme))
+                                            .font(editor_font.clone()),
+                                    )
+                                    .wrap_mode(egui::TextWrapMode::Extend)
+                                    .selectable(true),
+                                );
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&ev.after_snippet)
+                                            .color(palette::diff_after(theme))
+                                            .font(editor_font.clone()),
+                                    )
+                                    .wrap_mode(egui::TextWrapMode::Extend)
+                                    .selectable(true),
+                                );
+                                ui.end_row();
+                            }
+                        });
+                },
+            );
         }
     }
 
     fn show_settings_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        ui.heading("⚙ Настройки интерфейса и обработки");
-        ui.add_space(10.0);
+        ScrollArea::vertical().id_salt("settings_scroll").show(ui, |ui| {
+            ui.heading("⚙ Настройки интерфейса и обработки");
+            ui.add_space(10.0);
 
-        let mut style_changed = false;
+            let mut style_changed = false;
 
-        egui::Grid::new("settings_grid")
-            .num_columns(2)
-            .spacing([24.0, 14.0])
-            .show(ui, |ui| {
-                let ui_label = ui.label("Размер шрифта интерфейса (UI):");
-                if ui
-                    .add(
-                        egui::Slider::new(&mut self.settings.ui_font_size, 12.0..=28.0)
-                            .suffix(" пт"),
-                    )
-                    .labelled_by(ui_label.id)
-                    .changed()
-                {
-                    style_changed = true;
-                }
-                ui.end_row();
-
-                let editor_label = ui.label("Размер шрифта текста книги / чанков:");
-                if ui
-                    .add(
-                        egui::Slider::new(&mut self.settings.editor_font_size, 12.0..=36.0)
-                            .suffix(" пт"),
-                    )
-                    .labelled_by(editor_label.id)
-                    .changed()
-                {
-                    style_changed = true;
-                }
-                ui.end_row();
-
-                let chunk_label = ui.label("Макс. размер чанка:");
-                let chunk_response = ui
-                    .add_enabled(
-                        !self.is_busy,
-                        egui::Slider::new(&mut self.settings.chunk_config.max_chars, 150..=3000)
-                            .step_by(50.0)
-                            .suffix(" симв."),
-                    )
-                    .labelled_by(chunk_label.id);
-                self.apply_chunk_config_change(ui, chunk_response.changed());
-                ui.end_row();
-
-                ui.label("Папка словарей:");
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(self.settings.dic_folder.display().to_string());
+            egui::Grid::new("settings_grid")
+                .num_columns(2)
+                .spacing([24.0, 14.0])
+                .show(ui, |ui| {
+                    let ui_label = ui.label("Размер шрифта интерфейса (UI):");
                     if ui
-                        .add_enabled(!self.is_busy, egui::Button::new("Изменить..."))
-                        .on_disabled_hover_text("Доступно после завершения обработки")
+                        .add(
+                            egui::Slider::new(&mut self.settings.ui_font_size, 12.0..=28.0)
+                                .suffix(" пт"),
+                        )
+                        .labelled_by(ui_label.id)
+                        .changed()
+                    {
+                        style_changed = true;
+                    }
+                    ui.end_row();
+
+                    let editor_label = ui.label("Размер шрифта текста книги / чанков:");
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut self.settings.editor_font_size, 12.0..=36.0)
+                                .suffix(" пт"),
+                        )
+                        .labelled_by(editor_label.id)
+                        .changed()
+                    {
+                        style_changed = true;
+                    }
+                    ui.end_row();
+
+                    let chunk_label = ui.label("Макс. размер чанка:");
+                    let chunk_response = ui
+                        .add_enabled(
+                            !self.is_busy,
+                            egui::Slider::new(&mut self.settings.chunk_config.max_chars, 150..=3000)
+                                .step_by(50.0)
+                                .suffix(" симв."),
+                        )
+                        .labelled_by(chunk_label.id);
+                    self.apply_chunk_config_change(ui, chunk_response.changed());
+                    ui.end_row();
+
+                    ui.label("Папка словарей:");
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(self.settings.dic_folder.display().to_string());
+                        if ui
+                            .add_enabled(!self.is_busy, egui::Button::new("Изменить..."))
+                            .on_disabled_hover_text("Доступно после завершения обработки")
+                            .clicked()
+                        {
+                            self.choose_dictionary_folder(ctx.clone());
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label("Проверка словарей:");
+                    ui.horizontal_wrapped(|ui| {
+                        let response = ui
+                            .add_enabled(!self.is_busy, egui::Button::new("🔎 Проверить словари"))
+                            .on_hover_text(
+                                "Порядок этапов, 22 эталонные фразы и аудит фонетических кандидатов",
+                            )
+                            .on_disabled_hover_text("Доступно после завершения обработки");
+                        if response.clicked() {
+                            self.check_dictionaries_async(ctx.clone());
+                        }
+                        ui.label(
+                            RichText::new("Порядок, эталоны и аудит фонетики")
+                                .small()
+                                .weak(),
+                        );
+                    });
+                    ui.end_row();
+                });
+
+            if style_changed {
+                apply_style_settings(ctx, &self.settings);
+                self.save_settings();
+            }
+
+            ui.add_space(12.0);
+            ui.separator();
+            let reset = ui.add_enabled(!self.is_busy, egui::Button::new("🔄 Сбросить настройки..."));
+            if reset
+                .on_disabled_hover_text("Доступно после завершения обработки")
+                .clicked()
+                && confirm_destructive(
+                    "Сбросить настройки интерфейса и обработки?\nТекст останется, выбор словарей вернётся к стандартному.",
+                )
+            {
+                self.settings = reset_settings_preserving_folder(&self.settings);
+                for d in &mut self.dictionaries {
+                    d.meta.enabled = true;
+                }
+                self.sync_disabled_dictionaries();
+                self.save_settings();
+                self.mark_result_stale();
+                apply_style_settings(ctx, &self.settings);
+                self.set_status(StatusLevel::Success, "Настройки сброшены");
+            }
+
+            ui.add_space(18.0);
+            ui.separator();
+
+            ui.horizontal_wrapped(|ui| {
+                let theme_label = ui.label("Тема:");
+                let theme = self.settings.theme();
+                for candidate in [ThemeMode::Dark, ThemeMode::Light, ThemeMode::Warm] {
+                    if ui
+                        .selectable_label(theme == candidate, candidate.label())
+                        .labelled_by(theme_label.id)
                         .clicked()
                     {
-                        self.choose_dictionary_folder(ctx.clone());
+                        self.settings.set_theme(candidate);
+                        apply_style_settings(ui.ctx(), &self.settings);
+                        self.save_settings();
                     }
-                });
-                ui.end_row();
-
-                ui.label("Проверка словарей:");
-                ui.horizontal_wrapped(|ui| {
-                    let response = ui
-                        .add_enabled(!self.is_busy, egui::Button::new("🔎 Проверить словари"))
-                        .on_hover_text(
-                            "Порядок этапов, 22 эталонные фразы и аудит фонетических кандидатов",
-                        )
-                        .on_disabled_hover_text("Доступно после завершения обработки");
-                    if response.clicked() {
-                        self.check_dictionaries_async(ctx.clone());
-                    }
-                    ui.label(
-                        RichText::new("Порядок, эталоны и аудит фонетики")
-                            .small()
-                            .weak(),
-                    );
-                });
-                ui.end_row();
+                }
             });
 
-        if style_changed {
-            apply_style_settings(ctx, &self.settings);
-            self.save_settings();
-        }
-
-        ui.add_space(12.0);
-        ui.separator();
-        let reset = ui.add_enabled(!self.is_busy, egui::Button::new("🔄 Сбросить настройки..."));
-        if reset
-            .on_disabled_hover_text("Доступно после завершения обработки")
-            .clicked()
-            && confirm_destructive(
-                "Сбросить настройки интерфейса и обработки?\nТекст останется, выбор словарей вернётся к стандартному.",
-            )
-        {
-            self.settings = reset_settings_preserving_folder(&self.settings);
-            for d in &mut self.dictionaries {
-                d.meta.enabled = true;
-            }
-            self.sync_disabled_dictionaries();
-            self.save_settings();
-            self.mark_result_stale();
-            apply_style_settings(ctx, &self.settings);
-            self.set_status(StatusLevel::Success, "Настройки сброшены");
-        }
-
-        ui.add_space(18.0);
-        ui.separator();
-        egui::CollapsingHeader::new("ℹ Справка по категориям словарей")
-                        .default_open(false)
+            ui.add_space(10.0);
+            egui::CollapsingHeader::new("⌨ Горячие клавиши")
+                .default_open(true)
+                .show(ui, |ui| {
+                    egui::Grid::new("hotkeys_grid")
+                        .striped(true)
+                        .min_col_width(180.0)
                         .show(ui, |ui| {
-                            for text in [
-                                "• [ЧИСЛА И ДАТЫ] — переводит числа и даты в слова (1995 → тысяча девятьсот девяносто пятом).",
-                                "• [Ё-ФИКАЦИЯ] — расставляет букву «ё» (все/всё и 337 тыс. слов из edge_Yo_.dic). Знаков «+» не ставит.",
-                                "• [ОМОГРАФЫ (загл.)] — находит омографы по контексту и выделяет ударную гласную заглавной буквой (зАмок / замОк, зЕмли).",
-                                "• [ЗАГЛАВНЫЕ → '+'] (словари 69 и 70) — переводит заглавные ударные буквы омографов в знак «+» (зЕмли → з+емли).",
-                                "• [УДАРЕНИЯ '+'] и [ОРФОЭПИЯ '+' (2.9М)] (словари 35, 67, 71..75, 95.NEW) — сами напрямую ставят знак «+» в обычных словах. Именно из-за 95.NEW и 67 в тексте остаются «+», если выключить только словарь 69.",
-                                "💡 Совет: если не нужны знаки «+», выберите в меню «Пресеты» вариант «Числа + Ё (без ударений)» или формат выхода «Без ударений — только Ё» сверху.",
+                            for keys in [
+                                ("Ctrl+O", "Открыть книгу"),
+                                ("Ctrl+Enter", "Обработать"),
+                                ("Ctrl+Shift+Enter", "Обработать с журналом замен"),
+                                ("Ctrl+S", "Сохранить результат"),
+                                ("Ctrl+Shift+S", "Сохранить исходник"),
+                                ("Ctrl+E", "Экспорт чанков"),
+                                ("Ctrl+F", "Открыть поиск"),
+                                ("F3", "Следующее совпадение"),
+                                ("Shift+F3", "Предыдущее совпадение"),
+                                ("Esc", "Отмена или закрыть поиск"),
                             ] {
-                                ui.add(egui::Label::new(text).selectable(true));
+                                ui.label(keys.0);
+                                ui.label(keys.1);
+                                ui.end_row();
                             }
                         });
+                });
+
+            ui.add_space(8.0);
+            egui::CollapsingHeader::new("ℹ О программе")
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.label(format!("Demagog-RS {APP_VERSION}"));
+                    ui.label("Процессор текста и словарей для TTS и ComfyUI.");
+                    ui.label("Лицензия проекта — MIT. Словари сохраняют лицензии исходных источников.");
+                });
+
+            ui.add_space(8.0);
+            ui.add_space(18.0);
+            ui.separator();
+            egui::CollapsingHeader::new("ℹ Справка по категориям словарей")
+                .default_open(false)
+                .show(ui, |ui| {
+                    for text in [
+                        "• [ЧИСЛА И ДАТЫ] — переводит числа и даты в слова (1995 → тысяча девятьсот девяносто пятом).",
+                        "• [Ё-ФИКАЦИЯ] — расставляет букву «ё» (все/всё и 337 тыс. слов из edge_Yo_.dic). Знаков «+» не ставит.",
+                        "• [ОМОГРАФЫ (загл.)] — находит омографы по контексту и выделяет ударную гласную заглавной буквой (зАмок / замОк, зЕмли).",
+                        "• [ЗАГЛАВНЫЕ → '+'] (словари 69 и 70) — переводит заглавные ударные буквы омографов в знак «+» (зЕмли → з+емли).",
+                        "• [УДАРЕНИЯ '+'] и [ОРФОЭПИЯ '+' (2.9М)] (словари 35, 67, 71..75, 95.NEW) — сами напрямую ставят знак «+» в обычных словах. Именно из-за 95.NEW и 67 в тексте остаются «+», если выключить только словарь 69.",
+                        "💡 Совет: если не нужны знаки «+», выберите в меню «Пресеты» вариант «Числа + Ё (без ударений)» или формат выхода «Без ударений — только Ё» сверху.",
+                    ] {
+                        ui.add(egui::Label::new(text).selectable(true));
+                    }
+                });
+        });
     }
 }
 fn dictionary_card(

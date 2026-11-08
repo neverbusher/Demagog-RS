@@ -11,7 +11,9 @@ use crate::domain::{
     AppSettings, BookDocument, ChunkConfig, DictionaryMeta, DictionaryTag, PipelineProgress,
     PipelineReport, StressFormat, ThemeMode,
 };
-use crate::engine::loader::{CompiledDictionary, DictionaryLoadReport, load_dictionaries_parallel};
+use crate::engine::loader::{
+    CompiledDictionary, DictionaryLoadReport, load_dictionaries_parallel_with_cancel,
+};
 use crate::io::book_reader::{CompositeBookReader, SUPPORTED_BOOK_FORMATS, can_read_book};
 use crate::ports::{DocumentReader, StressFormatter, TextChunker, TextProcessor};
 use crate::services::chunker::SentenceAwareChunker;
@@ -328,23 +330,30 @@ impl DemagogApp {
         );
 
         let folder = self.settings.dic_folder.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.cancel_flag = Some(Arc::clone(&cancel));
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
 
         std::thread::spawn(move || {
             let start = Instant::now();
-            match load_dictionaries_parallel(&folder) {
-                Ok(report) => {
-                    let DictionaryLoadReport { compiled, errors } = report;
-                    let elapsed_ms = start.elapsed().as_millis();
-                    let _ = tx.send(WorkerMessage::DictionariesCompiled {
-                        compiled,
-                        errors,
-                        elapsed_ms,
-                    });
-                }
-                Err(e) => {
-                    let _ = tx.send(WorkerMessage::Pipeline(PipelineProgress::Error(e)));
+            let result = load_dictionaries_parallel_with_cancel(&folder, Some(cancel.as_ref()));
+            if cancel.load(Ordering::Relaxed) {
+                let _ = tx.send(WorkerMessage::Pipeline(PipelineProgress::Cancelled));
+            } else {
+                match result {
+                    Ok(report) => {
+                        let DictionaryLoadReport { compiled, errors } = report;
+                        let elapsed_ms = start.elapsed().as_millis();
+                        let _ = tx.send(WorkerMessage::DictionariesCompiled {
+                            compiled,
+                            errors,
+                            elapsed_ms,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(WorkerMessage::Pipeline(PipelineProgress::Error(e)));
+                    }
                 }
             }
             ctx.request_repaint();
@@ -364,11 +373,17 @@ impl DemagogApp {
             "Проверка порядка словарей и эталонных фраз...",
         );
         let folder = self.settings.dic_folder.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.cancel_flag = Some(Arc::clone(&cancel));
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         std::thread::spawn(move || {
-            let result = dictionary_check::run_check(&folder);
-            let _ = tx.send(WorkerMessage::DictionaryCheckFinished(result));
+            let result = dictionary_check::run_check_with_cancel(&folder, Some(cancel.as_ref()));
+            if cancel.load(Ordering::Relaxed) {
+                let _ = tx.send(WorkerMessage::Pipeline(PipelineProgress::Cancelled));
+            } else {
+                let _ = tx.send(WorkerMessage::DictionaryCheckFinished(result));
+            }
             ctx.request_repaint();
         });
     }
@@ -677,6 +692,7 @@ impl DemagogApp {
                                 {
                                     self.result_state.mark_stale();
                                 }
+                                self.cancel_flag = None;
                                 self.is_busy = false;
                                 self.progress_ratio = 1.0;
                                 finished = true;
@@ -729,6 +745,7 @@ impl DemagogApp {
                                         ));
                                     }
                                 }
+                                self.cancel_flag = None;
                                 finished = true;
                             }
                             WorkerMessage::BookLoaded(result) => {
@@ -765,6 +782,7 @@ impl DemagogApp {
                                         pending_status = Some((StatusLevel::Error, err));
                                     }
                                 }
+                                self.cancel_flag = None;
                                 self.is_busy = false;
                                 self.progress_ratio = 0.0;
                                 finished = true;
@@ -835,7 +853,7 @@ impl DemagogApp {
                                 PipelineProgress::Cancelled => {
                                     pending_status = Some((
                                         StatusLevel::Warning,
-                                        "Обработка отменена".to_string(),
+                                        "Операция отменена".to_string(),
                                     ));
                                     self.cancel_flag = None;
                                     self.is_busy = false;
@@ -923,12 +941,18 @@ impl DemagogApp {
         self.progress_ratio = 0.0;
         self.set_status(StatusLevel::Info, format!("Чтение «{}»...", path.display()));
 
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.cancel_flag = Some(Arc::clone(&cancel));
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         std::thread::spawn(move || {
             let reader = CompositeBookReader::new();
-            let result = reader.read_document(&path);
-            let _ = tx.send(WorkerMessage::BookLoaded(result));
+            let result = reader.read_document_with_cancel(&path, Some(cancel.as_ref()));
+            if cancel.load(Ordering::Relaxed) {
+                let _ = tx.send(WorkerMessage::Pipeline(PipelineProgress::Cancelled));
+            } else {
+                let _ = tx.send(WorkerMessage::BookLoaded(result));
+            }
             ctx.request_repaint();
         });
     }
@@ -1513,7 +1537,7 @@ impl DemagogApp {
                 let requested = cancel.load(Ordering::Relaxed);
                 if ui
                     .add_enabled(!requested, egui::Button::new("Отмена"))
-                    .on_hover_text("Остановить после текущего словаря (Esc)")
+                    .on_hover_text("Отменить текущую операцию (Esc)")
                     .clicked()
                 {
                     cancel.store(true, Ordering::Relaxed);
@@ -1870,6 +1894,8 @@ fn reset_settings_preserving_folder(settings: &AppSettings) -> AppSettings {
         ..AppSettings::default()
     }
 }
+
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn window_title(document_title: &str, has_source: bool) -> String {
     if has_source {

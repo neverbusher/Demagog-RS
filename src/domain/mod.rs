@@ -245,7 +245,10 @@ impl Default for AppSettings {
             dic_folder: PathBuf::from("dic"),
             disabled_dictionaries: Vec::new(),
             group_dictionaries_by_type: true,
-            collapsed_dictionary_groups: Vec::new(),
+            collapsed_dictionary_groups: DictionaryTag::ALL
+                .iter()
+                .map(|tag| tag.label().to_string())
+                .collect(),
         }
     }
 }
@@ -544,6 +547,24 @@ pub fn describe_dictionary(name: &str, content: &str) -> (DictionaryTag, String,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sidebar_groups_start_collapsed_on_a_fresh_install() {
+        let settings = AppSettings::default();
+
+        assert_eq!(
+            settings.collapsed_dictionary_groups.len(),
+            DictionaryTag::ALL.len()
+        );
+        for tag in DictionaryTag::ALL {
+            assert!(
+                settings
+                    .collapsed_dictionary_groups
+                    .iter()
+                    .any(|group| group == tag.label())
+            );
+        }
+    }
 
     #[test]
     fn theme_roundtrip() {
