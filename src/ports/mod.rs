@@ -1,5 +1,6 @@
 use crate::domain::{BookDocument, ChunkConfig, DictionaryKind, ProcessOutput, StressFormat};
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 
 /// Single Responsibility: A compiled dictionary processor that transforms text.
 /// Open/Closed: New dictionary formats can be added by implementing `TextProcessor`.
@@ -14,6 +15,16 @@ pub trait TextProcessor: Send + Sync {
 pub trait DocumentReader: Send + Sync {
     fn can_read(&self, path: &Path) -> bool;
     fn read_document(&self, path: &Path) -> Result<BookDocument, String>;
+    /// Reads a document and aborts between large file/archive/XML work when
+    /// the flag is set. The default is for readers that cannot cancel while
+    /// a single small file is being decoded.
+    fn read_document_with_cancel(
+        &self,
+        path: &Path,
+        _cancel: Option<&AtomicBool>,
+    ) -> Result<BookDocument, String> {
+        self.read_document(path)
+    }
 }
 
 /// Single Responsibility: Formats stress marks in the processed text for the target TTS engine.

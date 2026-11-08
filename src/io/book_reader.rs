@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 use zip::ZipArchive;
 
 use crate::domain::BookDocument;
@@ -34,7 +35,24 @@ impl DocumentReader for TxtDocumentReader {
     }
 
     fn read_document(&self, path: &Path) -> Result<BookDocument, String> {
-        let bytes = std::fs::read(path).map_err(|e| format!("Ошибка чтения файла: {e}"))?;
+        self.read_document_with_cancel(path, None)
+    }
+
+    fn read_document_with_cancel(
+        &self,
+        path: &Path,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<BookDocument, String> {
+        if book_cancelled(cancel) {
+            return cancelled_book();
+        }
+        let file = File::open(path).map_err(|e| format!("Ошибка чтения файла: {e}"))?;
+        let bytes = read_stream_with_cancel(
+            file,
+            path.display().to_string().as_str(),
+            MAX_ARCHIVE_ENTRY_BYTES,
+            cancel,
+        )?;
         if !looks_like_text_bytes(&bytes) {
             return Err(format!("Файл не похож на текст. {SUPPORTED_BOOK_FORMATS}"));
         }
@@ -54,6 +72,44 @@ impl DocumentReader for TxtDocumentReader {
 
 pub struct Fb2DocumentReader;
 
+fn book_cancelled(cancel: Option<&AtomicBool>) -> bool {
+    cancel
+        .map(|cancel| cancel.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(false)
+}
+
+const CHUNK_BYTES: usize = 64 * 1024;
+
+fn read_stream_with_cancel<R: Read>(
+    mut reader: R,
+    name: &str,
+    limit: u64,
+    cancel: Option<&AtomicBool>,
+) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; CHUNK_BYTES];
+    loop {
+        if book_cancelled(cancel) {
+            return Err("Загрузка книги отменена".to_string());
+        }
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(count) => {
+                bytes.extend_from_slice(&chunk[..count]);
+                if bytes.len() as u64 > limit {
+                    return Err(format!("Файл «{name}» больше допустимых {limit} байт"));
+                }
+            }
+            Err(err) => return Err(format!("Ошибка чтения «{name}»: {err}")),
+        }
+    }
+    Ok(bytes)
+}
+
+fn cancelled_book() -> Result<BookDocument, String> {
+    Err("Загрузка книги отменена".to_string())
+}
+
 impl DocumentReader for Fb2DocumentReader {
     fn can_read(&self, path: &Path) -> bool {
         let name = path
@@ -65,6 +121,17 @@ impl DocumentReader for Fb2DocumentReader {
     }
 
     fn read_document(&self, path: &Path) -> Result<BookDocument, String> {
+        self.read_document_with_cancel(path, None)
+    }
+
+    fn read_document_with_cancel(
+        &self,
+        path: &Path,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<BookDocument, String> {
+        if book_cancelled(cancel) {
+            return cancelled_book();
+        }
         let name = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -75,6 +142,9 @@ impl DocumentReader for Fb2DocumentReader {
             let mut archive = ZipArchive::new(file).map_err(|e| format!("Ошибка ZIP: {e}"))?;
             let mut fb2_bytes = Vec::new();
             for i in 0..archive.len() {
+                if book_cancelled(cancel) {
+                    return cancelled_book();
+                }
                 let entry = archive.by_index(i).map_err(|e| e.to_string())?;
                 let entry_name = entry.name().to_string();
                 if entry_name.to_ascii_lowercase().ends_with(".fb2") {
@@ -83,7 +153,12 @@ impl DocumentReader for Fb2DocumentReader {
                             "FB2 в архиве больше допустимых {MAX_ARCHIVE_ENTRY_BYTES} байт"
                         ));
                     }
-                    fb2_bytes = read_limited(entry, &entry_name, MAX_ARCHIVE_ENTRY_BYTES)?;
+                    fb2_bytes = read_limited_with_cancel(
+                        entry,
+                        &entry_name,
+                        MAX_ARCHIVE_ENTRY_BYTES,
+                        cancel,
+                    )?;
                     break;
                 }
             }
@@ -92,9 +167,15 @@ impl DocumentReader for Fb2DocumentReader {
             }
             fb2_bytes
         } else {
+            if book_cancelled(cancel) {
+                return cancelled_book();
+            }
             std::fs::read(path).map_err(|e| format!("Ошибка чтения FB2: {e}"))?
         };
 
+        if book_cancelled(cancel) {
+            return cancelled_book();
+        }
         let text = extract_xml_paragraphs(
             &bytes,
             &["p", "v", "subtitle", "title", "text-author"],
@@ -129,12 +210,32 @@ impl DocumentReader for DocxDocumentReader {
     }
 
     fn read_document(&self, path: &Path) -> Result<BookDocument, String> {
+        self.read_document_with_cancel(path, None)
+    }
+
+    fn read_document_with_cancel(
+        &self,
+        path: &Path,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<BookDocument, String> {
+        if book_cancelled(cancel) {
+            return cancelled_book();
+        }
+
         let file = File::open(path).map_err(|e| format!("Ошибка открытия DOCX: {e}"))?;
         let mut archive =
             ZipArchive::new(file).map_err(|e| format!("Ошибка чтения ZIP/DOCX: {e}"))?;
+        if book_cancelled(cancel) {
+            return cancelled_book();
+        }
+
         let title = read_zip_entry_optional(&mut archive, "docProps/core.xml")?
             .and_then(|bytes| xml_element_text(&bytes, b"title"))
             .unwrap_or_else(|| document_title_from_path(path));
+        if book_cancelled(cancel) {
+            return cancelled_book();
+        }
+
         let doc_xml = {
             let entry = archive
                 .by_name("word/document.xml")
@@ -144,8 +245,13 @@ impl DocumentReader for DocxDocumentReader {
                     "word/document.xml больше допустимых {MAX_ARCHIVE_ENTRY_BYTES} байт"
                 ));
             }
-            read_limited(entry, "word/document.xml", MAX_ARCHIVE_ENTRY_BYTES)?
+            read_limited_with_cancel(entry, "word/document.xml", MAX_ARCHIVE_ENTRY_BYTES, cancel)?
         };
+
+        if book_cancelled(cancel) {
+            return cancelled_book();
+        }
+
         let (xml_str, _) = decode_text_bytes(&doc_xml);
         let mut reader = Reader::from_str(&xml_str);
         reader.config_mut().trim_text(false);
@@ -153,6 +259,9 @@ impl DocumentReader for DocxDocumentReader {
         let mut out = String::new();
         let mut in_text = false;
         loop {
+            if book_cancelled(cancel) {
+                return cancelled_book();
+            }
             match reader.read_event() {
                 Ok(Event::Start(e)) => {
                     let local = e.local_name();
@@ -196,6 +305,10 @@ impl DocumentReader for DocxDocumentReader {
 pub struct EpubDocumentReader;
 
 impl DocumentReader for EpubDocumentReader {
+    fn read_document(&self, path: &Path) -> Result<BookDocument, String> {
+        self.read_document_with_cancel(path, None)
+    }
+
     fn can_read(&self, path: &Path) -> bool {
         matches!(
             path.extension()
@@ -206,7 +319,14 @@ impl DocumentReader for EpubDocumentReader {
         )
     }
 
-    fn read_document(&self, path: &Path) -> Result<BookDocument, String> {
+    fn read_document_with_cancel(
+        &self,
+        path: &Path,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<BookDocument, String> {
+        if book_cancelled(cancel) {
+            return cancelled_book();
+        }
         let file = File::open(path).map_err(|e| format!("Ошибка открытия EPUB: {e}"))?;
         let mut archive = ZipArchive::new(file).map_err(|e| format!("Ошибка чтения EPUB: {e}"))?;
         let EpubContents { entries, title } = epub_contents(&mut archive)?;
@@ -215,7 +335,14 @@ impl DocumentReader for EpubDocumentReader {
         let mut full_text = String::new();
         let mut total_bytes: u64 = 0;
         for name in entries {
+            if book_cancelled(cancel) {
+                return cancelled_book();
+            }
+            if book_cancelled(cancel) {
+                return cancelled_book();
+            }
             let bytes = read_epub_zip_entry(&mut archive, &name)?;
+
             total_bytes = total_bytes.saturating_add(bytes.len() as u64);
             if total_bytes > MAX_ARCHIVE_TOTAL_BYTES {
                 return Err(format!(
@@ -272,9 +399,20 @@ impl DocumentReader for CompositeBookReader {
     }
 
     fn read_document(&self, path: &Path) -> Result<BookDocument, String> {
+        self.read_document_with_cancel(path, None)
+    }
+
+    fn read_document_with_cancel(
+        &self,
+        path: &Path,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<BookDocument, String> {
         for r in &self.readers {
+            if book_cancelled(cancel) {
+                return cancelled_book();
+            }
             if r.can_read(path) {
-                return r.read_document(path);
+                return r.read_document_with_cancel(path, cancel);
             }
         }
         Err(format!(
@@ -503,15 +641,16 @@ fn is_epub_navigation(path: &str) -> bool {
 }
 
 fn read_limited<R: Read>(reader: R, name: &str, limit: u64) -> Result<Vec<u8>, String> {
-    let mut bytes = Vec::new();
-    reader
-        .take(limit + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("Ошибка чтения «{name}»: {e}"))?;
-    if bytes.len() as u64 > limit {
-        return Err(format!("Файл «{name}» больше допустимых {limit} байт"));
-    }
-    Ok(bytes)
+    read_stream_with_cancel(reader, name, limit, None)
+}
+
+fn read_limited_with_cancel<R: Read>(
+    reader: R,
+    name: &str,
+    limit: u64,
+    cancel: Option<&AtomicBool>,
+) -> Result<Vec<u8>, String> {
+    read_stream_with_cancel(reader, name, limit, cancel)
 }
 
 fn read_epub_zip_entry(archive: &mut ZipArchive<File>, name: &str) -> Result<Vec<u8>, String> {
@@ -657,6 +796,51 @@ fn decode_xml_with_declared_encoding(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn epub_reading_honors_a_cancel_flag() {
+        let file = File::create(
+            std::env::temp_dir().join(format!("demagog-rs-cancel-{}.epub", std::process::id())),
+        )
+        .expect("create temp EPUB");
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file(
+                "META-INF/container.xml",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .expect("start container");
+        use std::io::Write;
+        archive
+            .write_all(r#"<?xml version="1.0" encoding="utf-8"?><container><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>"#.as_bytes())
+            .expect("write container");
+        archive
+            .start_file("content.opf", zip::write::SimpleFileOptions::default())
+            .expect("start OPF");
+        archive
+            .write_all(r#"<?xml version="1.0" encoding="utf-8"?><package><metadata><dc:title>Отмена</dc:title></metadata><spine><itemref idref="chapter"/></spine></package>"#.as_bytes())
+            .expect("write OPF");
+        archive
+            .start_file(
+                "Text/chapter.xhtml",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .expect("start chapter");
+        archive
+            .write_all("<html><body><p>Текст</p></body></html>".as_bytes())
+            .expect("write chapter");
+        archive.finish().expect("finish EPUB");
+
+        let path =
+            std::env::temp_dir().join(format!("demagog-rs-cancel-{}.epub", std::process::id()));
+        let cancel = AtomicBool::new(true);
+        let error = EpubDocumentReader
+            .read_document_with_cancel(&path, Some(&cancel))
+            .expect_err("cancelled book loading must report cancellation");
+        assert!(error.contains("отмен"), "{error}");
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn recognizes_supported_book_paths_case_insensitively() {

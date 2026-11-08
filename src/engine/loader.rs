@@ -1,6 +1,7 @@
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use crate::domain::{DictionaryMeta, describe_dictionary};
 use crate::engine::dic_processor::DicProcessor;
@@ -42,12 +43,33 @@ pub fn sorted_dictionary_paths(dir: &Path) -> Result<Vec<PathBuf>, String> {
 }
 
 pub fn load_dictionaries_parallel(dir: &Path) -> Result<DictionaryLoadReport, String> {
+    load_dictionaries_parallel_with_cancel(dir, None)
+}
+
+const DICTIONARY_CANCELLED: &str = "Загрузка словарей отменена";
+
+fn cancellation_error(cancel: Option<&AtomicBool>) -> bool {
+    cancel
+        .map(|cancel| cancel.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(false)
+}
+
+pub fn load_dictionaries_parallel_with_cancel(
+    dir: &Path,
+    cancel: Option<&AtomicBool>,
+) -> Result<DictionaryLoadReport, String> {
+    if cancellation_error(cancel) {
+        return Err(DICTIONARY_CANCELLED.to_string());
+    }
     let paths = sorted_dictionary_paths(dir)?;
 
     let results: Vec<Result<CompiledDictionary, String>> = paths
         .par_iter()
         .map(|path| {
-            compile_single_dictionary(path).map_err(|err| {
+            if cancellation_error(cancel) {
+                return Err(DICTIONARY_CANCELLED.to_string());
+            }
+            compile_single_dictionary_with_cancel(path, cancel).map_err(|err| {
                 let name = path
                     .file_name()
                     .and_then(|s| s.to_str())
@@ -57,11 +79,15 @@ pub fn load_dictionaries_parallel(dir: &Path) -> Result<DictionaryLoadReport, St
         })
         .collect();
 
+    if cancellation_error(cancel) {
+        return Err(DICTIONARY_CANCELLED.to_string());
+    }
     let mut compiled = Vec::with_capacity(results.len());
     let mut errors = Vec::new();
     for result in results {
         match result {
             Ok(dictionary) => compiled.push(dictionary),
+            Err(err) if err == DICTIONARY_CANCELLED => {}
             Err(err) => errors.push(err),
         }
     }
@@ -69,7 +95,13 @@ pub fn load_dictionaries_parallel(dir: &Path) -> Result<DictionaryLoadReport, St
     Ok(DictionaryLoadReport { compiled, errors })
 }
 
-pub fn compile_single_dictionary(path: &Path) -> Result<CompiledDictionary, String> {
+pub fn compile_single_dictionary_with_cancel(
+    path: &Path,
+    cancel: Option<&AtomicBool>,
+) -> Result<CompiledDictionary, String> {
+    if cancellation_error(cancel) {
+        return Err(DICTIONARY_CANCELLED.to_string());
+    }
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let (content, encoding) = decode_text_bytes(&bytes);
     let name = path
@@ -79,6 +111,10 @@ pub fn compile_single_dictionary(path: &Path) -> Result<CompiledDictionary, Stri
         .to_string();
 
     let (tag, description, outputs_plus_stress) = describe_dictionary(&name, &content);
+
+    if cancellation_error(cancel) {
+        return Err(DICTIONARY_CANCELLED.to_string());
+    }
 
     let is_rex = path
         .extension()
@@ -147,7 +183,20 @@ fn pipeline_sort_key(path: &Path) -> (u8, u32, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
     use std::time::Instant;
+
+    #[test]
+    fn dictionary_compilation_honors_a_cancel_flag() {
+        let cancel = AtomicBool::new(true);
+
+        let result = load_dictionaries_parallel_with_cancel(Path::new("dic"), Some(&cancel));
+        let Err(error) = result else {
+            panic!("cancelled dictionary compilation must report cancellation")
+        };
+
+        assert!(error.contains("отмен"), "{error}");
+    }
 
     #[test]
     fn sorts_dictionary_paths_in_pipeline_order() {
@@ -225,7 +274,7 @@ mod tests {
                 let name = path.file_name().unwrap().to_string_lossy().to_string();
                 let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
                 let started = Instant::now();
-                let rules = compile_single_dictionary(path)
+                let rules = compile_single_dictionary_with_cancel(path, None)
                     .map(|d| d.meta.rule_count)
                     .unwrap_or(0);
                 (name, started.elapsed().as_millis(), rules, size)

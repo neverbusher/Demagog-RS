@@ -184,9 +184,10 @@ pub fn validate_order(names: &[String]) -> OrderReport {
 
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::domain::{ChunkConfig, StressFormat};
-use crate::engine::loader::{load_dictionaries_parallel, sorted_dictionary_paths};
+use crate::engine::loader::{load_dictionaries_parallel_with_cancel, sorted_dictionary_paths};
 use crate::ports::TextProcessor;
 use crate::services::chunker::SentenceAwareChunker;
 use crate::services::dictionary_audit::{AuditReport, audit_dictionaries};
@@ -328,6 +329,23 @@ impl CheckReport {
 }
 
 pub fn run_check(dir: &Path) -> Result<CheckReport, String> {
+    run_check_with_cancel(dir, None)
+}
+
+const CHECK_CANCELLED: &str = "Проверка словарей отменена";
+
+pub fn run_check_with_cancel(
+    dir: &Path,
+    cancel: Option<&AtomicBool>,
+) -> Result<CheckReport, String> {
+    let is_cancelled = || {
+        cancel
+            .map(|flag| flag.load(Ordering::Relaxed))
+            .unwrap_or(false)
+    };
+    if is_cancelled() {
+        return Err(CHECK_CANCELLED.to_string());
+    }
     let paths = sorted_dictionary_paths(dir)?;
     let names: Vec<String> = paths
         .iter()
@@ -339,7 +357,10 @@ pub fn run_check(dir: &Path) -> Result<CheckReport, String> {
         })
         .collect();
     let mut order = validate_order(&names);
-    let report = load_dictionaries_parallel(dir)?;
+    let report = load_dictionaries_parallel_with_cancel(dir, cancel)?;
+    if is_cancelled() {
+        return Err(CHECK_CANCELLED.to_string());
+    }
     let loaded = report.compiled.len();
     let total_rules: usize = report
         .compiled
@@ -396,7 +417,7 @@ pub fn run_check(dir: &Path) -> Result<CheckReport, String> {
                 chunk_config: ChunkConfig::default(),
                 capture_diff: false,
             },
-            None,
+            cancel,
             None,
         );
         match result {
@@ -411,6 +432,10 @@ pub fn run_check(dir: &Path) -> Result<CheckReport, String> {
         }
     }
 
+    if is_cancelled() {
+        return Err(CHECK_CANCELLED.to_string());
+    }
+
     Ok(CheckReport {
         order,
         audit,
@@ -423,6 +448,17 @@ pub fn run_check(dir: &Path) -> Result<CheckReport, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn dictionary_check_honors_a_cancel_flag() {
+        let cancel = AtomicBool::new(true);
+        let result = run_check_with_cancel(std::path::Path::new("dic"), Some(&cancel));
+        assert!(
+            result.is_err(),
+            "cancelled dictionary check must report cancellation"
+        );
+    }
 
     fn names(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| item.to_string()).collect()
