@@ -98,19 +98,60 @@ fn split_long_sentence(sentence: &str, max_chars: usize) -> Vec<String> {
     let mut cur = String::new();
 
     for word in sentence.split_whitespace() {
-        let w_len = word.chars().count();
-        let c_len = cur.chars().count();
-        if !cur.is_empty() && c_len + 1 + w_len > max_chars {
-            parts.push(std::mem::take(&mut cur));
+        // A single word longer than the limit must be hard-split, otherwise it
+        // would become an oversized chunk.
+        let pieces: Vec<String> = if word.chars().count() > max_chars {
+            word.chars()
+                .collect::<Vec<_>>()
+                .chunks(max_chars)
+                .map(|piece| piece.iter().collect())
+                .collect()
+        } else {
+            vec![word.to_string()]
+        };
+        for piece in pieces {
+            let w_len = piece.chars().count();
+            let c_len = cur.chars().count();
+            if !cur.is_empty() && c_len + 1 + w_len > max_chars {
+                parts.push(std::mem::take(&mut cur));
+            }
+            if !cur.is_empty() {
+                cur.push(' ');
+            }
+            cur.push_str(&piece);
+            if cur.chars().count() >= max_chars {
+                parts.push(std::mem::take(&mut cur));
+            }
         }
-        if !cur.is_empty() {
-            cur.push(' ');
-        }
-        cur.push_str(word);
     }
 
     if !cur.is_empty() {
         parts.push(cur);
     }
     parts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_single_overlong_word_is_hard_split() {
+        let word = "я".repeat(200);
+        let config = ChunkConfig {
+            max_chars: 80,
+            preserve_paragraphs: false,
+        };
+        let chunks = SentenceAwareChunker.split_into_chunks(&word, &config);
+
+        assert!(!chunks.is_empty());
+        for chunk in &chunks {
+            assert!(
+                chunk.chars().count() <= 80,
+                "chunk exceeds max_chars: {}",
+                chunk.chars().count()
+            );
+        }
+        assert_eq!(chunks.concat().chars().count(), 200);
+    }
 }

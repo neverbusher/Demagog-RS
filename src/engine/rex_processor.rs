@@ -425,14 +425,45 @@ fn analyze_pattern_prefilter(pat: &str) -> (bool, Option<String>) {
     if lower.contains("<num") {
         return (false, Some("<num".to_string()));
     }
-    if pat.contains(r"\d")
-        && !pat.contains(r"\d*")
-        && !pat.contains(r"\d?")
-        && !pat.contains(r"\d{0")
-    {
+    if requires_digit(pat) {
         return (true, None);
     }
     (false, None)
+}
+
+/// True only when the pattern cannot match without at least one digit:
+/// an unescaped `\d` outside a negated class and without an optional
+/// quantifier. `[^\d]`, `\D` and `\\d` must not trigger the digit prefilter.
+fn requires_digit(pat: &str) -> bool {
+    let chars: Vec<char> = pat.chars().collect();
+    let mut in_class = false;
+    let mut negated = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' && i + 1 < chars.len() {
+            let next = chars[i + 1];
+            if next == 'd' && (!in_class || !negated) {
+                let after = chars.get(i + 2).copied();
+                let optional = matches!(after, Some('*') | Some('?'))
+                    || (after == Some('{') && chars.get(i + 3).copied() == Some('0'));
+                if !optional {
+                    return true;
+                }
+            }
+            i += 2;
+            continue;
+        }
+        if c == '[' {
+            in_class = true;
+            negated = chars.get(i + 1).copied() == Some('^');
+        } else if c == ']' {
+            in_class = false;
+            negated = false;
+        }
+        i += 1;
+    }
+    false
 }
 
 fn snippet_around(s: &str, start_byte: usize, end_byte: usize) -> String {
@@ -485,6 +516,20 @@ mod tests {
 
         assert_eq!(fast.text, diff.text);
         assert_eq!(fast.replacements_count, diff.replacements_count);
+    }
+
+    #[test]
+    fn negated_digit_class_still_runs_on_digit_free_text() {
+        let processor = RexProcessor::compile("t.rex".to_string(), "[^\\d]=X\n", "UTF-8");
+        let output = processor.process("абв", false);
+        assert_eq!(output.text, "XXX");
+    }
+
+    #[test]
+    fn plain_digit_class_is_skipped_on_digit_free_text() {
+        let processor = RexProcessor::compile("t.rex".to_string(), "\\d=N\n", "UTF-8");
+        assert_eq!(processor.process("абв", false).text, "абв");
+        assert_eq!(processor.process("а1б", false).text, "аNб");
     }
 
     #[test]

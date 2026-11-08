@@ -803,6 +803,7 @@ impl DemagogApp {
                                 self.raw_char_count = self.processed_char_count;
                                 self.raw_pipeline_output.clear();
                                 self.source_dirty = true;
+                                self.mark_result_stale();
                                 self.find_dirty = true;
                                 self.find_last_edit = Instant::now();
                             }

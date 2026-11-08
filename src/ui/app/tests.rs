@@ -1006,3 +1006,29 @@ fn sync_keeps_disabled_names_for_unloaded_dictionaries() {
         app.settings.disabled_dictionaries
     );
 }
+
+#[test]
+fn replacing_source_with_result_marks_result_stale() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = ui_test_app("", "новый результат", Vec::new());
+    app.active_tab = ActiveTab::ProcessedText;
+    app.result_state
+        .mark_computed(StressFormat::PlusBeforeVowel);
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1280.0, 900.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+    harness.run();
+    harness
+        .get_by_label_contains("Заменить исходный текст")
+        .click();
+    harness.run_steps(1);
+
+    assert_eq!(harness.state().document.raw_text, "новый результат");
+    assert!(
+        harness.state().result_state.is_stale(),
+        "result derived from the old source must be marked stale after replace"
+    );
+}
