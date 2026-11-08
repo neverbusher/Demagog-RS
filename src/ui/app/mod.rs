@@ -1459,12 +1459,27 @@ impl DemagogApp {
     }
 
     fn sync_disabled_dictionaries(&mut self) {
-        self.settings.disabled_dictionaries = self
+        // Keep disabled entries for dictionaries that are not currently loaded
+        // (failed/partial/empty load); otherwise a bad load would silently
+        // re-enable everything the user had turned off.
+        let loaded: std::collections::HashMap<&str, bool> = self
             .dictionaries
             .iter()
-            .filter(|d| !d.meta.enabled)
-            .map(|d| d.meta.name.clone())
+            .map(|d| (d.meta.name.as_str(), d.meta.enabled))
             .collect();
+        let mut disabled: Vec<String> = self
+            .settings
+            .disabled_dictionaries
+            .iter()
+            .filter(|name| !loaded.contains_key(name.as_str()) || !loaded[name.as_str()])
+            .cloned()
+            .collect();
+        for d in &self.dictionaries {
+            if !d.meta.enabled && !disabled.contains(&d.meta.name) {
+                disabled.push(d.meta.name.clone());
+            }
+        }
+        self.settings.disabled_dictionaries = disabled;
     }
 
     fn save_settings(&mut self) {

@@ -1,4 +1,5 @@
 use super::*;
+use crate::domain::{DictionaryKind, ProcessOutput};
 
 #[test]
 fn text_would_be_lost_for_non_empty_text() {
@@ -944,4 +945,64 @@ fn clicking_dictionary_check_loads_report() {
     );
     assert!(harness.state().show_check_window);
     harness.get_by_label_contains("Фонетические кандидаты");
+}
+
+struct NoopProcessor;
+
+impl TextProcessor for NoopProcessor {
+    fn name(&self) -> &str {
+        "loaded.dic"
+    }
+    fn kind(&self) -> DictionaryKind {
+        DictionaryKind::DicStandard
+    }
+    fn rule_count(&self) -> usize {
+        0
+    }
+    fn process(&self, text: &str, _capture_diff: bool) -> ProcessOutput {
+        ProcessOutput {
+            text: text.to_string(),
+            replacements_count: 0,
+            events: Vec::new(),
+        }
+    }
+}
+
+#[test]
+fn sync_keeps_disabled_names_for_unloaded_dictionaries() {
+    let mut app = ui_test_app("", "", Vec::new());
+    app.settings.disabled_dictionaries = vec!["missing.dic".to_string(), "loaded.dic".to_string()];
+    app.dictionaries = vec![LoadedDictionary {
+        meta: DictionaryMeta {
+            name: "loaded.dic".to_string(),
+            kind: DictionaryKind::DicStandard,
+            tag: DictionaryTag::CleanupAndTranslit,
+            description: String::new(),
+            outputs_plus_stress: false,
+            enabled: true,
+            rule_count: 0,
+            encoding: "UTF-8",
+            warnings: Vec::new(),
+            last_ms: None,
+            last_replacements: None,
+        },
+        processor: Arc::new(NoopProcessor),
+    }];
+
+    app.sync_disabled_dictionaries();
+
+    assert!(
+        app.settings
+            .disabled_dictionaries
+            .contains(&"missing.dic".to_string()),
+        "disabled entry for a not-loaded dictionary must survive: {:?}",
+        app.settings.disabled_dictionaries
+    );
+    assert!(
+        !app.settings
+            .disabled_dictionaries
+            .contains(&"loaded.dic".to_string()),
+        "a loaded-and-enabled dictionary must not stay disabled: {:?}",
+        app.settings.disabled_dictionaries
+    );
 }

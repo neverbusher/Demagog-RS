@@ -277,11 +277,10 @@ impl DocumentReader for DocxDocumentReader {
                         out.push('\n');
                     }
                 }
-                Ok(Event::Text(t)) if in_text => {
-                    if let Ok(unescaped) = t.unescape() {
-                        out.push_str(&unescaped);
-                    }
-                }
+                Ok(Event::Text(t)) if in_text => match t.unescape_with(resolve_html_entity) {
+                    Ok(unescaped) => out.push_str(&unescaped),
+                    Err(_) => out.push_str(&String::from_utf8_lossy(&t)),
+                },
                 Ok(Event::Eof) => break,
                 Err(e) => return Err(format!("Ошибка разбора document.xml: {e}")),
                 _ => {}
@@ -770,8 +769,9 @@ fn extract_xml_paragraphs(
                 }
             }
             Ok(Event::Text(t)) if skip_depth == 0 && in_body => {
-                if let Ok(unescaped) = t.unescape() {
-                    out.push_str(&unescaped);
+                match t.unescape_with(resolve_html_entity) {
+                    Ok(unescaped) => out.push_str(&unescaped),
+                    Err(_) => out.push_str(&String::from_utf8_lossy(&t)),
                 }
             }
             Ok(Event::Eof) => break,
@@ -781,6 +781,49 @@ fn extract_xml_paragraphs(
     }
 
     Ok(out.trim().to_string())
+}
+
+/// Resolves XML predefined entities plus the HTML named entities common in
+/// EPUB/DOCX XHTML. Unknown entities return None so the caller can fall back
+/// to the raw text instead of silently dropping the whole text run.
+fn resolve_html_entity(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "amp" => "&",
+        "lt" => "<",
+        "gt" => ">",
+        "quot" => "\"",
+        "apos" => "'",
+        "nbsp" => "\u{00A0}",
+        "mdash" => "\u{2014}",
+        "ndash" => "\u{2013}",
+        "hellip" => "\u{2026}",
+        "laquo" => "\u{00AB}",
+        "raquo" => "\u{00BB}",
+        "ldquo" => "\u{201C}",
+        "rdquo" => "\u{201D}",
+        "lsquo" => "\u{2018}",
+        "rsquo" => "\u{2019}",
+        "bull" => "\u{2022}",
+        "copy" => "\u{00A9}",
+        "reg" => "\u{00AE}",
+        "trade" => "\u{2122}",
+        "euro" => "\u{20AC}",
+        "pound" => "\u{00A3}",
+        "yen" => "\u{00A5}",
+        "cent" => "\u{00A2}",
+        "sect" => "\u{00A7}",
+        "para" => "\u{00B6}",
+        "middot" => "\u{00B7}",
+        "times" => "\u{00D7}",
+        "divide" => "\u{00F7}",
+        "plusmn" => "\u{00B1}",
+        "deg" => "\u{00B0}",
+        "micro" => "\u{00B5}",
+        "sup2" => "\u{00B2}",
+        "sup3" => "\u{00B3}",
+        "frac12" => "\u{00BD}",
+        _ => return None,
+    })
 }
 
 fn decode_xml_with_declared_encoding(bytes: &[u8]) -> String {
@@ -895,6 +938,19 @@ mod tests {
         assert!(text.contains("Второй абзац."));
         assert!(!text.contains("Служебное"));
         assert!(!text.contains("AAEC"));
+    }
+
+    #[test]
+    fn html_entities_do_not_drop_text() {
+        let xml = "<html><body><p>Первый&nbsp;абзац &mdash; продолжение.</p></body></html>";
+        let text = extract_xml_paragraphs(xml.as_bytes(), &["p"], &[])
+            .expect("well-formed XHTML with HTML entities");
+
+        assert!(text.contains("Первый"), "text before entity lost: {text}");
+        assert!(
+            text.contains("продолжение"),
+            "text after entity lost: {text}"
+        );
     }
 
     #[test]

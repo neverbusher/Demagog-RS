@@ -247,12 +247,7 @@ impl DicProcessor {
             }
         }
 
-        for list in phrase_index.values_mut() {
-            list.sort_by_key(|rule| Reverse(rule.lhs.len()));
-        }
-        unanchored_phrases.sort_by_key(|rule| Reverse(rule.lhs.len()));
-
-        Self {
+        let mut compiled = Self {
             name,
             kind: DictionaryKind::DicStandard,
             rule_count,
@@ -268,7 +263,17 @@ impl DicProcessor {
             wildcard_index,
             unanchored_wildcards,
             compile_warnings,
+        };
+        compiled.sort_phrases();
+        compiled
+    }
+
+    fn sort_phrases(&mut self) {
+        for list in self.phrase_index.values_mut() {
+            list.sort_by_key(|rule| Reverse(rule.lhs.len()));
         }
+        self.unanchored_phrases
+            .sort_by_key(|rule| Reverse(rule.lhs.len()));
     }
 
     fn compile_chunked(name: String, content: &str) -> Self {
@@ -305,6 +310,7 @@ impl DicProcessor {
                 .append(&mut rules);
         }
         self.unanchored_wildcards.extend(part.unanchored_wildcards);
+        self.sort_phrases();
         self.rule_count += part.rule_count;
         for warning in part.compile_warnings {
             if self.compile_warnings.len() < 50 {
@@ -1054,6 +1060,16 @@ mod tests {
                 .replacement
                 .ends_with("ВТОРОЕ")
         );
+    }
+
+    #[test]
+    fn merged_chunks_keep_longest_phrase_priority() {
+        let mut merged = DicProcessor::compile_sequential("a".to_string(), "аб вг=КРАТКО\n");
+        let later = DicProcessor::compile_sequential("b".to_string(), "аб вг де=ДЛИННО\n");
+        merged.merge_parallel_chunk(later);
+
+        let output = merged.process("аб вг де", false);
+        assert_eq!(output.text, "ДЛИННО");
     }
 
     #[test]
