@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::engine::loader::sorted_dictionary_paths;
 use crate::io::encoding::decode_text_bytes;
@@ -148,11 +149,17 @@ pub fn expected_by_design(purpose: &str) -> bool {
     )
 }
 
-pub fn audit_dictionaries(dir: &Path) -> Result<AuditReport, String> {
+pub fn audit_dictionaries_with_cancel(
+    dir: &Path,
+    cancel: Option<&AtomicBool>,
+) -> Result<AuditReport, String> {
     let paths = sorted_dictionary_paths(dir)?;
     let mut report = AuditReport::default();
 
     for path in paths {
+        if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            return Err("Аудит словарей отменён".to_string());
+        }
         if !path
             .extension()
             .and_then(|extension| extension.to_str())
@@ -301,6 +308,17 @@ mod tests {
     }
 
     #[test]
+    fn audit_honors_cancel_flag() {
+        let dir = temp_dir();
+        std::fs::write(dir.join("67_author.dic"), "а=б\n").expect("write dictionary");
+        let cancel = AtomicBool::new(true);
+
+        assert!(audit_dictionaries_with_cancel(&dir, Some(&cancel)).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn classifies_phonetic_candidates() {
         let dir = temp_dir();
         std::fs::write(
@@ -320,7 +338,7 @@ mod tests {
         std::fs::write(dir.join("10_REX.rex"), "# ignored\n").expect("write rex");
         std::fs::write(dir.join("notes.txt"), "ignored\n").expect("write notes");
 
-        let report = audit_dictionaries(&dir).expect("audit dictionaries");
+        let report = audit_dictionaries_with_cancel(&dir, None).expect("audit dictionaries");
         assert_eq!(report.scanned_rules, 6);
         assert_eq!(report.total_candidates, 4);
         assert_eq!(report.dictionaries.len(), 1);
@@ -358,7 +376,7 @@ mod tests {
         )
         .expect("write orthoepy dictionary");
 
-        let report = audit_dictionaries(&dir).expect("audit dictionaries");
+        let report = audit_dictionaries_with_cancel(&dir, None).expect("audit dictionaries");
         assert_eq!(report.scanned_rules, 0);
         assert_eq!(report.total_candidates, 0);
         assert!(report.dictionaries.is_empty());
@@ -387,7 +405,7 @@ mod tests {
         std::fs::write(dir.join("60_пост обработка@.dic"), "дренажом=дренажем\n")
             .expect("write post-processing dictionary");
 
-        let report = audit_dictionaries(&dir).expect("audit dictionaries");
+        let report = audit_dictionaries_with_cancel(&dir, None).expect("audit dictionaries");
         assert_eq!(report.dictionaries[0].name, "60_пост обработка@.dic");
         assert_eq!(report.scanned_rules, 4);
         assert_eq!(report.total_candidates, 3);

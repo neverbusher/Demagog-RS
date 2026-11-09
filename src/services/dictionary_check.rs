@@ -190,7 +190,7 @@ use crate::domain::{ChunkConfig, StressFormat};
 use crate::engine::loader::{load_dictionaries_parallel_with_cancel, sorted_dictionary_paths};
 use crate::ports::TextProcessor;
 use crate::services::chunker::SentenceAwareChunker;
-use crate::services::dictionary_audit::{AuditReport, audit_dictionaries};
+use crate::services::dictionary_audit::{AuditReport, audit_dictionaries_with_cancel};
 use crate::services::pipeline::{PipelineOptions, ProcessingPipeline};
 use crate::services::stress::RussianStressFormatter;
 
@@ -378,9 +378,12 @@ pub fn run_check_with_cancel(
                 .push(format!("{}: {warning}", dictionary.meta.name));
         }
     }
-    let audit = match audit_dictionaries(dir) {
+    let audit = match audit_dictionaries_with_cancel(dir, cancel) {
         Ok(audit) => audit,
         Err(error) => {
+            if is_cancelled() {
+                return Err("Проверка словарей отменена".to_string());
+            }
             order
                 .warnings
                 .push(format!("Аудит фонетики не выполнен: {error}"));

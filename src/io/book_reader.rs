@@ -170,7 +170,13 @@ impl DocumentReader for Fb2DocumentReader {
             if book_cancelled(cancel) {
                 return cancelled_book();
             }
-            std::fs::read(path).map_err(|e| format!("Ошибка чтения FB2: {e}"))?
+            let file = std::fs::File::open(path).map_err(|e| format!("Ошибка чтения FB2: {e}"))?;
+            read_stream_with_cancel(
+                file,
+                &path.display().to_string(),
+                MAX_ARCHIVE_ENTRY_BYTES,
+                cancel,
+            )?
         };
 
         if book_cancelled(cancel) {
