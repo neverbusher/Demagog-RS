@@ -390,8 +390,24 @@ impl DicProcessor {
         let mut count = 0usize;
 
         for rule in &self.unanchored_phrases {
-            if current.contains(&rule.lhs) {
-                let next = current.replace(&rule.lhs, &rule.rhs);
+            let matched = if rule.case_sensitive {
+                current.contains(&rule.lhs)
+            } else {
+                current.to_lowercase().contains(&rule.lhs_lower)
+            };
+            if matched {
+                let next = if rule.case_sensitive {
+                    current.replace(&rule.lhs, &rule.rhs)
+                } else {
+                    regex::RegexBuilder::new(&regex::escape(&rule.lhs))
+                        .case_insensitive(true)
+                        .build()
+                        .map(|re| {
+                            re.replace_all(&current, regex::NoExpand(&rule.rhs))
+                                .into_owned()
+                        })
+                        .unwrap_or_else(|_| current.clone())
+                };
                 if next != current {
                     count += 1;
                     if let Some(ev) = events.as_deref_mut()
@@ -697,6 +713,12 @@ impl TextProcessor for DicProcessor {
     }
 }
 
+/// Literal `$` in a dictionary RHS must not be interpreted as a regex
+/// capture reference; only the `${n}` placeholders we insert ourselves expand.
+fn escape_replacement_dollars(rhs: &str) -> String {
+    rhs.replace('$', "$$")
+}
+
 fn split_dic_rule(line: &str) -> Option<(&str, &str)> {
     if let Some(pos) = line.find('\x06') {
         Some((&line[..pos], &line[pos + 1..]))
@@ -942,7 +964,7 @@ fn compile_dic_wildcard_rule(
             if standalone_keeps_word {
                 replacement.push_str(&format!("${{{group_idx}}}"));
             } else if let Some(&rt) = rhs_tokens.get(rhs_idx) {
-                replacement.push_str(rt);
+                replacement.push_str(&escape_replacement_dollars(rt));
                 rhs_idx += 1;
             } else {
                 replacement.push_str(&format!("${{{group_idx}}}"));
@@ -967,7 +989,7 @@ fn compile_dic_wildcard_rule(
         }
 
         pattern.push_str(&regex::escape(core));
-        replacement.push_str(rt);
+        replacement.push_str(&escape_replacement_dollars(rt));
 
         if ends_star {
             pattern.push_str(r"([\w+\-]*)");
@@ -980,7 +1002,7 @@ fn compile_dic_wildcard_rule(
 
     while rhs_idx < rhs_tokens.len() {
         replacement.push(' ');
-        replacement.push_str(rhs_tokens[rhs_idx]);
+        replacement.push_str(&escape_replacement_dollars(rhs_tokens[rhs_idx]));
         rhs_idx += 1;
     }
 
@@ -1060,6 +1082,20 @@ mod tests {
                 .replacement
                 .ends_with("ВТОРОЕ")
         );
+    }
+
+    #[test]
+    fn wildcard_rhs_keeps_literal_dollar() {
+        let processor = DicProcessor::compile("t.dic".to_string(), "аб*=аб $1\n", "UTF-8");
+        let output = processor.process("абв", false);
+        assert_eq!(output.text, "абв $1");
+    }
+
+    #[test]
+    fn unanchored_phrase_matches_case_insensitively() {
+        let processor = DicProcessor::compile("t.dic".to_string(), "т.д.=ТАК ДАЛЕЕ\n", "UTF-8");
+        let output = processor.process("И Т.Д. тут", false);
+        assert_eq!(output.text, "И ТАК ДАЛЕЕ тут");
     }
 
     #[test]

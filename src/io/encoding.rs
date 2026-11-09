@@ -20,6 +20,9 @@ pub fn decode_text_bytes(bytes: &[u8]) -> (String, &'static str) {
     } else if looks_like_utf16le_no_bom(bytes) {
         let (cow, _, _) = UTF_16LE.decode(bytes);
         (cow.into_owned(), "UTF-16LE")
+    } else if looks_like_utf16be_no_bom(bytes) {
+        let (cow, _, _) = UTF_16BE.decode(bytes);
+        (cow.into_owned(), "UTF-16BE")
     } else if let Ok(s) = std::str::from_utf8(bytes) {
         (s.to_owned(), "UTF-8")
     } else {
@@ -28,6 +31,21 @@ pub fn decode_text_bytes(bytes: &[u8]) -> (String, &'static str) {
     };
 
     (normalize_line_endings(raw), enc_name)
+}
+
+fn looks_like_utf16be_no_bom(bytes: &[u8]) -> bool {
+    if bytes.len() < 8 || !bytes.len().is_multiple_of(2) {
+        return false;
+    }
+    let sample_pairs = (bytes.len() / 2).min(64);
+    let mut null_or_cyr_high = 0usize;
+    for i in 0..sample_pairs {
+        let hi = bytes[i * 2];
+        if hi == 0x00 || hi == 0x04 {
+            null_or_cyr_high += 1;
+        }
+    }
+    null_or_cyr_high * 10 >= sample_pairs * 8
 }
 
 fn looks_like_utf16le_no_bom(bytes: &[u8]) -> bool {
@@ -105,6 +123,18 @@ pub fn normalize_line_endings(mut s: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decodes_utf16be_without_bom() {
+        let text = "Привет мир";
+        let bytes: Vec<u8> = text
+            .encode_utf16()
+            .flat_map(|unit| unit.to_be_bytes())
+            .collect();
+        let (decoded, encoding) = decode_text_bytes(&bytes);
+        assert_eq!(decoded, text);
+        assert_eq!(encoding, "UTF-16BE");
+    }
 
     #[test]
     fn decodes_cp1251() {
