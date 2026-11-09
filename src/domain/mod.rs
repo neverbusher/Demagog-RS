@@ -341,9 +341,16 @@ impl AppSettings {
     }
 
     pub fn save(&self) -> Result<(), String> {
-        let path = Self::settings_path();
+        self.save_to_path(&Self::settings_path())
+    }
+
+    /// Writes via a temporary file + rename so a crash mid-write cannot leave
+    /// a truncated settings.json (which would reset the app to defaults).
+    pub fn save_to_path(&self, path: &Path) -> Result<(), String> {
         let json = serde_json::to_string_pretty(self).map_err(|err| err.to_string())?;
-        std::fs::write(&path, json).map_err(|err| format!("{}: {err}", path.display()))
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, json).map_err(|err| format!("{}: {err}", tmp.display()))?;
+        std::fs::rename(&tmp, path).map_err(|err| format!("{}: {err}", path.display()))
     }
 
     pub fn is_dic_enabled(&self, name: &str) -> bool {
@@ -547,6 +554,31 @@ pub fn describe_dictionary(name: &str, content: &str) -> (DictionaryTag, String,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn save_to_path_roundtrips_and_leaves_no_temp_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "demagog-save-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("settings.json");
+
+        let settings = AppSettings::default();
+        settings.save_to_path(&path).expect("atomic save");
+
+        assert!(path.exists());
+        assert!(!path.with_extension("json.tmp").exists());
+        let (loaded, warning) = AppSettings::load_from_path(&path, PathBuf::from("dic"));
+        assert!(warning.is_none());
+        assert_eq!(loaded.theme(), settings.theme());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn sidebar_groups_start_collapsed_on_a_fresh_install() {

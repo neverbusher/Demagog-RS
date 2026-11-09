@@ -130,6 +130,7 @@ pub(crate) fn apply_window_icon(_icon: &IconData) -> bool {
         fn IsWindowVisible(hwnd: Hwnd) -> i32;
         fn GetWindowTextW(hwnd: Hwnd, text: *mut u16, max_count: i32) -> i32;
         fn SendMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize;
+        fn DestroyIcon(icon: Hicon) -> i32;
         fn GetDC(hwnd: Hwnd) -> Hdc;
         fn ReleaseDC(hwnd: Hwnd, hdc: Hdc) -> i32;
     }
@@ -263,6 +264,7 @@ pub(crate) fn apply_window_icon(_icon: &IconData) -> bool {
     }
     let hicon_big = unsafe { icon_for(&big) };
     if hicon_big.is_null() {
+        unsafe { DestroyIcon(hicon_small) };
         return false;
     }
 
@@ -270,8 +272,16 @@ pub(crate) fn apply_window_icon(_icon: &IconData) -> bool {
     const ICON_SMALL: usize = 0;
     const ICON_BIG: usize = 1;
     unsafe {
-        SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon_small as isize);
-        SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon_big as isize);
+        // WM_SETICON returns the previously installed icon; destroy it so
+        // repeated applications (e.g. after a failed attempt) do not leak.
+        let prev_small = SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon_small as isize);
+        let prev_big = SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon_big as isize);
+        if prev_small != 0 {
+            DestroyIcon(prev_small as Hicon);
+        }
+        if prev_big != 0 {
+            DestroyIcon(prev_big as Hicon);
+        }
     }
     true
 }

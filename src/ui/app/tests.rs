@@ -1008,6 +1008,27 @@ fn sync_keeps_disabled_names_for_unloaded_dictionaries() {
 }
 
 #[test]
+fn save_and_export_are_disabled_while_busy() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::{NodeT, Queryable};
+
+    let mut app = ui_test_app("исходник", "результат", vec!["чанк".to_string()]);
+    app.is_busy = true;
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1280.0, 900.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+    harness.run_steps(2);
+
+    for label in ["Сохранить результат", "Экспорт чанков"] {
+        let node = harness.get_by_label_contains(label);
+        assert!(
+            node.accesskit_node().is_disabled(),
+            "{label} must be disabled while busy"
+        );
+    }
+}
+
+#[test]
 fn replacing_source_with_result_marks_result_stale() {
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;

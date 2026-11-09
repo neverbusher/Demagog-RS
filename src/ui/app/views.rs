@@ -105,7 +105,7 @@ impl DemagogApp {
                     ui.separator();
                     if ui
                         .add_enabled(
-                            !self.document.processed_text.is_empty(),
+                            !self.document.processed_text.is_empty() && !self.is_busy,
                             egui::Button::new("💾 Сохранить результат"),
                         )
                         .on_hover_text("Сохранить результат в TXT (Ctrl+S)")
@@ -114,7 +114,8 @@ impl DemagogApp {
                     {
                         self.save_processed_txt();
                     }
-                    let can_export = !self.document.processed_text.trim().is_empty();
+                    let can_export =
+                        !self.document.processed_text.trim().is_empty() && !self.is_busy;
                     if ui
                         .add_enabled(can_export, egui::Button::new("📦 Экспорт чанков"))
                         .on_hover_text("Экспортировать чанки в JSON (Ctrl+E)")
@@ -212,26 +213,28 @@ impl DemagogApp {
                             ui.close();
                         }
                         ui.separator();
-                        for fmt in [
-                            StressFormat::PlusBeforeVowel,
-                            StressFormat::AcuteAccent,
-                            StressFormat::CleanYoOnly,
-                        ] {
-                            if ui
-                                .selectable_value(
-                                    &mut self.settings.stress_format,
-                                    fmt,
-                                    fmt.label(),
-                                )
-                                .clicked()
-                            {
-                                ui.close();
+                        ui.add_enabled_ui(!self.is_busy, |ui| {
+                            for fmt in [
+                                StressFormat::PlusBeforeVowel,
+                                StressFormat::AcuteAccent,
+                                StressFormat::CleanYoOnly,
+                            ] {
+                                if ui
+                                    .selectable_value(
+                                        &mut self.settings.stress_format,
+                                        fmt,
+                                        fmt.label(),
+                                    )
+                                    .clicked()
+                                {
+                                    ui.close();
+                                }
                             }
-                        }
+                        });
                         ui.separator();
                         if ui
                             .add_enabled(
-                                !self.document.processed_text.is_empty(),
+                                !self.document.processed_text.is_empty() && !self.is_busy,
                                 egui::Button::new("Сохранить результат"),
                             )
                             .on_disabled_hover_text("Сначала обработайте текст")
@@ -242,7 +245,7 @@ impl DemagogApp {
                         }
                         if ui
                             .add_enabled(
-                                !self.document.processed_text.trim().is_empty(),
+                                !self.document.processed_text.trim().is_empty() && !self.is_busy,
                                 egui::Button::new("Экспорт чанков"),
                             )
                             .on_disabled_hover_text("Результат пуст")

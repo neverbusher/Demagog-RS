@@ -323,6 +323,9 @@ impl DemagogApp {
         self.is_busy = true;
         self.progress_ratio = 0.1;
         self.dic_load_errors.clear();
+        // Drop the old set so a failed reload cannot leave dictionaries from
+        // the previous folder usable for processing.
+        self.dictionaries.clear();
         let dic_folder = self.settings.dic_folder.display().to_string();
         self.set_status(
             StatusLevel::Info,
@@ -981,10 +984,10 @@ impl DemagogApp {
         if ctx.input_mut(|i| i.consume_shortcut(&save_source)) {
             self.save_source_txt();
         }
-        if ctx.input_mut(|i| i.consume_shortcut(&save)) {
+        if !self.is_busy && ctx.input_mut(|i| i.consume_shortcut(&save)) {
             self.save_processed_txt();
         }
-        if ctx.input_mut(|i| i.consume_shortcut(&export)) {
+        if !self.is_busy && ctx.input_mut(|i| i.consume_shortcut(&export)) {
             self.export_chunks_json();
         }
 
