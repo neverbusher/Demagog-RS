@@ -21,7 +21,13 @@ if (-not $Version) {
 }
 $zipPath = Join-Path $outputRoot "Demagog-RS-$Version-win64.zip"
 
-$running = Get-Process -Name "Demagog-RS", "Demagog-RS-cpu" -ErrorAction SilentlyContinue
+# Refuse to overwrite an already-published version with different bytes.
+$existingTag = git -C $root tag -l "v$Version"
+if ($existingTag) {
+    throw "Version $Version is already tagged (v$Version); bump Cargo.toml before packaging."
+}
+
+$running = Get-Process -Name "Demagog-RS", "Demagog-RS-cpu", "demagog-rs" -ErrorAction SilentlyContinue
 if ($running) {
     throw "Close Demagog-RS and Demagog-RS-cpu before packaging: the exe files are locked."
 }

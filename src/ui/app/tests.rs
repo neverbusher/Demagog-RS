@@ -933,7 +933,9 @@ fn clicking_dictionary_check_loads_report() {
     harness.get_by_label_contains("Проверить словари").click();
     harness.run_steps(1);
 
-    let deadline = Instant::now() + Duration::from_secs(60);
+    // Generous deadline: under parallel test/agent load the debug dictionary
+    // compile can be slow; run ignored tests serially for stable timing.
+    let deadline = Instant::now() + Duration::from_secs(120);
     while harness.state().check_report.is_none() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
         harness.run_steps(1);

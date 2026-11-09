@@ -421,18 +421,27 @@ impl DemagogApp {
 
                 let error_color = ui.visuals().error_fg_color;
                 let warn_color = ui.visuals().warn_fg_color;
-                for failure in &report.order.failures {
-                    ui.add(
-                        egui::Label::new(RichText::new(format!("• {failure}")).color(error_color))
-                            .selectable(true),
-                    );
-                }
-                for warning in &report.order.warnings {
-                    ui.add(
-                        egui::Label::new(RichText::new(format!("• {warning}")).color(warn_color))
-                            .selectable(true),
-                    );
-                }
+                ScrollArea::vertical()
+                    .id_salt("dic_check_messages")
+                    .max_height(140.0)
+                    .show(ui, |ui| {
+                        for failure in &report.order.failures {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(format!("• {failure}")).color(error_color),
+                                )
+                                .selectable(true),
+                            );
+                        }
+                        for warning in &report.order.warnings {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(format!("• {warning}")).color(warn_color),
+                                )
+                                .selectable(true),
+                            );
+                        }
+                    });
 
                 ui.add_space(6.0);
                 ui.separator();
