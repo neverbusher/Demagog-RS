@@ -184,6 +184,8 @@ pub fn validate_order(names: &[String]) -> OrderReport {
 
 use std::path::Path;
 use std::sync::Arc;
+
+use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::domain::{ChunkConfig, StressFormat};
@@ -313,6 +315,89 @@ pub const GOLDEN_CASES: &[GoldenCase] = &[
     },
 ];
 
+/// Committed manifest pinning the dictionary set the golden corpus was
+/// validated against. Lives in the repo (dic/ itself is gitignored).
+pub const MANIFEST_PATH: &str = "assets/dictionaries.sha256";
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Hashes every top-level .dic/.rex file, sorted by name.
+pub fn dictionary_hashes(dir: &Path) -> Result<Vec<(String, String)>, String> {
+    let paths = sorted_dictionary_paths(dir)?;
+    let mut out = Vec::new();
+    for path in paths {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("<unknown>")
+            .to_string();
+        let bytes = std::fs::read(&path)
+            .map_err(|error| format!("Не удалось прочитать {}: {error}", path.display()))?;
+        out.push((name, sha256_hex(&bytes)));
+    }
+    out.sort();
+    Ok(out)
+}
+
+pub fn write_manifest(dir: &Path, manifest: &Path) -> Result<usize, String> {
+    let hashes = dictionary_hashes(dir)?;
+    if let Some(parent) = manifest.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("{}: {error}", parent.display()))?;
+    }
+    let body: String = hashes
+        .iter()
+        .map(|(name, hash)| format!("{hash}  {name}\n"))
+        .collect();
+    std::fs::write(manifest, body).map_err(|error| format!("{}: {error}", manifest.display()))?;
+    Ok(hashes.len())
+}
+
+/// Warns when the on-disk dictionary set drifts from the committed manifest.
+/// Returns no warnings when the manifest is absent (e.g. a fresh checkout
+/// without dictionaries).
+pub fn manifest_drift(dir: &Path, manifest: &Path) -> Vec<String> {
+    let Ok(body) = std::fs::read_to_string(manifest) else {
+        return Vec::new();
+    };
+    let expected: std::collections::HashMap<String, String> = body
+        .lines()
+        .filter_map(|line| {
+            let (hash, name) = line.split_once("  ")?;
+            Some((name.trim().to_string(), hash.trim().to_string()))
+        })
+        .collect();
+    let Ok(actual) = dictionary_hashes(dir) else {
+        return Vec::new();
+    };
+    let actual: std::collections::HashMap<String, String> = actual.into_iter().collect();
+    let mut warnings = Vec::new();
+    for (name, hash) in &actual {
+        match expected.get(name) {
+            None => warnings.push(format!("Словарь {name} отсутствует в манифесте")),
+            Some(want) if want != hash => {
+                warnings.push(format!("Словарь {name} изменился относительно манифеста"));
+            }
+            Some(_) => {}
+        }
+    }
+    for name in expected.keys() {
+        if !actual.contains_key(name) {
+            warnings.push(format!("Словарь {name} из манифеста отсутствует на диске"));
+        }
+    }
+    warnings.sort();
+    warnings
+}
+
 #[derive(Debug)]
 pub struct CheckReport {
     pub order: OrderReport,
@@ -357,6 +442,9 @@ pub fn run_check_with_cancel(
         })
         .collect();
     let mut order = validate_order(&names);
+    for warning in manifest_drift(dir, Path::new(MANIFEST_PATH)) {
+        order.warnings.push(warning);
+    }
     let report = load_dictionaries_parallel_with_cancel(dir, cancel)?;
     if is_cancelled() {
         return Err(CHECK_CANCELLED.to_string());
@@ -452,6 +540,36 @@ pub fn run_check_with_cancel(
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn manifest_roundtrip_and_drift_detection() {
+        let dir = std::env::temp_dir().join(format!(
+            "demagog-manifest-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(dir.join("10_a.dic"), "а=б\n").expect("write a");
+        std::fs::write(dir.join("20_b.dic"), "в=г\n").expect("write b");
+        let manifest = dir.join("manifest.sha256");
+
+        let count = write_manifest(&dir, &manifest).expect("write manifest");
+        assert_eq!(count, 2);
+        assert!(manifest_drift(&dir, &manifest).is_empty());
+
+        std::fs::write(dir.join("20_b.dic"), "в=г изменено\n").expect("modify b");
+        let drift = manifest_drift(&dir, &manifest);
+        assert!(drift.iter().any(|w| w.contains("20_b.dic")));
+
+        std::fs::remove_file(dir.join("10_a.dic")).expect("remove a");
+        let drift = manifest_drift(&dir, &manifest);
+        assert!(drift.iter().any(|w| w.contains("10_a.dic")));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn dictionary_check_honors_a_cancel_flag() {

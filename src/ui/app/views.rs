@@ -1070,7 +1070,7 @@ impl DemagogApp {
                 diff_total,
                 |ui, rows| {
                     egui::Grid::new("diff_events_grid")
-                        .start_row(0)
+                        .start_row(rows.start)
                         .striped(true)
                         .show(ui, |ui| {
                             for &event_index in &self.diff_visible[rows.clone()] {

@@ -642,7 +642,13 @@ fn is_epub_document(href: &str, media_type: &str) -> bool {
 
 fn is_epub_navigation(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
-    lower.contains("toc") || lower.contains("nav")
+    let base = lower.rsplit('/').next().unwrap_or(&lower);
+    // Match navigation documents by name, not by substring: a chapter called
+    // "naval.xhtml" must not be skipped.
+    base.starts_with("toc.")
+        || base.starts_with("nav.")
+        || base == "toc.ncx"
+        || base.contains("navigation")
 }
 
 fn read_limited<R: Read>(reader: R, name: &str, limit: u64) -> Result<Vec<u8>, String> {
@@ -944,6 +950,16 @@ mod tests {
         assert!(text.contains("Второй абзац."));
         assert!(!text.contains("Служебное"));
         assert!(!text.contains("AAEC"));
+    }
+
+    #[test]
+    fn navigation_detection_matches_names_not_substrings() {
+        assert!(is_epub_navigation("OEBPS/nav.xhtml"));
+        assert!(is_epub_navigation("OEBPS/toc.ncx"));
+        assert!(is_epub_navigation("navigation.xhtml"));
+        assert!(!is_epub_navigation("naval.xhtml"));
+        assert!(!is_epub_navigation("chapter1.xhtml"));
+        assert!(!is_epub_navigation("OEBPS/contemporary.xhtml"));
     }
 
     #[test]

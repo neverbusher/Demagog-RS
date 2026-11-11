@@ -33,6 +33,9 @@ use crate::ui::window::initial_viewport;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--manifest-dictionaries") {
+        std::process::exit(run_dictionary_manifest());
+    }
     if args.iter().any(|a| a == "--check-dictionaries") {
         std::process::exit(run_dictionary_check());
     }
@@ -89,6 +92,26 @@ fn run_eframe(dic_folder: PathBuf) -> eframe::Result<()> {
         native_options,
         Box::new(move |cc| Ok(Box::new(DemagogApp::new(cc, dic_folder)))),
     )
+}
+
+fn run_dictionary_manifest() -> i32 {
+    let dic_folder = locate_default_dic_folder();
+    match dictionary_check::write_manifest(
+        &dic_folder,
+        std::path::Path::new(dictionary_check::MANIFEST_PATH),
+    ) {
+        Ok(count) => {
+            println!(
+                "Манифест: {count} хэшей → {}",
+                dictionary_check::MANIFEST_PATH
+            );
+            0
+        }
+        Err(error) => {
+            eprintln!("Не удалось записать манифест: {error}");
+            1
+        }
+    }
 }
 
 fn run_dictionary_check() -> i32 {

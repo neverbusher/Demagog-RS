@@ -1010,6 +1010,28 @@ fn sync_keeps_disabled_names_for_unloaded_dictionaries() {
 }
 
 #[test]
+fn escape_closes_find_while_cancel_is_pending() {
+    use egui_kittest::Harness;
+
+    let mut app = ui_test_app("текст", "", Vec::new());
+    app.is_busy = true;
+    app.cancel_flag = Some(Arc::new(AtomicBool::new(true)));
+    app.find_open = true;
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1280.0, 900.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+    harness.run_steps(1);
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(1);
+
+    assert!(
+        !harness.state().find_open,
+        "Esc must close the find bar when a cancel is already pending"
+    );
+}
+
+#[test]
 fn save_and_export_are_disabled_while_busy() {
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable};

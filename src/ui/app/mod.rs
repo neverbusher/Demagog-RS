@@ -1025,14 +1025,15 @@ impl DemagogApp {
             }
         }
 
-        if let Some(cancel) = self.cancel_flag.clone() {
-            if !cancel.load(Ordering::Relaxed)
-                && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
-            {
-                cancel.store(true, Ordering::Relaxed);
-                self.set_status(StatusLevel::Warning, "Отмена...");
-            }
-        } else if self.find_open && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        if let Some(cancel) = self.cancel_flag.clone()
+            && !cancel.load(Ordering::Relaxed)
+            && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+        {
+            cancel.store(true, Ordering::Relaxed);
+            self.set_status(StatusLevel::Warning, "Отмена...");
+        }
+        // A second Esc (cancel already pending, or nothing running) closes find.
+        if self.find_open && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
             self.find_open = false;
         }
     }
