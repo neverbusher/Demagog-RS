@@ -658,11 +658,14 @@ impl DemagogApp {
         ui.add(egui::Label::new(RichText::new(&self.document.title).strong()).truncate());
         ui.horizontal_wrapped(|ui| {
                         let can_mutate = text_mutations_enabled(self.is_busy);
-                        if ui
-                            .button("💾 Сохранить исходный текст")
+                        let save_source = ui
+                            .add_enabled(
+                                can_mutate,
+                                egui::Button::new("💾 Сохранить исходный текст"),
+                            )
                             .on_hover_text("Сохранить исходный текст в TXT (Ctrl+Shift+S)")
-                            .clicked()
-                        {
+                            .on_disabled_hover_text("Дождитесь завершения обработки");
+                        if save_source.clicked() {
                             self.save_source_txt();
                         }
                         let replace = ui
@@ -915,8 +918,11 @@ impl DemagogApp {
         let chunk_total = self.document.chunks.len();
         let text_width = (ui.available_width() - 44.0).max(120.0);
         let chars_per_line = (text_width / (editor_font.size * 0.65)).max(8.0);
-        let estimated_lines =
-            ((self.settings.chunk_config.max_chars as f32 / chars_per_line).ceil()).max(1.0);
+        let estimated_lines = estimated_chunk_lines(
+            &self.document.chunks,
+            self.settings.chunk_config.max_chars,
+            chars_per_line,
+        );
         let row_height = line_height * estimated_lines
             + 64.0
             + ui.spacing().interact_size.y
@@ -1056,6 +1062,13 @@ impl DemagogApp {
 
         ui.add_space(14.0);
         ui.heading("🔍 Журнал сработавших правил");
+        if self.report.events_truncated {
+            ui.label(
+                RichText::new("Журнал обрезан: показаны первые ~500 событий, полный счётчик замен — в таблице выше.")
+                    .color(palette::warning_text(theme))
+                    .small(),
+            );
+        }
         if self.report.events.is_empty() {
             ui.label("Для записи детальных примеров каждого сработавшего правила нажмите кнопку «🔬 С журналом замен» на верхней панели.");
         } else if self.diff_visible.is_empty() {
@@ -1113,33 +1126,32 @@ impl DemagogApp {
             ui.add_space(10.0);
 
             let mut style_changed = false;
+            let mut save_needed = false;
 
             egui::Grid::new("settings_grid")
                 .num_columns(2)
                 .spacing([24.0, 14.0])
                 .show(ui, |ui| {
                     let ui_label = ui.label("Размер шрифта интерфейса (UI):");
-                    if ui
+                    let ui_slider = ui
                         .add(
                             egui::Slider::new(&mut self.settings.ui_font_size, 12.0..=28.0)
                                 .suffix(" пт"),
                         )
-                        .labelled_by(ui_label.id)
-                        .changed()
-                    {
+                        .labelled_by(ui_label.id);
+                    if ui_slider.changed() {
                         style_changed = true;
                     }
                     ui.end_row();
 
                     let editor_label = ui.label("Размер шрифта текста книги / чанков:");
-                    if ui
+                    let editor_slider = ui
                         .add(
                             egui::Slider::new(&mut self.settings.editor_font_size, 12.0..=36.0)
                                 .suffix(" пт"),
                         )
-                        .labelled_by(editor_label.id)
-                        .changed()
-                    {
+                        .labelled_by(editor_label.id);
+                    if editor_slider.changed() {
                         style_changed = true;
                     }
                     ui.end_row();
@@ -1187,10 +1199,26 @@ impl DemagogApp {
                         );
                     });
                     ui.end_row();
+
+                    if should_save_font_settings(
+                        ui_slider.changed(),
+                        ui_slider.dragged(),
+                        ui_slider.drag_stopped(),
+                        ui_slider.lost_focus(),
+                    ) || should_save_font_settings(
+                        editor_slider.changed(),
+                        editor_slider.dragged(),
+                        editor_slider.drag_stopped(),
+                        editor_slider.lost_focus(),
+                    ) {
+                        save_needed = true;
+                    }
                 });
 
             if style_changed {
                 apply_style_settings(ctx, &self.settings);
+            }
+            if save_needed {
                 self.save_settings();
             }
 

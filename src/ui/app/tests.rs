@@ -709,6 +709,43 @@ fn settings_about_is_scrollable_at_min_height() {
 }
 
 #[test]
+fn journal_shows_truncation_notice() {
+    use crate::domain::{DictionaryKind, ReplacementEvent, StepReport};
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = ui_test_app("", "Результат", Vec::new());
+    app.active_tab = ActiveTab::DiffAndStats;
+    app.report.events_truncated = true;
+    app.report.events = (0..600)
+        .map(|i| ReplacementEvent {
+            dictionary_name: format!("dict-{i}"),
+            rule_summary: format!("rule-{i}"),
+            before_snippet: format!("before-{i}"),
+            after_snippet: format!("after-{i}"),
+        })
+        .collect();
+    app.report.steps = vec![StepReport {
+        dictionary_name: "dict".to_string(),
+        kind: DictionaryKind::DicStandard,
+        rule_count: 1,
+        elapsed_ms: 1,
+        replacements_count: 600,
+    }];
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1000.0, 640.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+    harness.run_steps(2);
+
+    let notice = harness.get_by_label_contains("обрезан");
+    assert!(
+        notice.rect().min.y >= 0.0 && notice.rect().max.y <= 640.0,
+        "truncation notice must be visible"
+    );
+}
+
+#[test]
 fn journal_heading_stays_visible_with_many_steps() {
     use crate::domain::{DictionaryKind, ReplacementEvent, StepReport};
     use egui_kittest::Harness;
@@ -1050,6 +1087,70 @@ fn save_and_export_are_disabled_while_busy() {
             "{label} must be disabled while busy"
         );
     }
+}
+
+#[test]
+fn chunk_height_estimate_uses_actual_longest_chunk() {
+    let chunks = vec!["короткий".to_string(), "ещё".to_string()];
+    assert_eq!(estimated_chunk_lines(&chunks, 600, 10.0), 1.0);
+    assert_eq!(estimated_chunk_lines(&[], 600, 10.0), 60.0);
+}
+
+#[test]
+fn font_settings_save_waits_for_drag_end() {
+    assert!(!should_save_font_settings(true, true, false, false));
+    assert!(should_save_font_settings(false, false, true, false));
+    assert!(should_save_font_settings(true, false, false, false));
+    assert!(should_save_font_settings(false, false, false, true));
+}
+
+#[test]
+fn find_counter_clamps_stale_current_match() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::{NodeT, Queryable};
+
+    let mut app = ui_test_app("текст текст", "", Vec::new());
+    app.find_open = true;
+    app.find_query = "тек".to_string();
+    app.find_for_tab = Some(ActiveTab::RawText);
+    app.find_dirty = true;
+    app.find_last_edit = std::time::Instant::now();
+    app.find_matches = FindMatches {
+        ranges: vec![(0, 3), (6, 9)],
+        truncated: false,
+    };
+    app.find_current = 5;
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1280.0, 900.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+    harness.run_steps(1);
+
+    let counter = harness.get_by_label_contains("из 2");
+    let label = counter.accesskit_node().value().unwrap_or_default();
+    assert!(
+        label.contains("2 из 2"),
+        "stale counter must clamp: {label}"
+    );
+}
+
+#[test]
+fn save_source_is_disabled_while_busy() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::{NodeT, Queryable};
+
+    let mut app = ui_test_app("исходник", "", Vec::new());
+    app.is_busy = true;
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1280.0, 900.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+    harness.run_steps(2);
+
+    let node = harness.get_by_label_contains("Сохранить исходный текст");
+    assert!(
+        node.accesskit_node().is_disabled(),
+        "save source must be disabled while busy"
+    );
 }
 
 #[test]

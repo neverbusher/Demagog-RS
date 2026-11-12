@@ -206,8 +206,6 @@ pub struct DemagogApp {
     find_go_to: Option<usize>,
     raw_char_count: usize,
     processed_char_count: usize,
-    chunk_render_limit: usize,
-    diff_render_limit: usize,
     diff_filter_cache: String,
     diff_visible: Vec<usize>,
     diff_cache_valid: bool,
@@ -305,8 +303,6 @@ impl DemagogApp {
             find_go_to: None,
             raw_char_count,
             processed_char_count,
-            chunk_render_limit: CHUNK_BATCH,
-            diff_render_limit: DIFF_BATCH,
             diff_filter_cache: String::new(),
             diff_visible: Vec::new(),
             diff_cache_valid: false,
@@ -775,8 +771,6 @@ impl DemagogApp {
                                         self.document = doc;
                                         self.raw_char_count = chars;
                                         self.processed_char_count = 0;
-                                        self.chunk_render_limit = CHUNK_BATCH;
-                                        self.diff_render_limit = DIFF_BATCH;
                                         self.diff_cache_valid = false;
                                         self.raw_pipeline_output.clear();
                                         self.active_tab = ActiveTab::RawText;
@@ -833,8 +827,6 @@ impl DemagogApp {
                                     self.document.chunks = result.chunks;
                                     self.processed_char_count =
                                         self.document.processed_text.chars().count();
-                                    self.chunk_render_limit = CHUNK_BATCH;
-                                    self.diff_render_limit = DIFF_BATCH;
                                     self.diff_cache_valid = false;
                                     let had_events = !result.report.events.is_empty();
                                     self.report = result.report;
@@ -990,7 +982,7 @@ impl DemagogApp {
             self.capture_diff_on_run = false;
             self.start_processing(ctx.clone(), false);
         }
-        if ctx.input_mut(|i| i.consume_shortcut(&save_source)) {
+        if !self.is_busy && ctx.input_mut(|i| i.consume_shortcut(&save_source)) {
             self.save_source_txt();
         }
         if !self.is_busy && ctx.input_mut(|i| i.consume_shortcut(&save)) {
@@ -1080,8 +1072,6 @@ impl DemagogApp {
     }
 
     fn reset_long_list_state(&mut self) {
-        self.chunk_render_limit = CHUNK_BATCH;
-        self.diff_render_limit = DIFF_BATCH;
         self.diff_cache_valid = false;
     }
 
@@ -1100,7 +1090,6 @@ impl DemagogApp {
         }
         self.diff_filter_cache = filter;
         self.diff_cache_valid = true;
-        self.diff_render_limit = DIFF_BATCH;
     }
 
     fn refresh_find_matches(&mut self) {
@@ -1227,7 +1216,7 @@ impl DemagogApp {
             } else {
                 format!(
                     "{} из {}",
-                    format_num(self.find_current + 1),
+                    format_num((self.find_current + 1).min(total)),
                     format_num(total)
                 )
             };
@@ -1429,7 +1418,6 @@ impl DemagogApp {
         self.document.chunks =
             chunks_for_text(&self.document.processed_text, &self.settings.chunk_config);
         self.last_copied_chunk = None;
-        self.chunk_render_limit = CHUNK_BATCH;
         self.result_state.mark_rechunked();
         self.find_dirty = true;
     }
@@ -1998,8 +1986,27 @@ fn editor_line_height(font_size: f32) -> f32 {
 }
 
 const MAX_FIND_MATCHES: usize = 5000;
-const CHUNK_BATCH: usize = 80;
-const DIFF_BATCH: usize = 150;
+
+/// Uniform row height for chunk virtualization must cover the longest chunk;
+/// estimating from the config limit overshoots when actual chunks are shorter.
+fn estimated_chunk_lines(chunks: &[String], max_chars: usize, chars_per_line: f32) -> f32 {
+    let longest = chunks
+        .iter()
+        .map(|chunk| chunk.chars().count())
+        .max()
+        .unwrap_or(max_chars);
+    ((longest as f32 / chars_per_line).ceil()).max(1.0)
+}
+
+/// Font sliders persist on release/keyboard change, not on every drag tick.
+fn should_save_font_settings(
+    changed: bool,
+    dragged: bool,
+    drag_stopped: bool,
+    lost_focus: bool,
+) -> bool {
+    drag_stopped || lost_focus || (changed && !dragged)
+}
 
 #[derive(Debug, Default)]
 struct FindMatches {
