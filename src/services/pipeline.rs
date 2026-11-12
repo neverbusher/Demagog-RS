@@ -59,7 +59,7 @@ impl ProcessingPipeline {
             }
 
             let step_start = Instant::now();
-            let out = proc.process(&current, capture_diff);
+            let out = proc.process_with_cancel(&current, capture_diff, cancel);
             let elapsed_ms = step_start.elapsed().as_millis();
 
             let step_report = StepReport {
@@ -76,8 +76,12 @@ impl ProcessingPipeline {
 
             report.total_replacements += out.replacements_count;
             report.steps.push(step_report);
-            if capture_diff && report.events.len() < 500 {
-                report.events.extend(out.events);
+            if capture_diff {
+                if report.events.len() < 500 {
+                    report.events.extend(out.events);
+                } else if !out.events.is_empty() {
+                    report.events_truncated = true;
+                }
             }
             current = out.text;
         }
@@ -129,7 +133,7 @@ fn notify_cancelled(progress_tx: Option<&Sender<PipelineProgress>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{DictionaryKind, ProcessOutput};
+    use crate::domain::{DictionaryKind, ProcessOutput, ReplacementEvent};
     use crate::ports::TextProcessor;
     use crate::services::chunker::SentenceAwareChunker;
     use crate::services::stress::RussianStressFormatter;
@@ -240,6 +244,143 @@ mod tests {
                 events: Vec::new(),
             }
         }
+    }
+
+    struct EventfulProcessor {
+        events_per_call: usize,
+    }
+
+    impl TextProcessor for EventfulProcessor {
+        fn name(&self) -> &str {
+            "eventful"
+        }
+
+        fn kind(&self) -> DictionaryKind {
+            DictionaryKind::DicStandard
+        }
+
+        fn rule_count(&self) -> usize {
+            1
+        }
+
+        fn process(&self, text: &str, _capture_diff: bool) -> ProcessOutput {
+            ProcessOutput {
+                text: text.to_string(),
+                replacements_count: self.events_per_call,
+                events: (0..self.events_per_call)
+                    .map(|i| ReplacementEvent {
+                        dictionary_name: "eventful".to_string(),
+                        rule_summary: format!("rule-{i}"),
+                        before_snippet: "before".to_string(),
+                        after_snippet: "after".to_string(),
+                    })
+                    .collect(),
+            }
+        }
+    }
+
+    fn run_eventful_pipeline(count: usize) -> PipelineResult {
+        let pipeline = ProcessingPipeline::new(
+            Arc::new(RussianStressFormatter),
+            Arc::new(SentenceAwareChunker),
+        );
+        let processors: Vec<Arc<dyn TextProcessor>> = (0..count)
+            .map(|_| {
+                Arc::new(EventfulProcessor {
+                    events_per_call: 200,
+                }) as Arc<dyn TextProcessor>
+            })
+            .collect();
+        pipeline
+            .execute(
+                "текст",
+                &processors,
+                PipelineOptions {
+                    stress_format: StressFormat::PlusBeforeVowel,
+                    chunk_config: ChunkConfig::default(),
+                    capture_diff: true,
+                },
+                None,
+                None,
+            )
+            .expect("pipeline result")
+    }
+
+    #[test]
+    fn journal_reports_truncation_when_events_exceed_the_cap() {
+        let result = run_eventful_pipeline(4);
+        assert_eq!(result.report.events.len(), 600);
+        assert!(result.report.events_truncated);
+    }
+
+    #[test]
+    fn journal_is_not_marked_truncated_below_the_cap() {
+        let result = run_eventful_pipeline(2);
+        assert_eq!(result.report.events.len(), 400);
+        assert!(!result.report.events_truncated);
+    }
+
+    struct CancelAwareProcessor {
+        seen: Arc<AtomicBool>,
+    }
+
+    impl TextProcessor for CancelAwareProcessor {
+        fn name(&self) -> &str {
+            "cancel-aware"
+        }
+
+        fn kind(&self) -> DictionaryKind {
+            DictionaryKind::DicStandard
+        }
+
+        fn rule_count(&self) -> usize {
+            1
+        }
+
+        fn process(&self, _text: &str, _capture_diff: bool) -> ProcessOutput {
+            panic!("pipeline must call process_with_cancel");
+        }
+
+        fn process_with_cancel(
+            &self,
+            text: &str,
+            _capture_diff: bool,
+            cancel: Option<&AtomicBool>,
+        ) -> ProcessOutput {
+            if cancel.is_some() {
+                self.seen.store(true, Ordering::Relaxed);
+            }
+            ProcessOutput {
+                text: text.to_string(),
+                replacements_count: 0,
+                events: Vec::new(),
+            }
+        }
+    }
+
+    #[test]
+    fn pipeline_passes_cancel_to_processors() {
+        let seen = Arc::new(AtomicBool::new(false));
+        let pipeline = ProcessingPipeline::new(
+            Arc::new(RussianStressFormatter),
+            Arc::new(SentenceAwareChunker),
+        );
+        let flag = AtomicBool::new(false);
+        let processors: Vec<Arc<dyn TextProcessor>> =
+            vec![Arc::new(CancelAwareProcessor { seen: seen.clone() })];
+        let result = pipeline.execute(
+            "текст",
+            &processors,
+            PipelineOptions {
+                stress_format: StressFormat::PlusBeforeVowel,
+                chunk_config: ChunkConfig::default(),
+                capture_diff: false,
+            },
+            Some(&flag),
+            None,
+        );
+        assert!(result.is_some());
+        assert!(seen.load(Ordering::Relaxed));
     }
 
     #[test]

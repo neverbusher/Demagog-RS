@@ -180,6 +180,7 @@ pub struct PipelineReport {
     pub total_ms: u128,
     pub total_replacements: usize,
     pub events: Vec<ReplacementEvent>,
+    pub events_truncated: bool,
 }
 
 #[derive(Debug, Clone, Default)]

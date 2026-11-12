@@ -63,7 +63,8 @@ fn classify(name: &str) -> Stage {
         return Stage::Rex;
     }
     let Some(number) = leading_number(name) else {
-        return if lower.starts_with("edge_yo") {
+        // Mirrors pipeline_sort_key: unnumbered yo dictionaries load before numbered ones.
+        return if lower.contains("yo") {
             Stage::YoBase
         } else {
             Stage::Unnumbered
@@ -182,7 +183,7 @@ pub fn validate_order(names: &[String]) -> OrderReport {
     report
 }
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
@@ -319,6 +320,25 @@ pub const GOLDEN_CASES: &[GoldenCase] = &[
 /// validated against. Lives in the repo (dic/ itself is gitignored).
 pub const MANIFEST_PATH: &str = "assets/dictionaries.sha256";
 
+/// Prefers the manifest shipped next to the executable (packaged app),
+/// falling back to the working directory (repo checkout during development).
+pub fn manifest_path() -> PathBuf {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()));
+    manifest_path_for(exe_dir.as_deref())
+}
+
+fn manifest_path_for(exe_dir: Option<&Path>) -> PathBuf {
+    if let Some(dir) = exe_dir {
+        let candidate = dir.join(MANIFEST_PATH);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    PathBuf::from(MANIFEST_PATH)
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -442,7 +462,7 @@ pub fn run_check_with_cancel(
         })
         .collect();
     let mut order = validate_order(&names);
-    for warning in manifest_drift(dir, Path::new(MANIFEST_PATH)) {
+    for warning in manifest_drift(dir, &manifest_path()) {
         order.warnings.push(warning);
     }
     let report = load_dictionaries_parallel_with_cancel(dir, cancel)?;
@@ -540,6 +560,51 @@ pub fn run_check_with_cancel(
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn unnumbered_yo_dictionary_passes_order_check() {
+        let names = vec![
+            "10_nums.rex".to_string(),
+            "yo.dic".to_string(),
+            "96_hard(hard-e).dic".to_string(),
+        ];
+        let report = validate_order(&names);
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(report.ordered[1].stage, "Ё: БАЗА");
+    }
+
+    #[test]
+    fn unnumbered_non_yo_dictionary_still_fails_order_check() {
+        let names = vec!["96_hard(hard-e).dic".to_string(), "custom.dic".to_string()];
+        let report = validate_order(&names);
+        assert!(!report.failures.is_empty());
+    }
+
+    #[test]
+    fn manifest_resolves_next_to_the_exe_when_present() {
+        let dir = std::env::temp_dir().join(format!("demagog-manifest-exe-{}", std::process::id()));
+        let assets = dir.join("assets");
+        std::fs::create_dir_all(&assets).expect("assets dir");
+        let manifest = assets.join("dictionaries.sha256");
+        std::fs::write(&manifest, "hash  name.dic\n").expect("write manifest");
+
+        assert_eq!(manifest_path_for(Some(&dir)), manifest);
+        assert_eq!(
+            manifest_path_for(None),
+            std::path::PathBuf::from(MANIFEST_PATH)
+        );
+
+        let empty =
+            std::env::temp_dir().join(format!("demagog-manifest-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&empty).expect("empty dir");
+        assert_eq!(
+            manifest_path_for(Some(&empty)),
+            std::path::PathBuf::from(MANIFEST_PATH)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&empty);
+    }
 
     #[test]
     fn manifest_roundtrip_and_drift_detection() {

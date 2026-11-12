@@ -96,15 +96,10 @@ fn run_eframe(dic_folder: PathBuf) -> eframe::Result<()> {
 
 fn run_dictionary_manifest() -> i32 {
     let dic_folder = locate_default_dic_folder();
-    match dictionary_check::write_manifest(
-        &dic_folder,
-        std::path::Path::new(dictionary_check::MANIFEST_PATH),
-    ) {
+    let manifest = dictionary_check::manifest_path();
+    match dictionary_check::write_manifest(&dic_folder, &manifest) {
         Ok(count) => {
-            println!(
-                "Манифест: {count} хэшей → {}",
-                dictionary_check::MANIFEST_PATH
-            );
+            println!("Манифест: {count} хэшей → {}", manifest.display());
             0
         }
         Err(error) => {
