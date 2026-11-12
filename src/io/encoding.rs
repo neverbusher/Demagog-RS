@@ -71,6 +71,7 @@ pub fn looks_like_text_bytes(bytes: &[u8]) -> bool {
         || bytes.starts_with(&[0xFF, 0xFE])
         || bytes.starts_with(&[0xFE, 0xFF])
         || looks_like_utf16le_no_bom(bytes)
+        || looks_like_utf16be_no_bom(bytes)
     {
         return true;
     }
@@ -150,6 +151,15 @@ mod tests {
         let (text, encoding) = decode_text_bytes(bytes);
         assert_eq!(text, "one\ntwo\nthree");
         assert_eq!(encoding, "UTF-8 BOM");
+    }
+
+    #[test]
+    fn utf16be_without_bom_is_accepted_as_text() {
+        let bytes: Vec<u8> = "Привет мир"
+            .encode_utf16()
+            .flat_map(|unit| unit.to_be_bytes())
+            .collect();
+        assert!(looks_like_text_bytes(&bytes));
     }
 
     #[test]

@@ -182,16 +182,18 @@ impl DocumentReader for Fb2DocumentReader {
         if book_cancelled(cancel) {
             return cancelled_book();
         }
+        let xml = decode_xml_with_declared_encoding(&bytes);
         let text = extract_xml_paragraphs(
-            &bytes,
+            &xml,
             &["p", "v", "subtitle", "title", "text-author"],
             &["binary", "description"],
+            cancel,
         )?;
         if text.trim().is_empty() {
             return Err("В FB2 не найден текст книги.".to_string());
         }
-        let title = xml_element_text(&bytes, b"book-title")
-            .unwrap_or_else(|| document_title_from_path(path));
+        let title =
+            xml_element_text(&xml, b"book-title").unwrap_or_else(|| document_title_from_path(path));
         Ok(BookDocument {
             title,
             source_path: Some(path.to_path_buf()),
@@ -235,8 +237,9 @@ impl DocumentReader for DocxDocumentReader {
             return cancelled_book();
         }
 
-        let title = read_zip_entry_optional(&mut archive, "docProps/core.xml")?
-            .and_then(|bytes| xml_element_text(&bytes, b"title"))
+        let title = read_zip_entry_optional(&mut archive, "docProps/core.xml", cancel)?
+            .map(|bytes| decode_xml_with_declared_encoding(&bytes))
+            .and_then(|xml| xml_element_text(&xml, b"title"))
             .unwrap_or_else(|| document_title_from_path(path));
         if book_cancelled(cancel) {
             return cancelled_book();
@@ -264,6 +267,8 @@ impl DocumentReader for DocxDocumentReader {
 
         let mut out = String::new();
         let mut in_text = false;
+        // mc:Fallback repeats the text of mc:Choice; keep only the Choice branch.
+        let mut fallback_depth = 0usize;
         loop {
             if book_cancelled(cancel) {
                 return cancelled_book();
@@ -271,15 +276,29 @@ impl DocumentReader for DocxDocumentReader {
             match reader.read_event() {
                 Ok(Event::Start(e)) => {
                     let local = e.local_name();
-                    if local.as_ref() == b"t" {
+                    if local.as_ref() == b"Fallback" {
+                        fallback_depth += 1;
+                    } else if local.as_ref() == b"t" && fallback_depth == 0 {
                         in_text = true;
+                    }
+                }
+                Ok(Event::Empty(e)) => {
+                    if fallback_depth == 0 {
+                        match e.local_name().as_ref() {
+                            b"br" | b"cr" => out.push('\n'),
+                            b"tab" => out.push('\t'),
+                            _ => {}
+                        }
                     }
                 }
                 Ok(Event::End(e)) => {
                     let local = e.local_name();
-                    if local.as_ref() == b"t" {
+                    if local.as_ref() == b"Fallback" {
+                        fallback_depth = fallback_depth.saturating_sub(1);
+                    } else if local.as_ref() == b"t" {
                         in_text = false;
-                    } else if local.as_ref() == b"p" && !out.ends_with('\n') {
+                    } else if local.as_ref() == b"p" && fallback_depth == 0 && !out.ends_with('\n')
+                    {
                         out.push('\n');
                     }
                 }
@@ -334,7 +353,7 @@ impl DocumentReader for EpubDocumentReader {
         }
         let file = File::open(path).map_err(|e| format!("Ошибка открытия EPUB: {e}"))?;
         let mut archive = ZipArchive::new(file).map_err(|e| format!("Ошибка чтения EPUB: {e}"))?;
-        let EpubContents { entries, title } = epub_contents(&mut archive)?;
+        let EpubContents { entries, title } = epub_contents(&mut archive, cancel)?;
         let title = title.unwrap_or_else(|| document_title_from_path(path));
 
         let mut full_text = String::new();
@@ -343,10 +362,7 @@ impl DocumentReader for EpubDocumentReader {
             if book_cancelled(cancel) {
                 return cancelled_book();
             }
-            if book_cancelled(cancel) {
-                return cancelled_book();
-            }
-            let bytes = read_epub_zip_entry(&mut archive, &name)?;
+            let bytes = read_epub_zip_entry(&mut archive, &name, cancel)?;
 
             total_bytes = total_bytes.saturating_add(bytes.len() as u64);
             if total_bytes > MAX_ARCHIVE_TOTAL_BYTES {
@@ -354,12 +370,17 @@ impl DocumentReader for EpubDocumentReader {
                     "Суммарный размер распакованных глав больше допустимых {MAX_ARCHIVE_TOTAL_BYTES} байт"
                 ));
             }
-            let part = extract_xml_paragraphs(
-                &bytes,
+            let chapter_xml = decode_xml_with_declared_encoding(&bytes);
+            let part = match extract_xml_paragraphs(
+                &chapter_xml,
                 &["p", "h1", "h2", "h3", "h4", "li", "div"],
                 &["head", "style", "script"],
-            )
-            .map_err(|e| format!("Ошибка разбора главы «{name}»: {e}"))?;
+                cancel,
+            ) {
+                Ok(part) => part,
+                Err(_) if book_cancelled(cancel) => return cancelled_book(),
+                Err(e) => return Err(format!("Ошибка разбора главы «{name}»: {e}")),
+            };
             if !part.trim().is_empty() {
                 if !full_text.is_empty() {
                     full_text.push_str("\n\n");
@@ -440,9 +461,8 @@ fn document_title_from_path(path: &Path) -> String {
     }
 }
 
-fn xml_element_text(bytes: &[u8], element: &[u8]) -> Option<String> {
-    let xml = decode_xml_with_declared_encoding(bytes);
-    let mut reader = Reader::from_str(&xml);
+fn xml_element_text(xml: &str, element: &[u8]) -> Option<String> {
+    let mut reader = Reader::from_str(xml);
     let mut inside = false;
     let mut text = String::new();
 
@@ -554,7 +574,9 @@ fn collect_opf_element(
                 return Ok(());
             }
             let media_type = xml_attribute(event, b"media-type")?.unwrap_or_default();
-            let is_document = is_epub_document(&href, &media_type);
+            let properties = xml_attribute(event, b"properties")?.unwrap_or_default();
+            let is_nav = properties.split_whitespace().any(|p| p == "nav");
+            let is_document = !is_nav && is_epub_document(&href, &media_type);
             manifest.insert(id, (resolve_epub_path(opf_path, &href), is_document));
         }
         b"itemref" => {
@@ -644,15 +666,11 @@ fn is_epub_navigation(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     let base = lower.rsplit('/').next().unwrap_or(&lower);
     // Match navigation documents by name, not by substring: a chapter called
-    // "naval.xhtml" must not be skipped.
+    // "naval.xhtml" or "my-navigation.xhtml" must not be skipped.
     base.starts_with("toc.")
         || base.starts_with("nav.")
         || base == "toc.ncx"
-        || base.contains("navigation")
-}
-
-fn read_limited<R: Read>(reader: R, name: &str, limit: u64) -> Result<Vec<u8>, String> {
-    read_stream_with_cancel(reader, name, limit, None)
+        || base.starts_with("navigation.")
 }
 
 fn read_limited_with_cancel<R: Read>(
@@ -664,7 +682,11 @@ fn read_limited_with_cancel<R: Read>(
     read_stream_with_cancel(reader, name, limit, cancel)
 }
 
-fn read_epub_zip_entry(archive: &mut ZipArchive<File>, name: &str) -> Result<Vec<u8>, String> {
+fn read_epub_zip_entry(
+    archive: &mut ZipArchive<File>,
+    name: &str,
+    cancel: Option<&AtomicBool>,
+) -> Result<Vec<u8>, String> {
     let entry = archive
         .by_name(name)
         .map_err(|e| format!("В EPUB не найден файл «{name}»: {e}"))?;
@@ -673,12 +695,13 @@ fn read_epub_zip_entry(archive: &mut ZipArchive<File>, name: &str) -> Result<Vec
             "В EPUB файл «{name}» больше допустимых {MAX_ARCHIVE_ENTRY_BYTES} байт"
         ));
     }
-    read_limited(entry, name, MAX_ARCHIVE_ENTRY_BYTES)
+    read_limited_with_cancel(entry, name, MAX_ARCHIVE_ENTRY_BYTES, cancel)
 }
 
 fn read_zip_entry_optional(
     archive: &mut ZipArchive<File>,
     name: &str,
+    cancel: Option<&AtomicBool>,
 ) -> Result<Option<Vec<u8>>, String> {
     let entry = match archive.by_name(name) {
         Ok(entry) => entry,
@@ -690,11 +713,15 @@ fn read_zip_entry_optional(
             "В EPUB файл «{name}» больше допустимых {MAX_ARCHIVE_ENTRY_BYTES} байт"
         ));
     }
-    read_limited(entry, name, MAX_ARCHIVE_ENTRY_BYTES).map(Some)
+    read_limited_with_cancel(entry, name, MAX_ARCHIVE_ENTRY_BYTES, cancel).map(Some)
 }
 
-fn epub_contents(archive: &mut ZipArchive<File>) -> Result<EpubContents, String> {
-    let Some(container) = read_zip_entry_optional(archive, "META-INF/container.xml")? else {
+fn epub_contents(
+    archive: &mut ZipArchive<File>,
+    cancel: Option<&AtomicBool>,
+) -> Result<EpubContents, String> {
+    let Some(container) = read_zip_entry_optional(archive, "META-INF/container.xml", cancel)?
+    else {
         return Ok(EpubContents {
             entries: fallback_epub_entries(archive),
             title: None,
@@ -702,14 +729,14 @@ fn epub_contents(archive: &mut ZipArchive<File>) -> Result<EpubContents, String>
     };
     let opf_path = epub_rootfile_path(&container)?
         .ok_or_else(|| "В META-INF/container.xml не указан rootfile".to_string())?;
-    let opf = read_epub_zip_entry(archive, &opf_path)?;
+    let opf = read_epub_zip_entry(archive, &opf_path, cancel)?;
     let entries = epub_spine_paths(&opf, &opf_path)?;
     if entries.is_empty() {
         return Err("В OPF не найден spine с главами".to_string());
     }
     Ok(EpubContents {
         entries,
-        title: xml_element_text(&opf, b"title"),
+        title: xml_element_text(&decode_xml_with_declared_encoding(&opf), b"title"),
     })
 }
 
@@ -732,12 +759,12 @@ fn fallback_epub_entries(archive: &mut ZipArchive<File>) -> Vec<String> {
 }
 
 fn extract_xml_paragraphs(
-    bytes: &[u8],
+    xml_str: &str,
     block_tags: &[&str],
     skip_tags: &[&str],
+    cancel: Option<&AtomicBool>,
 ) -> Result<String, String> {
-    let xml_str = decode_xml_with_declared_encoding(bytes);
-    let mut reader = Reader::from_str(&xml_str);
+    let mut reader = Reader::from_str(xml_str);
     reader.config_mut().trim_text(false);
 
     let mut out = String::with_capacity(xml_str.len() / 2);
@@ -745,6 +772,9 @@ fn extract_xml_paragraphs(
     let mut in_body = !xml_str.contains("<body");
 
     loop {
+        if book_cancelled(cancel) {
+            return Err("Загрузка книги отменена".to_string());
+        }
         match reader.read_event() {
             Ok(Event::Start(e)) => {
                 let local_bytes = e.local_name();
@@ -839,13 +869,31 @@ fn resolve_html_entity(name: &str) -> Option<&'static str> {
 }
 
 fn decode_xml_with_declared_encoding(bytes: &[u8]) -> String {
-    let header_len = bytes.len().min(256);
-    let header_ascii = String::from_utf8_lossy(&bytes[..header_len]).to_ascii_lowercase();
-    if header_ascii.contains("windows-1251") || header_ascii.contains("cp1251") {
-        let (cow, _, _) = encoding_rs::WINDOWS_1251.decode(bytes);
+    if let Some(encoding) = declared_xml_encoding(bytes) {
+        let (cow, _, _) = encoding.decode(bytes);
         return crate::io::encoding::normalize_line_endings(cow.into_owned());
     }
     decode_text_bytes(bytes).0
+}
+
+/// Reads the encoding only from the XML declaration, so comments or text
+/// mentioning an encoding name cannot override it.
+fn declared_xml_encoding(bytes: &[u8]) -> Option<&'static encoding_rs::Encoding> {
+    let header = String::from_utf8_lossy(&bytes[..bytes.len().min(256)]);
+    let header = header
+        .trim_start_matches('\u{feff}')
+        .trim_start()
+        .to_ascii_lowercase();
+    let decl = header.strip_prefix("<?xml")?;
+    let decl = &decl[..decl.find("?>")?];
+    let pos = decl.find("encoding=")?;
+    let rest = &decl[pos + "encoding=".len()..];
+    let quote = rest.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let end = rest[1..].find(quote)?;
+    encoding_rs::Encoding::for_label(&rest.as_bytes()[1..1 + end])
 }
 
 #[cfg(test)]
@@ -897,6 +945,121 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    fn write_docx_fixture(path: &Path, document_xml: &str) {
+        let file = File::create(path).expect("create docx");
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file(
+                "word/document.xml",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .expect("start document.xml");
+        use std::io::Write;
+        archive
+            .write_all(document_xml.as_bytes())
+            .expect("write document.xml");
+        archive.finish().expect("finish docx");
+    }
+
+    #[test]
+    fn docx_preserves_line_breaks_and_tabs() {
+        let dir = std::env::temp_dir().join(format!("demagog-docx-br-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("book.docx");
+        write_docx_fixture(
+            &path,
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Первая</w:t></w:r><w:r><w:br/></w:r><w:r><w:t>Вторая</w:t></w:r><w:r><w:cr/></w:r><w:r><w:t>Третья</w:t></w:r></w:p><w:p><w:r><w:t>Лево</w:t></w:r><w:r><w:tab/></w:r><w:r><w:t>Право</w:t></w:r></w:p></w:body></w:document>"#,
+        );
+        let doc = DocxDocumentReader.read_document(&path).expect("read docx");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(doc.raw_text, "Первая\nВторая\nТретья\nЛево\tПраво");
+    }
+
+    #[test]
+    fn docx_alternate_content_keeps_single_copy() {
+        let dir = std::env::temp_dir().join(format!("demagog-docx-mc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("book.docx");
+        write_docx_fixture(
+            &path,
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><w:body><w:p><mc:AlternateContent><mc:Choice Requires="wps"><w:r><w:t>Дубль</w:t></w:r></mc:Choice><mc:Fallback><w:p><w:r><w:t>Дубль</w:t></w:r></w:p></mc:Fallback></mc:AlternateContent></w:p></w:body></w:document>"#,
+        );
+        let doc = DocxDocumentReader.read_document(&path).expect("read docx");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(doc.raw_text, "Дубль");
+    }
+
+    #[test]
+    fn fb2_xml_parsing_honors_cancel_flag() {
+        let cancel = AtomicBool::new(true);
+        let xml = "<body><p>Глава</p></body>";
+        let error = extract_xml_paragraphs(xml, &["p"], &[], Some(&cancel))
+            .expect_err("cancelled parsing must report cancellation");
+        assert!(error.contains("отмен"), "{error}");
+    }
+
+    #[test]
+    fn epub_entry_read_honors_cancel_flag() {
+        let path =
+            std::env::temp_dir().join(format!("demagog-cancel-entry-{}.epub", std::process::id()));
+        let file = File::create(&path).expect("create zip");
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file("chapter.xhtml", zip::write::SimpleFileOptions::default())
+            .expect("start");
+        use std::io::Write;
+        archive
+            .write_all(b"<html><body><p>text</p></body></html>")
+            .expect("write");
+        archive.finish().expect("finish");
+        let mut archive = ZipArchive::new(File::open(&path).expect("open")).expect("read zip");
+        let cancel = AtomicBool::new(true);
+        let error = read_epub_zip_entry(&mut archive, "chapter.xhtml", Some(&cancel))
+            .expect_err("cancelled entry read must report cancellation");
+        assert!(error.contains("отмен"), "{error}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn navigation_detection_keeps_chapters_named_with_navigation() {
+        assert!(!is_epub_navigation("OEBPS/my-navigation.xhtml"));
+        assert!(is_epub_navigation("OEBPS/navigation.xhtml"));
+    }
+
+    #[test]
+    fn epub_spine_skips_item_with_nav_properties() {
+        let opf = r#"<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+<manifest>
+<item id="nav" href="content.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+<item id="c1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
+</manifest>
+<spine><itemref idref="nav"/><itemref idref="c1"/></spine>
+</package>"#;
+        let entries = epub_spine_paths(opf.as_bytes(), "OEBPS/content.opf").expect("spine");
+        assert_eq!(entries, vec!["OEBPS/chapter1.xhtml".to_string()]);
+    }
+
+    #[test]
+    fn declared_koi8r_encoding_is_honored() {
+        let (body, _, _) = encoding_rs::KOI8_R.encode("Привет");
+        let mut bytes = br#"<?xml version="1.0" encoding="koi8-r"?><body><p>"#.to_vec();
+        bytes.extend_from_slice(&body);
+        bytes.extend_from_slice(b"</p></body>");
+        let decoded = decode_xml_with_declared_encoding(&bytes);
+        assert!(decoded.contains("Привет"), "{decoded}");
+    }
+
+    #[test]
+    fn encoding_mention_in_comment_does_not_override_declaration() {
+        let xml =
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?><!-- cp1251 --><body><p>Привет</p></body>";
+        let decoded = decode_xml_with_declared_encoding(xml.as_bytes());
+        assert!(decoded.contains("Привет"), "{decoded}");
+    }
+
     #[test]
     fn recognizes_supported_book_paths_case_insensitively() {
         for name in [
@@ -939,9 +1102,10 @@ mod tests {
 <binary>AAEC</binary></FictionBook>"#;
 
         let text = extract_xml_paragraphs(
-            xml.as_bytes(),
+            xml,
             &["p", "v", "subtitle", "title", "text-author"],
             &["binary", "description"],
+            None,
         )
         .expect("well-formed FB2");
 
@@ -965,7 +1129,7 @@ mod tests {
     #[test]
     fn html_entities_do_not_drop_text() {
         let xml = "<html><body><p>Первый&nbsp;абзац &mdash; продолжение.</p></body></html>";
-        let text = extract_xml_paragraphs(xml.as_bytes(), &["p"], &[])
+        let text = extract_xml_paragraphs(xml, &["p"], &[], None)
             .expect("well-formed XHTML with HTML entities");
 
         assert!(text.contains("Первый"), "text before entity lost: {text}");
@@ -979,7 +1143,7 @@ mod tests {
     fn malformed_fb2_reports_an_error_instead_of_empty_text() {
         let xml = "<FictionBook><body><p>Текст</body></FictionBook>";
         assert!(
-            extract_xml_paragraphs(xml.as_bytes(), &["p"], &["description"]).is_err(),
+            extract_xml_paragraphs(xml, &["p"], &["description"], None).is_err(),
             "broken XML must not silently become an empty book"
         );
     }
@@ -1150,13 +1314,13 @@ mod tests {
     fn extracts_title_text_from_xml_metadata() {
         let opf = r#"<package xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata><dc:title>Война &amp; мир</dc:title></metadata></package>"#;
         assert_eq!(
-            xml_element_text(opf.as_bytes(), b"title").as_deref(),
+            xml_element_text(opf, b"title").as_deref(),
             Some("Война & мир")
         );
 
         let fb2 = r#"<FictionBook><description><title-info><book-title>Мир и война</book-title></title-info></description></FictionBook>"#;
         assert_eq!(
-            xml_element_text(fb2.as_bytes(), b"book-title").as_deref(),
+            xml_element_text(fb2, b"book-title").as_deref(),
             Some("Мир и война")
         );
     }
@@ -1164,19 +1328,21 @@ mod tests {
     #[test]
     fn missing_xml_title_is_none() {
         assert_eq!(
-            xml_element_text(b"<package><metadata></metadata></package>", b"title"),
+            xml_element_text("<package><metadata></metadata></package>", b"title"),
             None
         );
     }
 
     #[test]
     fn limited_reader_rejects_entries_above_the_limit() {
-        let exact = read_limited(std::io::Cursor::new(b"1234567890"), "chapter", 10)
-            .expect("entry exactly at the limit");
+        let exact =
+            read_limited_with_cancel(std::io::Cursor::new(b"1234567890"), "chapter", 10, None)
+                .expect("entry exactly at the limit");
         assert_eq!(exact, b"1234567890");
 
-        let error = read_limited(std::io::Cursor::new(b"12345678901"), "chapter", 10)
-            .expect_err("entry above the limit");
+        let error =
+            read_limited_with_cancel(std::io::Cursor::new(b"12345678901"), "chapter", 10, None)
+                .expect_err("entry above the limit");
         assert!(error.contains("больше"), "{error}");
     }
 }
