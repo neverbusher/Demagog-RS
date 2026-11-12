@@ -1,3 +1,5 @@
+use std::sync::atomic::AtomicBool;
+
 use rayon::prelude::*;
 use regex::{Regex, RegexBuilder};
 use rustc_hash::FxHashSet;
@@ -299,12 +301,28 @@ impl TextProcessor for RexProcessor {
     }
 
     fn process(&self, text: &str, capture_diff: bool) -> ProcessOutput {
+        self.process_with_cancel(text, capture_diff, None)
+    }
+
+    fn process_with_cancel(
+        &self,
+        text: &str,
+        capture_diff: bool,
+        cancel: Option<&AtomicBool>,
+    ) -> ProcessOutput {
+        if is_cancelled(cancel) {
+            return ProcessOutput {
+                text: text.to_string(),
+                replacements_count: 0,
+                events: Vec::new(),
+            };
+        }
         if !capture_diff && text.len() > 1024 {
             let lines: Vec<&str> = text.split('\n').collect();
             let results: Vec<(String, usize)> = lines
                 .par_iter()
                 .map(|line| {
-                    if line.trim().is_empty() {
+                    if is_cancelled(cancel) || line.trim().is_empty() {
                         (line.to_string(), 0)
                     } else {
                         self.process_chunk(line, None)
@@ -334,6 +352,9 @@ impl TextProcessor for RexProcessor {
         let mut events = Vec::new();
 
         for (i, line) in text.split('\n').enumerate() {
+            if is_cancelled(cancel) {
+                break;
+            }
             if i > 0 {
                 out.push('\n');
             }
@@ -358,6 +379,10 @@ impl TextProcessor for RexProcessor {
             events,
         }
     }
+}
+
+fn is_cancelled(cancel: Option<&AtomicBool>) -> bool {
+    cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 fn compile_rex_rules(pending: Vec<PendingRexRule>) -> (Vec<CompiledRexRule>, Vec<String>) {
@@ -400,7 +425,7 @@ fn compile_rex_rules(pending: Vec<PendingRexRule>) -> (Vec<CompiledRexRule>, Vec
 }
 
 /// Extracts fast pre-filter conditions for a regex pattern:
-/// 1) Whether it requires an ASCII digit (`\d` without `|` at top level)
+/// 1) Whether it requires an ASCII digit (`\d` that every match must cover)
 /// 2) Whether it requires a fixed substring like `"вс"`, `"<t"`, `"<:"`
 fn analyze_pattern_prefilter(pat: &str) -> (bool, Option<String>) {
     // Alternations make both prefilters unsafe: the required literal or digit
@@ -410,20 +435,17 @@ fn analyze_pattern_prefilter(pat: &str) -> (bool, Option<String>) {
     }
 
     let lower = pat.to_lowercase();
-    if lower.contains(r"\bвс") || lower.contains("(вс)") {
-        return (false, Some("вс".to_string()));
-    }
-    if lower.contains("<:ye:>") || lower.contains(r"<\:ye\:>") {
-        return (false, Some("<:ye:>".to_string()));
-    }
-    if lower.contains("<:yo:>") || lower.contains(r"<\:yo\:>") {
-        return (false, Some("<:yo:>".to_string()));
-    }
-    if lower.contains("<t") {
-        return (false, Some("<t".to_string()));
-    }
-    if lower.contains("<num") {
-        return (false, Some("<num".to_string()));
+    let hints: [(&str, bool); 5] = [
+        ("вс", lower.contains(r"\bвс") || lower.contains("(вс)")),
+        ("<:ye:>", lower.contains("<:ye:>")),
+        ("<:yo:>", lower.contains("<:yo:>")),
+        ("<t", lower.contains("<t")),
+        ("<num", lower.contains("<num")),
+    ];
+    for (literal, hinted) in hints {
+        if hinted && literal_is_required(&lower, literal) {
+            return (false, Some(literal.to_string()));
+        }
     }
     if requires_digit(pat) {
         return (true, None);
@@ -431,35 +453,109 @@ fn analyze_pattern_prefilter(pat: &str) -> (bool, Option<String>) {
     (false, None)
 }
 
-/// True only when the pattern cannot match without at least one digit:
-/// an unescaped `\d` outside a negated class and without an optional
-/// quantifier. `[^\d]`, `\D` and `\\d` must not trigger the digit prefilter.
-fn requires_digit(pat: &str) -> bool {
+/// Per-position structural facts: inside a character class, and how many
+/// enclosing groups carry an optional quantifier (`?`, `*`, `{0..}`).
+struct PatternStructure {
+    in_class: Vec<bool>,
+    optional_depth: Vec<usize>,
+}
+
+fn analyze_structure(pat: &str) -> PatternStructure {
     let chars: Vec<char> = pat.chars().collect();
-    let mut in_class = false;
-    let mut negated = false;
+    let n = chars.len();
+    let mut in_class = vec![false; n];
+    let mut optional_depth = vec![0usize; n];
+    let mut group_stack: Vec<usize> = Vec::new();
+    let mut optional_groups: Vec<(usize, usize)> = Vec::new();
+    let mut class_start: Option<usize> = None;
     let mut i = 0;
-    while i < chars.len() {
+    while i < n {
         let c = chars[i];
-        if c == '\\' && i + 1 < chars.len() {
-            let next = chars[i + 1];
-            if next == 'd' && (!in_class || !negated) {
-                let after = chars.get(i + 2).copied();
-                let optional = matches!(after, Some('*') | Some('?'))
-                    || (after == Some('{') && chars.get(i + 3).copied() == Some('0'));
-                if !optional {
-                    return true;
-                }
-            }
+        if c == '\\' && i + 1 < n {
             i += 2;
             continue;
         }
-        if c == '[' {
-            in_class = true;
-            negated = chars.get(i + 1).copied() == Some('^');
-        } else if c == ']' {
-            in_class = false;
-            negated = false;
+        if let Some(start) = class_start {
+            if c == ']' {
+                for slot in in_class.iter_mut().take(i + 1).skip(start) {
+                    *slot = true;
+                }
+                class_start = None;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            '[' => class_start = Some(i),
+            '(' => group_stack.push(i),
+            ')' => {
+                if let Some(start) = group_stack.pop()
+                    && quantifier_makes_optional(&chars, i + 1)
+                {
+                    optional_groups.push((start, i));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    for (start, end) in optional_groups {
+        for slot in optional_depth.iter_mut().take(end + 1).skip(start) {
+            *slot += 1;
+        }
+    }
+    PatternStructure {
+        in_class,
+        optional_depth,
+    }
+}
+
+fn quantifier_makes_optional(chars: &[char], after: usize) -> bool {
+    matches!(chars.get(after), Some('*') | Some('?'))
+        || (chars.get(after) == Some(&'{') && chars.get(after + 1) == Some(&'0'))
+}
+
+/// True when every match must contain the literal: at least one occurrence
+/// sits outside classes and optional groups and its last character is not
+/// quantified away. Alternations must be excluded by the caller.
+fn literal_is_required(pat: &str, literal: &str) -> bool {
+    let chars: Vec<char> = pat.chars().collect();
+    let lit: Vec<char> = literal.chars().collect();
+    if lit.is_empty() || chars.len() < lit.len() {
+        return false;
+    }
+    let structure = analyze_structure(pat);
+    for i in 0..=chars.len() - lit.len() {
+        if chars[i..i + lit.len()] != lit[..] {
+            continue;
+        }
+        let covered =
+            (i..i + lit.len()).all(|p| !structure.in_class[p] && structure.optional_depth[p] == 0);
+        if covered && !quantifier_makes_optional(&chars, i + lit.len()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// True only when the pattern cannot match without at least one digit:
+/// an unescaped `\d` outside character classes and optional groups,
+/// without an optional quantifier.
+fn requires_digit(pat: &str) -> bool {
+    let chars: Vec<char> = pat.chars().collect();
+    let structure = analyze_structure(pat);
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\\' && i + 1 < chars.len() {
+            if chars[i + 1] == 'd'
+                && !structure.in_class[i]
+                && structure.optional_depth[i] == 0
+                && !quantifier_makes_optional(&chars, i + 2)
+            {
+                return true;
+            }
+            i += 2;
+            continue;
         }
         i += 1;
     }
@@ -493,6 +589,46 @@ fn snippet_around(s: &str, start_byte: usize, end_byte: usize) -> String {
 mod tests {
     use super::*;
     use crate::ports::TextProcessor;
+
+    #[test]
+    fn rex_processing_honors_cancel_between_lines() {
+        let processor = RexProcessor::compile("t.rex".to_string(), "кот=к+от\n", "UTF-8");
+        let cancel = std::sync::atomic::AtomicBool::new(true);
+        let text = "кот\n".repeat(5000);
+        let out = processor.process_with_cancel(&text, false, Some(&cancel));
+        assert_eq!(out.replacements_count, 0);
+        assert_eq!(out.text, text);
+    }
+
+    #[test]
+    fn optional_tag_literal_disables_substring_prefilter() {
+        let processor = RexProcessor::compile("t.rex".to_string(), "<t?=X\n", "UTF-8");
+        assert_eq!(processor.process("<", false).text, "X");
+    }
+
+    #[test]
+    fn class_tag_literal_disables_substring_prefilter() {
+        let processor = RexProcessor::compile("t.rex".to_string(), "[<t]=X\n", "UTF-8");
+        assert_eq!(processor.process("t", false).text, "X");
+    }
+
+    #[test]
+    fn optional_group_disables_digit_prefilter() {
+        let processor = RexProcessor::compile("t.rex".to_string(), "(\\d+)?abc=X\n", "UTF-8");
+        assert_eq!(processor.process("abc", false).text, "X");
+    }
+
+    #[test]
+    fn optional_vs_group_disables_substring_prefilter() {
+        let processor = RexProcessor::compile("t.rex".to_string(), "(вс)?е=X\n", "UTF-8");
+        assert_eq!(processor.process("е", false).text, "X");
+    }
+
+    #[test]
+    fn escaped_punctuation_in_rhs_is_literal() {
+        let processor = RexProcessor::compile("t.rex".to_string(), "a=\\?\\!\n", "UTF-8");
+        assert_eq!(processor.process("a", false).text, "?!");
+    }
 
     #[test]
     fn snippet_handles_offsets_inside_multibyte_chars() {
@@ -530,6 +666,21 @@ mod tests {
         let processor = RexProcessor::compile("t.rex".to_string(), "\\d=N\n", "UTF-8");
         assert_eq!(processor.process("абв", false).text, "абв");
         assert_eq!(processor.process("а1б", false).text, "аNб");
+    }
+
+    #[test]
+    fn positive_digit_class_matches_without_digits() {
+        let processor = RexProcessor::compile("t.rex".to_string(), "[a\\d]=X\n", "UTF-8");
+        assert_eq!(processor.process("a", false).text, "X");
+        assert_eq!(processor.process("1", false).text, "X");
+    }
+
+    #[test]
+    fn letter_tag_rule_applies_without_digits() {
+        let processor =
+            RexProcessor::compile("t.rex".to_string(), "(<[a-z\\d]+>) млн=$1<mln>\n", "UTF-8");
+        assert_eq!(processor.process("<usd> млн", false).text, "<usd><mln>");
+        assert_eq!(processor.process("<t1> млн", false).text, "<t1><mln>");
     }
 
     #[test]

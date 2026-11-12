@@ -80,23 +80,15 @@ pub fn normalize_rex_replacement(raw: &str) -> String {
             }
         } else if chars[i] == '\\' && i + 1 < chars.len() {
             match chars[i + 1] {
-                'r' => {
-                    out.push('\r');
-                    i += 2;
-                    continue;
-                }
-                'n' => {
-                    out.push('\n');
-                    i += 2;
-                    continue;
-                }
-                't' => {
-                    out.push('\t');
-                    i += 2;
-                    continue;
-                }
-                _ => {}
+                'r' => out.push('\r'),
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                // A literal dollar must survive the regex crate's `$` expansion.
+                '$' => out.push_str("$$"),
+                other => out.push(other),
             }
+            i += 2;
+            continue;
         }
         out.push(chars[i]);
         i += 1;
@@ -114,6 +106,14 @@ mod tests {
         assert_eq!(normalize_rex_replacement("$1гОловы"), "${1}гОловы");
         assert_eq!(normalize_rex_replacement("$2X$1"), "${2}X${1}");
         assert_eq!(normalize_rex_replacement("$$1"), "$$1");
+    }
+
+    #[test]
+    fn replacement_backslash_escapes_are_unescaped() {
+        assert_eq!(normalize_rex_replacement("\\$1"), "$$1");
+        assert_eq!(normalize_rex_replacement("\\\\"), "\\");
+        assert_eq!(normalize_rex_replacement("\\?"), "?");
+        assert_eq!(normalize_rex_replacement("\\:"), ":");
     }
 
     #[test]

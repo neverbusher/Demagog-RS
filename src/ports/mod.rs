@@ -9,6 +9,15 @@ pub trait TextProcessor: Send + Sync {
     fn kind(&self) -> DictionaryKind;
     fn rule_count(&self) -> usize;
     fn process(&self, text: &str, capture_diff: bool) -> ProcessOutput;
+    /// Interruptible variant; the default cannot be cancelled mid-step.
+    fn process_with_cancel(
+        &self,
+        text: &str,
+        capture_diff: bool,
+        _cancel: Option<&AtomicBool>,
+    ) -> ProcessOutput {
+        self.process(text, capture_diff)
+    }
 }
 
 /// Single Responsibility: Reads a book file (.txt, .fb2, .epub, .docx) into a `BookDocument`.

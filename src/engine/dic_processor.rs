@@ -1,4 +1,5 @@
 use std::cmp::Reverse;
+use std::sync::atomic::AtomicBool;
 
 use rayon::prelude::*;
 use regex::RegexBuilder;
@@ -649,6 +650,22 @@ impl TextProcessor for DicProcessor {
     }
 
     fn process(&self, text: &str, capture_diff: bool) -> ProcessOutput {
+        self.process_with_cancel(text, capture_diff, None)
+    }
+
+    fn process_with_cancel(
+        &self,
+        text: &str,
+        capture_diff: bool,
+        cancel: Option<&AtomicBool>,
+    ) -> ProcessOutput {
+        if is_cancelled(cancel) {
+            return ProcessOutput {
+                text: text.to_string(),
+                replacements_count: 0,
+                events: Vec::new(),
+            };
+        }
         if self.is_stress_converter {
             return self.process_stress_converter(text, capture_diff);
         }
@@ -658,7 +675,7 @@ impl TextProcessor for DicProcessor {
             let results: Vec<(String, usize)> = lines
                 .par_iter()
                 .map(|line| {
-                    if line.trim().is_empty() {
+                    if is_cancelled(cancel) || line.trim().is_empty() {
                         (line.to_string(), 0)
                     } else {
                         self.process_paragraph(line, None)
@@ -687,6 +704,9 @@ impl TextProcessor for DicProcessor {
         let mut events = Vec::new();
 
         for (i, line) in text.split('\n').enumerate() {
+            if is_cancelled(cancel) {
+                break;
+            }
             if i > 0 {
                 out.push('\n');
             }
@@ -713,6 +733,10 @@ impl TextProcessor for DicProcessor {
     }
 }
 
+fn is_cancelled(cancel: Option<&AtomicBool>) -> bool {
+    cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 /// Literal `$` in a dictionary RHS must not be interpreted as a regex
 /// capture reference; only the `${n}` placeholders we insert ourselves expand.
 fn escape_replacement_dollars(rhs: &str) -> String {
@@ -720,13 +744,16 @@ fn escape_replacement_dollars(rhs: &str) -> String {
 }
 
 fn split_dic_rule(line: &str) -> Option<(&str, &str)> {
-    if let Some(pos) = line.find('\x06') {
-        Some((&line[..pos], &line[pos + 1..]))
-    } else if let Some(pos) = line.find("::") {
-        Some((&line[..pos], &line[pos + 2..]))
-    } else {
-        line.split_once('=')
+    let mut best: Option<(usize, usize)> = None;
+    for (separator, width) in [("\x06", 1usize), ("::", 2), ("=", 1)] {
+        if let Some(pos) = line.find(separator)
+            && best.is_none_or(|(best_pos, _)| pos < best_pos)
+        {
+            best = Some((pos, width));
+        }
     }
+    let (pos, width) = best?;
+    Some((&line[..pos], &line[pos + width..]))
 }
 
 fn line_chunks(content: &str, count: usize) -> Vec<&str> {
@@ -776,9 +803,9 @@ fn extract_alpha_words(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// When a case-insensitive rule has both LHS and RHS starting with the same uppercase letter
-/// AND RHS already contains `+` (e.g. `Ещё=Ещ+о` in 67_TTS_Offline), lowercase the initial letter
-/// of RHS so lowercase text (`ещё`) stays lowercase (`ещ+о`).
+/// When a case-insensitive rule has an uppercase initial on both sides and
+/// the RHS contains `+` (e.g. `Ещё=Ещ+о` in 67_TTS_Offline), lowercase the
+/// initial letter of the RHS so lowercase text (`ещё`) stays lowercase (`ещ+о`).
 fn normalize_ci_rhs_initial_case(lhs: &str, rhs: &mut String) {
     let Some(first_l) = lhs.chars().next() else {
         return;
@@ -1037,6 +1064,44 @@ fn compile_dic_wildcard_rule(
 mod tests {
     use super::*;
     use crate::ports::TextProcessor;
+
+    #[test]
+    fn dic_processing_honors_cancel_between_lines() {
+        let processor = DicProcessor::compile("t.dic".to_string(), "кот=к+от\n", "UTF-8");
+        let cancel = std::sync::atomic::AtomicBool::new(true);
+        let text = "кот\n".repeat(5000);
+        let out = processor.process_with_cancel(&text, false, Some(&cancel));
+        assert_eq!(out.replacements_count, 0);
+        assert_eq!(out.text, text);
+    }
+
+    #[test]
+    fn stress_converter_honors_cancel() {
+        let processor =
+            DicProcessor::compile("69_TTS_Offline+УДАРЕНИЯ.dic".to_string(), "", "UTF-8");
+        let cancel = std::sync::atomic::AtomicBool::new(true);
+        let out = processor.process_with_cancel("замОк", false, Some(&cancel));
+        assert_eq!(out.text, "замОк");
+    }
+
+    #[test]
+    fn double_colon_in_rhs_does_not_break_equals_rule() {
+        let processor = DicProcessor::compile("t.dic".to_string(), "ссылка=а::б\n", "UTF-8");
+        assert_eq!(processor.process("ссылка", false).text, "а::б");
+    }
+
+    #[test]
+    fn double_colon_separator_still_works() {
+        let processor = DicProcessor::compile("t.dic".to_string(), "слово::замена\n", "UTF-8");
+        assert_eq!(processor.process("слово", false).text, "замена");
+    }
+
+    #[test]
+    fn ci_rhs_initial_is_lowercased_even_for_different_letters() {
+        let processor = DicProcessor::compile("t.dic".to_string(), "Ёж=Й+ож\n", "UTF-8");
+        assert_eq!(processor.process("ёж", false).text, "й+ож");
+        assert_eq!(processor.process("Ёж", false).text, "Й+ож");
+    }
 
     #[test]
     fn diff_and_fast_paths_produce_same_text() {
