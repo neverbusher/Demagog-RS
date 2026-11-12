@@ -396,33 +396,19 @@ impl DicProcessor {
             } else {
                 current.to_lowercase().contains(&rule.lhs_lower)
             };
-            if matched {
-                let next = if rule.case_sensitive {
-                    current.replace(&rule.lhs, &rule.rhs)
-                } else {
-                    regex::RegexBuilder::new(&regex::escape(&rule.lhs))
-                        .case_insensitive(true)
-                        .build()
-                        .map(|re| {
-                            re.replace_all(&current, regex::NoExpand(&rule.rhs))
-                                .into_owned()
-                        })
-                        .unwrap_or_else(|_| current.clone())
-                };
-                if next != current {
-                    count += 1;
-                    if let Some(ev) = events.as_deref_mut()
-                        && ev.len() < 200
-                    {
-                        ev.push(ReplacementEvent {
-                            dictionary_name: self.name.clone(),
-                            rule_summary: format!("{}={}", rule.lhs, rule.rhs),
-                            before_snippet: rule.lhs.clone(),
-                            after_snippet: rule.rhs.clone(),
-                        });
-                    }
-                    current = next;
+            if matched && let Some(replaced) = apply_exact_phrase(&current, rule) {
+                count += 1;
+                if let Some(ev) = events.as_deref_mut()
+                    && ev.len() < 200
+                {
+                    ev.push(ReplacementEvent {
+                        dictionary_name: self.name.clone(),
+                        rule_summary: format!("{}={}", rule.lhs, rule.rhs),
+                        before_snippet: rule.lhs.clone(),
+                        after_snippet: rule.rhs.clone(),
+                    });
                 }
+                current = replaced;
             }
         }
 
@@ -1161,6 +1147,24 @@ mod tests {
         let processor = DicProcessor::compile("t.dic".to_string(), "т.д.=ТАК ДАЛЕЕ\n", "UTF-8");
         let output = processor.process("И Т.Д. тут", false);
         assert_eq!(output.text, "И ТАК ДАЛЕЕ тут");
+    }
+
+    #[test]
+    fn unanchored_phrase_respects_word_boundary_before_period() {
+        // Регрессия: `$с.=эс` раскрывает аббревиатуру «с.», но не должно
+        // портить слово, оканчивающееся на «с» перед точкой (вопрос. -> вопроэс).
+        let processor = DicProcessor::compile("t.dic".to_string(), "$с.=эс\n", "UTF-8");
+        let output = processor.process("Он задал вопрос.", false);
+        assert_eq!(output.text, "Он задал вопрос.");
+        assert_eq!(output.replacements_count, 0);
+    }
+
+    #[test]
+    fn unanchored_phrase_still_expands_standalone_abbreviation() {
+        let processor = DicProcessor::compile("t.dic".to_string(), "$с.=эс\n", "UTF-8");
+        let output = processor.process("с. это буква", false);
+        assert_eq!(output.text, "эс это буква");
+        assert_eq!(output.replacements_count, 1);
     }
 
     #[test]
