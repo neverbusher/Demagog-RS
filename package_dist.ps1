@@ -17,7 +17,7 @@ $staging = Join-Path $outputRoot "Demagog-RS"
 
 if (-not $Version) {
     $versionLine = Select-String -LiteralPath (Join-Path $root "Cargo.toml") -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
-    $Version = if ($versionLine) { $versionLine.Matches[0].Groups[1].Value } else { "0.1.4" }
+    $Version = if ($versionLine) { $versionLine.Matches[0].Groups[1].Value } else { throw "Cannot parse version from Cargo.toml" }
 }
 $zipPath = Join-Path $outputRoot "Demagog-RS-$Version-win64.zip"
 
@@ -82,10 +82,18 @@ Copy-Item -LiteralPath (Join-Path $root "README.md") -Destination (Join-Path $st
 Copy-Item -LiteralPath (Join-Path $root "LICENSE") -Destination (Join-Path $staging "LICENSE.txt")
 Copy-Item -LiteralPath (Join-Path $root "THIRD_PARTY_NOTICES.md") -Destination (Join-Path $staging "THIRD_PARTY_NOTICES.md")
 
-$excludedDictionaries = @("35_мой словарь.dic")
+# Ship the dictionary manifest so drift detection works in the packaged app.
+$manifestSource = Join-Path $root "assets\dictionaries.sha256"
+if (-not (Test-Path -LiteralPath $manifestSource)) {
+    throw "Missing dictionary manifest: $manifestSource. Run Demagog-RS.exe --manifest-dictionaries first."
+}
+New-Item -ItemType Directory -Path (Join-Path $staging "assets") -Force | Out-Null
+Copy-Item -LiteralPath $manifestSource -Destination (Join-Path $staging "assets\dictionaries.sha256")
+
+# Personal user dictionaries (35_ prefix) are never shipped.
 $dictionaries = @(Get-ChildItem -LiteralPath $dicSource -File | Where-Object {
     ($_.Extension -eq ".rex" -or $_.Extension -eq ".dic") -and
-    ($excludedDictionaries -notcontains $_.Name)
+    ($_.Name -notlike "35_*")
 })
 if ($dictionaries.Count -eq 0) {
     throw "No dictionaries found in $dicSource"
