@@ -1112,9 +1112,9 @@ fn find_counter_clamps_stale_current_match() {
     let mut app = ui_test_app("текст текст", "", Vec::new());
     app.find_open = true;
     app.find_query = "тек".to_string();
-    app.find_for_tab = Some(ActiveTab::RawText);
-    app.find_dirty = true;
-    app.find_last_edit = std::time::Instant::now();
+    app.find_for_tab = Some(app.active_tab);
+    // Не dirty: debounce не должен сбрасывать find_current до рендера счётчика.
+    app.find_dirty = false;
     app.find_matches = FindMatches {
         ranges: vec![(0, 3), (6, 9)],
         truncated: false,
