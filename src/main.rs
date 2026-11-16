@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::domain::{ChunkConfig, StressFormat};
+use crate::domain::{ChunkConfig, StressFormat, TextCleanupConfig};
 use crate::engine::loader::{DictionaryLoadReport, load_dictionaries_parallel};
 use crate::io::book_reader::CompositeBookReader;
 use crate::ports::DocumentReader;
@@ -230,6 +230,7 @@ fn run_cli_or_bench(args: &[String]) {
             stress_format: StressFormat::PlusBeforeVowel,
             chunk_config: ChunkConfig::default(),
             capture_diff: args.iter().any(|a| a == "--diff"),
+            cleanup: cleanup_config_from_args(args),
         },
         None,
         None,
@@ -256,6 +257,12 @@ fn run_cli_or_bench(args: &[String]) {
         result.report.total_replacements,
         result.chunks.len()
     );
+    if result.report.cleanup.removed_empty_lines > 0 || result.report.cleanup.added_periods > 0 {
+        println!(
+            "Нормализация: удалено {} строк, добавлено {} точек",
+            result.report.cleanup.removed_empty_lines, result.report.cleanup.added_periods
+        );
+    }
 
     if !result.report.events.is_empty() {
         println!("--- Журнал замен ---");
@@ -275,5 +282,47 @@ fn run_cli_or_bench(args: &[String]) {
         std::fs::write(&out_path, &result.processed_text)
             .expect("Не удалось записать выходной файл");
         println!("Результат сохранён в {}", out_path.display());
+    }
+}
+
+fn cleanup_config_from_args(args: &[String]) -> TextCleanupConfig {
+    TextCleanupConfig {
+        remove_empty_lines: args.iter().any(|a| a == "--remove-empty-lines"),
+        add_line_end_periods: args.iter().any(|a| a == "--line-periods"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn cli_cleanup_flags_map_to_config() {
+        let config = cleanup_config_from_args(&args(&[
+            "--cli",
+            "--input",
+            "book.txt",
+            "--remove-empty-lines",
+            "--line-periods",
+        ]));
+        assert!(config.remove_empty_lines);
+        assert!(config.add_line_end_periods);
+    }
+
+    #[test]
+    fn cli_without_cleanup_flags_keeps_defaults() {
+        let config = cleanup_config_from_args(&args(&["--cli", "--input", "book.txt"]));
+        assert_eq!(config, TextCleanupConfig::default());
+    }
+
+    #[test]
+    fn cli_cleanup_flags_are_independent() {
+        let config = cleanup_config_from_args(&args(&["--cli", "--line-periods"]));
+        assert!(!config.remove_empty_lines);
+        assert!(config.add_line_end_periods);
     }
 }

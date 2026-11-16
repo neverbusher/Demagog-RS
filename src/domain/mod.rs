@@ -62,6 +62,20 @@ impl Default for ChunkConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TextCleanupConfig {
+    #[serde(default)]
+    pub remove_empty_lines: bool,
+    #[serde(default)]
+    pub add_line_end_periods: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NormalizationStats {
+    pub removed_empty_lines: usize,
+    pub added_periods: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DictionaryKind {
     RegexStandard,
@@ -181,6 +195,7 @@ pub struct PipelineReport {
     pub total_replacements: usize,
     pub events: Vec<ReplacementEvent>,
     pub events_truncated: bool,
+    pub cleanup: NormalizationStats,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -225,6 +240,8 @@ pub struct AppSettings {
     pub(crate) warm_mode: Option<bool>,
     pub stress_format: StressFormat,
     pub chunk_config: ChunkConfig,
+    #[serde(default)]
+    pub cleanup: TextCleanupConfig,
     pub dic_folder: PathBuf,
     pub disabled_dictionaries: Vec<String>,
     #[serde(default = "default_true")]
@@ -243,6 +260,7 @@ impl Default for AppSettings {
             warm_mode: None,
             stress_format: StressFormat::PlusBeforeVowel,
             chunk_config: ChunkConfig::default(),
+            cleanup: TextCleanupConfig::default(),
             dic_folder: PathBuf::from("dic"),
             disabled_dictionaries: Vec::new(),
             group_dictionaries_by_type: true,
@@ -654,6 +672,58 @@ mod tests {
         assert_eq!(loaded.theme(), ThemeMode::Warm);
         assert!(loaded.dark_mode.is_none());
         assert!(loaded.warm_mode.is_none());
+    }
+
+    #[test]
+    fn cleanup_defaults_to_off_when_absent_from_json() {
+        let mut value =
+            serde_json::to_value(AppSettings::default()).expect("serialize default settings");
+        value
+            .as_object_mut()
+            .expect("settings object")
+            .remove("cleanup");
+
+        let loaded = AppSettings::from_json(
+            &serde_json::to_vec(&value).expect("legacy JSON"),
+            PathBuf::from("dic"),
+        )
+        .expect("load settings without cleanup");
+
+        assert_eq!(loaded.cleanup, TextCleanupConfig::default());
+        assert!(!loaded.cleanup.remove_empty_lines);
+        assert!(!loaded.cleanup.add_line_end_periods);
+    }
+
+    #[test]
+    fn cleanup_flags_roundtrip_through_json() {
+        let settings = AppSettings {
+            cleanup: TextCleanupConfig {
+                remove_empty_lines: true,
+                add_line_end_periods: true,
+            },
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(&settings).expect("serialize settings");
+        let parsed: AppSettings = serde_json::from_value(value).expect("deserialize settings");
+
+        assert_eq!(parsed.cleanup, settings.cleanup);
+    }
+
+    #[test]
+    fn cleanup_partial_json_keeps_missing_flag_off() {
+        let mut value =
+            serde_json::to_value(AppSettings::default()).expect("serialize default settings");
+        value["cleanup"] = serde_json::json!({ "remove_empty_lines": true });
+
+        let loaded = AppSettings::from_json(
+            &serde_json::to_vec(&value).expect("partial JSON"),
+            PathBuf::from("dic"),
+        )
+        .expect("load partial cleanup settings");
+
+        assert!(loaded.cleanup.remove_empty_lines);
+        assert!(!loaded.cleanup.add_line_end_periods);
     }
 
     #[test]

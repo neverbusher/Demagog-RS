@@ -1018,6 +1018,16 @@ impl DemagogApp {
                 ))
                 .strong(),
             );
+            if self.report.cleanup.removed_empty_lines > 0 || self.report.cleanup.added_periods > 0
+            {
+                ui.label(
+                    RichText::new(format!(
+                        "🧹 Нормализация: -{} строк, +{} точек",
+                        self.report.cleanup.removed_empty_lines, self.report.cleanup.added_periods
+                    ))
+                    .strong(),
+                );
+            }
             ui.separator();
             let filter_label = ui.label("Поиск по заменам:");
             ui.add(egui::TextEdit::singleline(&mut self.diff_filter).desired_width(240.0))
@@ -1166,6 +1176,37 @@ impl DemagogApp {
                         )
                         .labelled_by(chunk_label.id);
                     self.apply_chunk_config_change(ui, chunk_response.changed());
+                    ui.end_row();
+
+                    ui.label("Очистка текста:");
+                    let cleanup_changed = ui
+                        .add_enabled_ui(!self.is_busy, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                let empty = ui
+                                    .checkbox(
+                                        &mut self.settings.cleanup.remove_empty_lines,
+                                        "Удалять пустые строки",
+                                    )
+                                    .on_hover_text(
+                                        "Убирает пустые строки и строки из пробелов/табов в результате",
+                                    );
+                                let periods = ui
+                                    .checkbox(
+                                        &mut self.settings.cleanup.add_line_end_periods,
+                                        "Ставить точку в конце строки",
+                                    )
+                                    .on_hover_text(
+                                        "Строки без знака препинания получают точку — паузы для TTS. «Привет» → «Привет».",
+                                    );
+                                empty.changed() || periods.changed()
+                            })
+                            .inner
+                        })
+                        .inner;
+                    if cleanup_changed {
+                        self.mark_result_stale();
+                        self.save_settings();
+                    }
                     ui.end_row();
 
                     ui.label("Папка словарей:");

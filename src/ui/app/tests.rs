@@ -1178,3 +1178,57 @@ fn replacing_source_with_result_marks_result_stale() {
         "result derived from the old source must be marked stale after replace"
     );
 }
+
+#[test]
+fn settings_cleanup_checkboxes_toggle_and_mark_result_stale() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = ui_test_app("Глава первая", "Глава первая", vec!["Глава первая".into()]);
+    app.active_tab = ActiveTab::Settings;
+    app.result_state
+        .mark_computed(StressFormat::PlusBeforeVowel);
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1280.0, 900.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+    harness.run();
+
+    harness
+        .get_by_label_contains("Удалять пустые строки")
+        .click();
+    harness.run();
+    assert!(harness.state().settings.cleanup.remove_empty_lines);
+    assert!(harness.state().result_state.is_stale());
+
+    harness
+        .get_by_label_contains("Ставить точку в конце строки")
+        .click();
+    harness.run();
+    assert!(harness.state().settings.cleanup.add_line_end_periods);
+}
+
+#[test]
+fn diff_tab_shows_cleanup_stats_when_normalization_changed_text() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = ui_test_app("Глава", "Глава.", vec!["Глава.".into()]);
+    app.active_tab = ActiveTab::DiffAndStats;
+    app.report.cleanup = crate::domain::NormalizationStats {
+        removed_empty_lines: 2,
+        added_periods: 3,
+    };
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1280.0, 900.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+    harness.run();
+
+    assert!(
+        harness
+            .get_all_by_label_contains("-2 строк, +3 точек")
+            .count()
+            >= 1
+    );
+}

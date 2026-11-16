@@ -5,8 +5,10 @@ use std::time::Instant;
 
 use crate::domain::{
     ChunkConfig, PipelineProgress, PipelineReport, PipelineResult, StepReport, StressFormat,
+    TextCleanupConfig,
 };
 use crate::ports::{StressFormatter, TextChunker, TextProcessor};
+use crate::services::normalize::normalize_text;
 
 pub struct ProcessingPipeline {
     stress_formatter: Arc<dyn StressFormatter>,
@@ -17,6 +19,7 @@ pub struct PipelineOptions {
     pub stress_format: StressFormat,
     pub chunk_config: ChunkConfig,
     pub capture_diff: bool,
+    pub cleanup: TextCleanupConfig,
 }
 
 impl ProcessingPipeline {
@@ -39,6 +42,7 @@ impl ProcessingPipeline {
             stress_format,
             chunk_config,
             capture_diff,
+            cleanup,
         } = options;
         let total_start = Instant::now();
         let mut current = input_text.to_string();
@@ -99,6 +103,12 @@ impl ProcessingPipeline {
             notify_cancelled(progress_tx);
             return None;
         }
+        let (processed_text, cleanup_stats) = normalize_text(&processed_text, &cleanup);
+        report.cleanup = cleanup_stats;
+        if is_cancelled(cancel) {
+            notify_cancelled(progress_tx);
+            return None;
+        }
         let chunks = self
             .chunker
             .split_into_chunks(&processed_text, &chunk_config);
@@ -133,7 +143,7 @@ fn notify_cancelled(progress_tx: Option<&Sender<PipelineProgress>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{DictionaryKind, ProcessOutput, ReplacementEvent};
+    use crate::domain::{DictionaryKind, NormalizationStats, ProcessOutput, ReplacementEvent};
     use crate::ports::TextProcessor;
     use crate::services::chunker::SentenceAwareChunker;
     use crate::services::stress::RussianStressFormatter;
@@ -299,6 +309,7 @@ mod tests {
                     stress_format: StressFormat::PlusBeforeVowel,
                     chunk_config: ChunkConfig::default(),
                     capture_diff: true,
+                    cleanup: TextCleanupConfig::default(),
                 },
                 None,
                 None,
@@ -318,6 +329,60 @@ mod tests {
         let result = run_eventful_pipeline(2);
         assert_eq!(result.report.events.len(), 400);
         assert!(!result.report.events_truncated);
+    }
+
+    #[test]
+    fn cleanup_normalizes_processed_text_before_chunking_and_reports_stats() {
+        let pipeline = ProcessingPipeline::new(
+            Arc::new(RussianStressFormatter),
+            Arc::new(SentenceAwareChunker),
+        );
+        let result = pipeline
+            .execute(
+                "Глава первая\n\nОн пошёл.",
+                &[],
+                PipelineOptions {
+                    stress_format: StressFormat::PlusBeforeVowel,
+                    chunk_config: ChunkConfig::default(),
+                    capture_diff: false,
+                    cleanup: TextCleanupConfig {
+                        remove_empty_lines: true,
+                        add_line_end_periods: true,
+                    },
+                },
+                None,
+                None,
+            )
+            .expect("pipeline result");
+        assert_eq!(result.raw_text, "Глава первая\n\nОн пошёл.");
+        assert_eq!(result.processed_text, "Глава первая.\nОн пошёл.");
+        assert_eq!(result.report.cleanup.removed_empty_lines, 1);
+        assert_eq!(result.report.cleanup.added_periods, 1);
+        assert_eq!(result.chunks, vec!["Глава первая.\nОн пошёл.".to_string()]);
+    }
+
+    #[test]
+    fn disabled_cleanup_keeps_text_and_zero_stats() {
+        let pipeline = ProcessingPipeline::new(
+            Arc::new(RussianStressFormatter),
+            Arc::new(SentenceAwareChunker),
+        );
+        let result = pipeline
+            .execute(
+                "Глава первая\n\nОн пошёл.",
+                &[],
+                PipelineOptions {
+                    stress_format: StressFormat::PlusBeforeVowel,
+                    chunk_config: ChunkConfig::default(),
+                    capture_diff: false,
+                    cleanup: TextCleanupConfig::default(),
+                },
+                None,
+                None,
+            )
+            .expect("pipeline result");
+        assert_eq!(result.processed_text, "Глава первая\n\nОн пошёл.");
+        assert_eq!(result.report.cleanup, NormalizationStats::default());
     }
 
     struct CancelAwareProcessor {
@@ -375,6 +440,7 @@ mod tests {
                 stress_format: StressFormat::PlusBeforeVowel,
                 chunk_config: ChunkConfig::default(),
                 capture_diff: false,
+                cleanup: TextCleanupConfig::default(),
             },
             Some(&flag),
             None,
@@ -415,6 +481,7 @@ mod tests {
                 stress_format: StressFormat::CleanYoOnly,
                 chunk_config: ChunkConfig::default(),
                 capture_diff: false,
+                cleanup: TextCleanupConfig::default(),
             },
             Some(cancel.as_ref()),
             None,
@@ -456,6 +523,7 @@ mod tests {
                 stress_format: StressFormat::CleanYoOnly,
                 chunk_config: ChunkConfig::default(),
                 capture_diff: false,
+                cleanup: TextCleanupConfig::default(),
             },
             Some(cancel.as_ref()),
             None,
@@ -485,6 +553,7 @@ mod tests {
                     stress_format: StressFormat::CleanYoOnly,
                     chunk_config: ChunkConfig::default(),
                     capture_diff: false,
+                    cleanup: TextCleanupConfig::default(),
                 },
                 None,
                 Some(&tx),
@@ -516,6 +585,7 @@ mod tests {
                     stress_format: StressFormat::CleanYoOnly,
                     chunk_config: ChunkConfig::default(),
                     capture_diff: false,
+                    cleanup: TextCleanupConfig::default(),
                 },
                 None,
                 None,

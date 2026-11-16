@@ -189,7 +189,7 @@ use std::sync::Arc;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::domain::{ChunkConfig, StressFormat};
+use crate::domain::{ChunkConfig, StressFormat, TextCleanupConfig};
 use crate::engine::loader::{load_dictionaries_parallel_with_cancel, sorted_dictionary_paths};
 use crate::ports::TextProcessor;
 use crate::services::chunker::SentenceAwareChunker;
@@ -527,6 +527,7 @@ pub fn run_check_with_cancel(
                 stress_format: StressFormat::PlusBeforeVowel,
                 chunk_config: ChunkConfig::default(),
                 capture_diff: false,
+                cleanup: TextCleanupConfig::default(),
             },
             cancel,
             None,

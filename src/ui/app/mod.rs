@@ -606,6 +606,7 @@ impl DemagogApp {
         self.processing_snapshot = Some(ProcessingSnapshot::capture(&input_text));
         let stress_format = self.settings.stress_format;
         let chunk_config = self.settings.chunk_config.clone();
+        let cleanup = self.settings.cleanup;
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancel_flag = Some(Arc::clone(&cancel));
         let (tx, rx) = mpsc::channel();
@@ -634,6 +635,7 @@ impl DemagogApp {
                     stress_format,
                     chunk_config,
                     capture_diff,
+                    cleanup,
                 },
                 Some(cancel.as_ref()),
                 Some(&ptx),
