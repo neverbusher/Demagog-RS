@@ -1232,3 +1232,178 @@ fn diff_tab_shows_cleanup_stats_when_normalization_changed_text() {
             >= 1
     );
 }
+
+#[test]
+fn batch_queue_filters_dedups_and_defaults_output_dir() {
+    let dir = std::env::temp_dir();
+    let a = dir.join("demagog-batch-ui-a.txt");
+    let b = dir.join("demagog-batch-ui-b.fb2");
+    let png = dir.join("demagog-batch-ui-c.png");
+
+    let mut state = batch::BatchState::default();
+    state.add_files([a.clone(), a, b, png]);
+
+    assert_eq!(state.items.len(), 2);
+    assert_eq!(state.output_dir, Some(dir.join("processed")));
+
+    state.clear();
+    assert!(state.items.is_empty());
+    assert!(state.output_dir.is_none());
+}
+
+#[test]
+fn batch_can_start_requires_files_format_and_output_dir() {
+    let mut state = batch::BatchState::default();
+    assert!(!state.can_start(false));
+
+    state.add_files([std::env::temp_dir().join("demagog-batch-ui-book.txt")]);
+    assert!(state.can_start(false));
+    assert!(!state.can_start(true));
+
+    state.export_txt = false;
+    state.export_chunks = false;
+    assert!(!state.can_start(false));
+
+    state.export_chunks = true;
+    state.output_dir = None;
+    assert!(!state.can_start(false));
+}
+
+#[test]
+fn batch_window_opens_from_toolbar_with_disabled_start_for_empty_queue() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::{NodeT, Queryable};
+
+    let app = ui_test_app("Текст", "", Vec::new());
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1280.0, 900.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+    harness.run();
+
+    harness.get_by_label_contains("Пакет").click();
+    harness.run();
+
+    assert!(harness.state().batch.open);
+    assert!(
+        harness
+            .get_all_by_label_contains("Папка результатов")
+            .count()
+            >= 1
+    );
+    let start = harness.get_by_label_contains("Старт");
+    assert!(start.accesskit_node().is_disabled());
+}
+
+#[test]
+fn batch_window_shows_queued_file_and_enables_start() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::{NodeT, Queryable};
+
+    let mut app = ui_test_app("Текст", "", Vec::new());
+    app.batch.open = true;
+    app.batch
+        .add_files([std::env::temp_dir().join("demagog-batch-ui-book.txt")]);
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1280.0, 900.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+    harness.run();
+
+    assert!(
+        harness
+            .get_all_by_label_contains("demagog-batch-ui-book.txt")
+            .count()
+            >= 1
+    );
+    let start = harness.get_by_label_contains("Старт");
+    assert!(!start.accesskit_node().is_disabled());
+}
+
+#[test]
+fn batch_cancel_resets_running_items_to_queued() {
+    use std::sync::mpsc;
+
+    let mut app = ui_test_app("", "", Vec::new());
+    app.batch.add_files([
+        std::env::temp_dir().join("demagog-batch-cancel-a.txt"),
+        std::env::temp_dir().join("demagog-batch-cancel-b.txt"),
+    ]);
+    app.batch.running = true;
+    app.is_busy = true;
+
+    let (tx, rx) = mpsc::channel();
+    app.rx = Some(rx);
+    tx.send(WorkerMessage::Batch(BatchProgress::FileStarted {
+        index: 0,
+        total: 2,
+        name: "demagog-batch-cancel-a.txt".to_string(),
+    }))
+    .unwrap();
+    tx.send(WorkerMessage::Batch(BatchProgress::Cancelled))
+        .unwrap();
+    drop(tx);
+
+    app.poll_worker();
+
+    assert!(matches!(
+        app.batch.items[0].status,
+        batch::BatchItemStatus::Queued
+    ));
+    assert!(!app.batch.running);
+    assert!(!app.is_busy);
+    assert!(app.batch.summary.expect("summary set").cancelled);
+}
+
+#[test]
+fn batch_run_through_app_worker_writes_outputs_and_updates_queue() {
+    use crate::domain::TextCleanupConfig;
+
+    let root = std::env::temp_dir().join(format!(
+        "demagog-batch-e2e-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let book = root.join("alpha.txt");
+    std::fs::write(&book, "Глава первая\n\nТекст.").unwrap();
+    let out = root.join("out");
+
+    let mut app = ui_test_app("", "", Vec::new());
+    app.batch.open = true;
+    app.batch.add_files([book]);
+    app.batch.output_dir = Some(out.clone());
+    app.settings.cleanup = TextCleanupConfig {
+        remove_empty_lines: true,
+        add_line_end_periods: true,
+    };
+
+    app.start_batch(egui::Context::default());
+    assert!(app.is_busy);
+    assert!(app.batch.running);
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while app.is_busy && Instant::now() < deadline {
+        app.poll_worker();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!app.is_busy, "batch did not finish within the deadline");
+
+    assert!(!app.batch.running);
+    assert!(matches!(
+        app.batch.items[0].status,
+        batch::BatchItemStatus::Done(_)
+    ));
+    let summary = app.batch.summary.expect("summary set");
+    assert_eq!(summary.succeeded, 1);
+    assert_eq!(summary.failed, 0);
+    assert_eq!(
+        std::fs::read_to_string(out.join("alpha.txt")).unwrap(),
+        "Глава первая.\nТекст."
+    );
+    assert!(out.join("alpha_chunks.json").exists());
+
+    let _ = std::fs::remove_dir_all(&root);
+}

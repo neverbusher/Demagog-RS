@@ -35,6 +35,14 @@ impl DemagogApp {
                         self.open_book_dialog(ctx.clone());
                     }
 
+                    if ui
+                        .button("📚 Пакет")
+                        .on_hover_text("Пакетная обработка нескольких файлов")
+                        .clicked()
+                    {
+                        self.batch.open = true;
+                    }
+
                     let enabled_dictionaries =
                         self.dictionaries.iter().filter(|d| d.meta.enabled).count();
                     let can_run = !self.is_busy && enabled_dictionaries > 0;
@@ -201,6 +209,10 @@ impl DemagogApp {
                     ui.menu_button("Ещё", |ui| {
                         if ui.button("Открыть книгу").clicked() {
                             self.open_book_dialog(ctx.clone());
+                            ui.close();
+                        }
+                        if ui.button("Пакетная обработка").clicked() {
+                            self.batch.open = true;
                             ui.close();
                         }
                         if ui

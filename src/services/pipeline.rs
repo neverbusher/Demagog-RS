@@ -15,6 +15,7 @@ pub struct ProcessingPipeline {
     chunker: Arc<dyn TextChunker>,
 }
 
+#[derive(Clone)]
 pub struct PipelineOptions {
     pub stress_format: StressFormat,
     pub chunk_config: ChunkConfig,

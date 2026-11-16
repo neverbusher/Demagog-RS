@@ -76,6 +76,14 @@ pub struct NormalizationStats {
     pub added_periods: usize,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ChunksExportPayload<'a> {
+    pub title: &'a str,
+    pub stress_format: &'a str,
+    pub chunk_count: usize,
+    pub chunks: &'a [String],
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DictionaryKind {
     RegexStandard,

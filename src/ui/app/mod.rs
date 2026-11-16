@@ -8,20 +8,22 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use crate::domain::{
-    AppSettings, BookDocument, ChunkConfig, DictionaryMeta, DictionaryTag, PipelineProgress,
-    PipelineReport, StressFormat, ThemeMode,
+    AppSettings, BookDocument, ChunkConfig, ChunksExportPayload, DictionaryMeta, DictionaryTag,
+    PipelineProgress, PipelineReport, StressFormat, ThemeMode,
 };
 use crate::engine::loader::{
     CompiledDictionary, DictionaryLoadReport, load_dictionaries_parallel_with_cancel,
 };
 use crate::io::book_reader::{CompositeBookReader, SUPPORTED_BOOK_FORMATS, can_read_book};
 use crate::ports::{DocumentReader, StressFormatter, TextChunker, TextProcessor};
+use crate::services::batch::{BatchProgress, BatchSummary};
 use crate::services::chunker::SentenceAwareChunker;
 use crate::services::dictionary_check::{self, CheckReport};
 use crate::services::pipeline::{PipelineOptions, ProcessingPipeline};
 use crate::services::stress::RussianStressFormatter;
 use crate::ui::palette;
 
+mod batch;
 mod views;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,6 +214,7 @@ pub struct DemagogApp {
     focus_find: bool,
     last_window_title: String,
     window_icon_applied: bool,
+    batch: batch::BatchState,
 }
 
 enum WorkerMessage {
@@ -223,6 +226,8 @@ enum WorkerMessage {
     BookLoaded(Result<BookDocument, String>),
     Pipeline(PipelineProgress),
     DictionaryCheckFinished(Result<CheckReport, String>),
+    Batch(BatchProgress),
+    BatchSetupError(String),
 }
 
 impl DemagogApp {
@@ -309,6 +314,7 @@ impl DemagogApp {
             focus_find: false,
             last_window_title: "Demagog-RS".to_string(),
             window_icon_applied: false,
+            batch: batch::BatchState::default(),
         }
     }
 
@@ -875,6 +881,100 @@ impl DemagogApp {
                                     finished = true;
                                 }
                             },
+                            WorkerMessage::Batch(progress) => match progress {
+                                BatchProgress::FileStarted { index, total, name } => {
+                                    if let Some(item) = self.batch.items.get_mut(index) {
+                                        item.status = batch::BatchItemStatus::Running;
+                                    }
+                                    self.progress_ratio = index as f32 / total.max(1) as f32;
+                                    pending_status = Some((
+                                        StatusLevel::Info,
+                                        format!("Пакет [{}/{}]: {}...", index + 1, total, name),
+                                    ));
+                                }
+                                BatchProgress::FileFinished { index, outcome } => {
+                                    if let Some(item) = self.batch.items.get_mut(index) {
+                                        item.status = match outcome {
+                                            Ok(outputs) => batch::BatchItemStatus::Done(outputs),
+                                            Err(error) => batch::BatchItemStatus::Failed(error),
+                                        };
+                                    }
+                                    let total = self.batch.items.len().max(1);
+                                    self.progress_ratio = (index + 1) as f32 / total as f32;
+                                }
+                                BatchProgress::Completed { succeeded, failed } => {
+                                    self.batch.running = false;
+                                    self.batch.summary = Some(BatchSummary {
+                                        succeeded,
+                                        failed,
+                                        cancelled: false,
+                                    });
+                                    self.cancel_flag = None;
+                                    self.is_busy = false;
+                                    self.progress_ratio = 1.0;
+                                    let level = if failed > 0 {
+                                        StatusLevel::Warning
+                                    } else {
+                                        StatusLevel::Success
+                                    };
+                                    pending_status = Some((
+                                        level,
+                                        format!(
+                                            "Пакет готов: обработано {succeeded}, ошибок {failed}"
+                                        ),
+                                    ));
+                                    finished = true;
+                                }
+                                BatchProgress::Cancelled => {
+                                    self.batch.running = false;
+                                    for item in &mut self.batch.items {
+                                        if matches!(item.status, batch::BatchItemStatus::Running) {
+                                            item.status = batch::BatchItemStatus::Queued;
+                                        }
+                                    }
+                                    let succeeded = self
+                                        .batch
+                                        .items
+                                        .iter()
+                                        .filter(|item| {
+                                            matches!(item.status, batch::BatchItemStatus::Done(_))
+                                        })
+                                        .count();
+                                    let failed = self
+                                        .batch
+                                        .items
+                                        .iter()
+                                        .filter(|item| {
+                                            matches!(item.status, batch::BatchItemStatus::Failed(_))
+                                        })
+                                        .count();
+                                    self.batch.summary = Some(BatchSummary {
+                                        succeeded,
+                                        failed,
+                                        cancelled: true,
+                                    });
+                                    self.cancel_flag = None;
+                                    self.is_busy = false;
+                                    self.progress_ratio = 0.0;
+                                    pending_status = Some((
+                                        StatusLevel::Warning,
+                                        "Пакетная обработка отменена".to_string(),
+                                    ));
+                                    finished = true;
+                                }
+                            },
+                            WorkerMessage::BatchSetupError(error) => {
+                                self.batch.running = false;
+                                self.batch.error = Some(error.clone());
+                                self.cancel_flag = None;
+                                self.is_busy = false;
+                                self.progress_ratio = 0.0;
+                                pending_status = Some((
+                                    StatusLevel::Error,
+                                    format!("Пакетная обработка: {error}"),
+                                ));
+                                finished = true;
+                            }
                         }
 
                         if finished {
@@ -1049,6 +1149,26 @@ impl DemagogApp {
                 .collect()
         });
         if dropped.is_empty() {
+            return;
+        }
+        if self.batch.open {
+            if self.batch.running {
+                self.set_status(
+                    StatusLevel::Warning,
+                    "Дождитесь завершения пакетной обработки",
+                );
+                return;
+            }
+            let added = dropped.iter().filter(|path| can_read_book(path)).count();
+            self.batch.add_files(dropped);
+            if added > 0 {
+                self.set_status(
+                    StatusLevel::Info,
+                    format!("В очередь добавлено файлов: {added}"),
+                );
+            } else {
+                self.set_status(StatusLevel::Warning, SUPPORTED_BOOK_FORMATS.to_string());
+            }
             return;
         }
         if self.is_busy {
@@ -1352,14 +1472,7 @@ impl DemagogApp {
             .add_filter("JSON для ComfyUI", &["json"])
             .save_file()
         {
-            #[derive(serde::Serialize)]
-            struct ExportPayload<'a> {
-                title: &'a str,
-                stress_format: &'a str,
-                chunk_count: usize,
-                chunks: &'a [String],
-            }
-            let payload = ExportPayload {
+            let payload = ChunksExportPayload {
                 title: &self.document.title,
                 stress_format: self.result_state.format().label(),
                 chunk_count: self.document.chunks.len(),
@@ -1702,6 +1815,7 @@ impl DemagogApp {
         self.show_central_workspace(ui, &ctx, theme);
 
         self.show_check_window(&ctx);
+        self.show_batch_window(&ctx);
     }
 }
 
