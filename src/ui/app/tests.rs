@@ -1366,14 +1366,15 @@ fn batch_run_through_app_worker_writes_outputs_and_updates_queue() {
             .unwrap()
             .as_nanos()
     ));
-    std::fs::create_dir_all(&root).unwrap();
-    let book = root.join("alpha.txt");
+    let sub = root.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    let book = sub.join("alpha.txt");
     std::fs::write(&book, "Глава первая\n\nТекст.").unwrap();
     let out = root.join("out");
 
     let mut app = ui_test_app("", "", Vec::new());
     app.batch.open = true;
-    app.batch.add_files([book]);
+    app.batch.add_folder_files([book], &root);
     app.batch.output_dir = Some(out.clone());
     app.settings.cleanup = TextCleanupConfig {
         remove_empty_lines: true,
@@ -1400,10 +1401,125 @@ fn batch_run_through_app_worker_writes_outputs_and_updates_queue() {
     assert_eq!(summary.succeeded, 1);
     assert_eq!(summary.failed, 0);
     assert_eq!(
-        std::fs::read_to_string(out.join("alpha.txt")).unwrap(),
+        std::fs::read_to_string(out.join("sub").join("alpha.txt")).unwrap(),
         "Глава первая.\nТекст."
     );
-    assert!(out.join("alpha_chunks.json").exists());
+    assert!(out.join("sub").join("alpha_chunks.json").exists());
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn batch_folder_add_keeps_base_dir_and_individual_add_uses_parent() {
+    let dir = std::env::temp_dir();
+    let book = dir.join("demagog-batch-base-book.txt");
+
+    let mut state = batch::BatchState::default();
+    state.add_folder_files([book.clone()], &dir);
+    assert_eq!(state.items[0].base_dir, dir);
+    assert_eq!(state.output_dir, Some(dir.join("processed")));
+
+    state.clear();
+    state.add_files([book.clone()]);
+    assert_eq!(state.items[0].base_dir, dir);
+}
+
+#[test]
+fn batch_restore_drops_missing_files() {
+    let dir = std::env::temp_dir().join(format!(
+        "demagog-batch-restore-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let existing = dir.join("here.txt");
+    std::fs::write(&existing, "текст").unwrap();
+
+    let entries = vec![
+        crate::domain::BatchQueueEntry {
+            path: existing.clone(),
+            base_dir: dir.clone(),
+        },
+        crate::domain::BatchQueueEntry {
+            path: dir.join("gone.txt"),
+            base_dir: dir.clone(),
+        },
+    ];
+    let (items, dropped) = batch::restore_queue(&entries);
+
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].path, existing);
+    assert_eq!(items[0].base_dir, dir);
+    assert_eq!(dropped, 1);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn batch_scan_excludes_output_subtree() {
+    let dir = std::env::temp_dir().join(format!(
+        "demagog-batch-scan-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let processed = dir.join("processed");
+    let deep = processed.join("sub");
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::write(dir.join("book.txt"), "книга").unwrap();
+    std::fs::write(processed.join("out.txt"), "результат").unwrap();
+    std::fs::write(deep.join("deep.txt"), "результат").unwrap();
+
+    let scanned = batch::collect_books_recursive(&dir, Some(&processed));
+    assert_eq!(scanned, vec![dir.join("book.txt")]);
+
+    let all = batch::collect_books_recursive(&dir, None);
+    assert_eq!(all.len(), 3);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn batch_state_syncs_to_settings_and_restores() {
+    let dir = std::env::temp_dir().join(format!(
+        "demagog-batch-sync-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let sub = dir.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    let book = sub.join("book.txt");
+    std::fs::write(&book, "текст").unwrap();
+
+    let mut app = ui_test_app("", "", Vec::new());
+    app.batch.add_folder_files([book], &dir);
+    app.batch.export_txt = false;
+    app.sync_batch_settings();
+
+    assert_eq!(app.settings.batch.queue.len(), 1);
+    assert_eq!(app.settings.batch.queue[0].base_dir, dir);
+    assert!(!app.settings.batch.export_txt);
+    assert_eq!(app.settings.batch.output_dir, Some(dir.join("processed")));
+
+    let document = BookDocument {
+        title: "Тест".to_string(),
+        source_path: None,
+        raw_text: String::new(),
+        processed_text: String::new(),
+        chunks: Vec::new(),
+    };
+    let restored = DemagogApp::from_parts(app.settings.clone(), document);
+    assert_eq!(restored.batch.items.len(), 1);
+    assert_eq!(restored.batch.items[0].base_dir, dir);
+    assert!(!restored.batch.export_txt);
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

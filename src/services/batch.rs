@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,6 +14,15 @@ pub struct BatchOptions {
     pub export_chunks: bool,
     pub overwrite: bool,
     pub pipeline: PipelineOptions,
+}
+
+/// A queued source file plus the root its output path is mirrored against.
+/// Folder-added books keep their subfolder structure; individually picked
+/// files use their own parent as base and land flat in the output dir.
+#[derive(Debug, Clone)]
+pub struct BatchInput {
+    pub path: PathBuf,
+    pub base_dir: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -48,7 +58,7 @@ pub struct BatchSummary {
 }
 
 pub fn run_batch(
-    files: &[PathBuf],
+    files: &[BatchInput],
     reader: &dyn DocumentReader,
     processors: &[Arc<dyn TextProcessor>],
     pipeline: &ProcessingPipeline,
@@ -64,8 +74,9 @@ pub fn run_batch(
     })?;
 
     let mut summary = BatchSummary::default();
+    let mut used: HashSet<PathBuf> = HashSet::new();
     let total = files.len();
-    for (index, path) in files.iter().enumerate() {
+    for (index, input) in files.iter().enumerate() {
         if is_cancelled(cancel) {
             summary.cancelled = true;
             send(progress_tx, BatchProgress::Cancelled);
@@ -76,16 +87,23 @@ pub fn run_batch(
             BatchProgress::FileStarted {
                 index,
                 total,
-                name: path
+                name: input
+                    .path
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default(),
             },
         );
 
-        match process_one(path, reader, processors, pipeline, options, cancel) {
+        match process_one(input, reader, processors, pipeline, options, cancel, &used) {
             Ok(outputs) => {
                 summary.succeeded += 1;
+                if let Some(path) = &outputs.txt {
+                    used.insert(path.clone());
+                }
+                if let Some(path) = &outputs.json {
+                    used.insert(path.clone());
+                }
                 send(
                     progress_tx,
                     BatchProgress::FileFinished {
@@ -123,14 +141,15 @@ pub fn run_batch(
 }
 
 fn process_one(
-    path: &Path,
+    input: &BatchInput,
     reader: &dyn DocumentReader,
     processors: &[Arc<dyn TextProcessor>],
     pipeline: &ProcessingPipeline,
     options: &BatchOptions,
     cancel: Option<&AtomicBool>,
+    used: &HashSet<PathBuf>,
 ) -> Result<BatchOutputs, String> {
-    let doc = reader.read_document_with_cancel(path, cancel)?;
+    let doc = reader.read_document_with_cancel(&input.path, cancel)?;
     let result = pipeline
         .execute(
             &doc.raw_text,
@@ -144,27 +163,34 @@ fn process_one(
         return Err("Пустой результат обработки".to_string());
     }
 
-    let stem = output_stem(path);
+    let relative = match input.path.strip_prefix(&input.base_dir) {
+        Ok(rel) => rel.to_path_buf(),
+        Err(_) => PathBuf::from(input.path.file_name().unwrap_or_default()),
+    };
+    let target_dir = options
+        .output_dir
+        .join(relative.parent().unwrap_or(Path::new("")));
+    std::fs::create_dir_all(&target_dir)
+        .map_err(|e| format!("Не удалось создать папку {}: {e}", target_dir.display()))?;
+
+    let stem = output_stem(&input.path);
     let mut outputs = BatchOutputs {
         txt: None,
         json: None,
         chunk_count: result.chunks.len(),
     };
     if options.export_txt {
-        let target = unique_target(
-            &options.output_dir,
-            &format!("{stem}.txt"),
-            options.overwrite,
-        );
+        let target = unique_target(&target_dir, &format!("{stem}.txt"), options.overwrite, used);
         std::fs::write(&target, &result.processed_text)
             .map_err(|e| format!("Не удалось записать {}: {e}", target.display()))?;
         outputs.txt = Some(target);
     }
     if options.export_chunks {
         let target = unique_target(
-            &options.output_dir,
+            &target_dir,
             &format!("{stem}_chunks.json"),
             options.overwrite,
+            used,
         );
         let payload = ChunksExportPayload {
             title: &doc.title,
@@ -180,9 +206,12 @@ fn process_one(
     Ok(outputs)
 }
 
-fn unique_target(dir: &Path, file_name: &str, overwrite: bool) -> PathBuf {
+fn unique_target(dir: &Path, file_name: &str, overwrite: bool, used: &HashSet<PathBuf>) -> PathBuf {
+    // `used` guards against two inputs of the same run mapping to one target:
+    // overwrite may replace previous runs' files, never a sibling's result.
+    let is_free = |path: &Path| !used.contains(path) && (overwrite || !path.exists());
     let target = dir.join(file_name);
-    if overwrite || !target.exists() {
+    if is_free(&target) {
         return target;
     }
     let (stem, ext) = match file_name.rfind('.') {
@@ -192,7 +221,7 @@ fn unique_target(dir: &Path, file_name: &str, overwrite: bool) -> PathBuf {
     let mut n = 2;
     loop {
         let candidate = dir.join(format!("{stem} ({n}){ext}"));
-        if !candidate.exists() {
+        if is_free(&candidate) {
             return candidate;
         }
         n += 1;
@@ -339,7 +368,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel();
         let summary = run_batch(
-            &[alpha, beta],
+            &flat(&[alpha, beta]),
             &CompositeBookReader::new(),
             &[],
             &pipeline(),
@@ -409,7 +438,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel();
         let summary = run_batch(
-            &[alpha, missing, beta],
+            &flat(&[alpha, missing, beta]),
             &CompositeBookReader::new(),
             &[],
             &pipeline(),
@@ -444,7 +473,7 @@ mod tests {
         let out = root.join("out");
 
         let summary = run_batch(
-            &[alpha, image],
+            &flat(&[alpha, image]),
             &CompositeBookReader::new(),
             &[],
             &pipeline(),
@@ -471,7 +500,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel();
         let summary = run_batch(
-            &[alpha],
+            &flat(&[alpha]),
             &CompositeBookReader::new(),
             &[],
             &pipeline(),
@@ -503,7 +532,7 @@ mod tests {
         })];
 
         let summary = run_batch(
-            &[alpha, beta],
+            &flat(&[alpha, beta]),
             &CompositeBookReader::new(),
             &processors,
             &pipeline(),
@@ -532,7 +561,7 @@ mod tests {
         let mut opts = options(out.clone());
         opts.overwrite = false;
         let summary = run_batch(
-            &[alpha],
+            &flat(&[alpha]),
             &CompositeBookReader::new(),
             &[],
             &pipeline(),
@@ -564,7 +593,7 @@ mod tests {
         std::fs::write(out.join("alpha.txt"), "старое").unwrap();
 
         run_batch(
-            &[alpha],
+            &flat(&[alpha]),
             &CompositeBookReader::new(),
             &[],
             &pipeline(),
@@ -591,7 +620,7 @@ mod tests {
         let mut opts = options(out.clone());
         opts.export_chunks = false;
         run_batch(
-            &[alpha],
+            &flat(&[alpha]),
             &CompositeBookReader::new(),
             &[],
             &pipeline(),
@@ -616,7 +645,7 @@ mod tests {
         let mut opts = options(out.clone());
         opts.export_txt = false;
         run_batch(
-            &[alpha],
+            &flat(&[alpha]),
             &CompositeBookReader::new(),
             &[],
             &pipeline(),
@@ -640,7 +669,7 @@ mod tests {
         let processors: Vec<Arc<dyn TextProcessor>> = vec![Arc::new(EmptyingProcessor)];
 
         let summary = run_batch(
-            &[alpha],
+            &flat(&[alpha]),
             &CompositeBookReader::new(),
             &processors,
             &pipeline(),
@@ -666,7 +695,7 @@ mod tests {
         std::fs::write(&blocker, "file, not a dir").unwrap();
 
         let result = run_batch(
-            &[alpha],
+            &flat(&[alpha]),
             &CompositeBookReader::new(),
             &[],
             &pipeline(),
@@ -687,5 +716,208 @@ mod tests {
         assert_eq!(output_stem(Path::new("book.fb2")), "book");
         assert_eq!(output_stem(Path::new("book.txt")), "book");
         assert_eq!(output_stem(Path::new("dir/book.epub")), "book");
+    }
+
+    fn flat(paths: &[PathBuf]) -> Vec<BatchInput> {
+        paths
+            .iter()
+            .map(|path| BatchInput {
+                path: path.clone(),
+                base_dir: path.parent().unwrap_or(Path::new("")).to_path_buf(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn same_name_books_from_different_subfolders_do_not_collide() {
+        let root = temp_dir("nocollide");
+        let input = root.join("in");
+        let sub1 = input.join("sub1");
+        let sub2 = input.join("sub2");
+        std::fs::create_dir_all(&sub1).unwrap();
+        std::fs::create_dir_all(&sub2).unwrap();
+        let book1 = write_book(&sub1, "book.txt", "Первая книга.");
+        let book2 = write_book(&sub2, "book.txt", "Вторая книга.");
+        let out = root.join("out");
+
+        let inputs = vec![
+            BatchInput {
+                path: book1,
+                base_dir: input.clone(),
+            },
+            BatchInput {
+                path: book2,
+                base_dir: input.clone(),
+            },
+        ];
+        let summary = run_batch(
+            &inputs,
+            &CompositeBookReader::new(),
+            &[],
+            &pipeline(),
+            &options(out.clone()),
+            None,
+            None,
+        )
+        .expect("batch runs");
+
+        assert_eq!(summary.succeeded, 2);
+        assert_eq!(
+            std::fs::read_to_string(out.join("sub1").join("book.txt")).unwrap(),
+            "Первая книга."
+        );
+        assert_eq!(
+            std::fs::read_to_string(out.join("sub2").join("book.txt")).unwrap(),
+            "Вторая книга."
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn mirrors_subfolder_structure_for_txt_and_json() {
+        let root = temp_dir("mirror");
+        let input = root.join("in");
+        let sub = input.join("Автор").join("Цикл");
+        std::fs::create_dir_all(&sub).unwrap();
+        let book = write_book(&sub, "book.txt", "Текст книги.");
+        let out = root.join("out");
+
+        let inputs = vec![BatchInput {
+            path: book,
+            base_dir: input.clone(),
+        }];
+        run_batch(
+            &inputs,
+            &CompositeBookReader::new(),
+            &[],
+            &pipeline(),
+            &options(out.clone()),
+            None,
+            None,
+        )
+        .expect("batch runs");
+
+        let mirrored = out.join("Автор").join("Цикл");
+        assert!(mirrored.join("book.txt").exists());
+        assert!(mirrored.join("book_chunks.json").exists());
+        assert!(!out.join("book.txt").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn individual_file_input_stays_flat() {
+        let root = temp_dir("flat");
+        let book = write_book(&root, "book.txt", "Текст.");
+        let out = root.join("out");
+
+        run_batch(
+            &flat(&[book]),
+            &CompositeBookReader::new(),
+            &[],
+            &pipeline(),
+            &options(out.clone()),
+            None,
+            None,
+        )
+        .expect("batch runs");
+
+        assert!(out.join("book.txt").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn same_relative_path_from_different_bases_gets_suffix_when_overwrite_off() {
+        let root = temp_dir("crossbase");
+        let in1 = root.join("in1");
+        let in2 = root.join("in2");
+        std::fs::create_dir_all(&in1).unwrap();
+        std::fs::create_dir_all(&in2).unwrap();
+        let book1 = write_book(&in1, "book.txt", "Первая.");
+        let book2 = write_book(&in2, "book.txt", "Вторая.");
+        let out = root.join("out");
+
+        let inputs = vec![
+            BatchInput {
+                path: book1,
+                base_dir: in1,
+            },
+            BatchInput {
+                path: book2,
+                base_dir: in2,
+            },
+        ];
+        let mut opts = options(out.clone());
+        opts.overwrite = false;
+        run_batch(
+            &inputs,
+            &CompositeBookReader::new(),
+            &[],
+            &pipeline(),
+            &opts,
+            None,
+            None,
+        )
+        .expect("batch runs");
+
+        assert_eq!(
+            std::fs::read_to_string(out.join("book.txt")).unwrap(),
+            "Первая."
+        );
+        assert_eq!(
+            std::fs::read_to_string(out.join("book (2).txt")).unwrap(),
+            "Вторая."
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn same_run_collision_gets_suffix_even_with_overwrite_on() {
+        let root = temp_dir("intrarun");
+        let in1 = root.join("in1");
+        let in2 = root.join("in2");
+        std::fs::create_dir_all(&in1).unwrap();
+        std::fs::create_dir_all(&in2).unwrap();
+        let book1 = write_book(&in1, "book.txt", "Первая.");
+        let book2 = write_book(&in2, "book.txt", "Вторая.");
+        let out = root.join("out");
+
+        let inputs = vec![
+            BatchInput {
+                path: book1,
+                base_dir: in1,
+            },
+            BatchInput {
+                path: book2,
+                base_dir: in2,
+            },
+        ];
+        let summary = run_batch(
+            &inputs,
+            &CompositeBookReader::new(),
+            &[],
+            &pipeline(),
+            &options(out.clone()),
+            None,
+            None,
+        )
+        .expect("batch runs");
+
+        assert_eq!(summary.succeeded, 2);
+        assert_eq!(
+            std::fs::read_to_string(out.join("book.txt")).unwrap(),
+            "Первая."
+        );
+        assert_eq!(
+            std::fs::read_to_string(out.join("book (2).txt")).unwrap(),
+            "Вторая."
+        );
+        assert!(out.join("book_chunks.json").exists());
+        assert!(out.join("book_chunks (2).json").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -266,6 +266,22 @@ impl DemagogApp {
         if let Some(warning) = settings_warning {
             app.set_status(StatusLevel::Error, warning);
         }
+        let missing = app
+            .settings
+            .batch
+            .queue
+            .len()
+            .saturating_sub(app.batch.items.len());
+        if missing > 0 {
+            app.set_status(
+                StatusLevel::Warning,
+                format!(
+                    "Очередь пакетной обработки восстановлена: {} файлов, {} пропущено (не найдены)",
+                    app.batch.items.len(),
+                    missing
+                ),
+            );
+        }
         app
     }
 
@@ -273,6 +289,18 @@ impl DemagogApp {
         let result_format = settings.stress_format;
         let raw_char_count = document.raw_text.chars().count();
         let processed_char_count = document.processed_text.chars().count();
+        let (restored_items, _) = batch::restore_queue(&settings.batch.queue);
+        let batch_state = batch::BatchState {
+            open: false,
+            items: restored_items,
+            output_dir: settings.batch.output_dir.clone(),
+            export_txt: settings.batch.export_txt,
+            export_chunks: settings.batch.export_chunks,
+            overwrite: settings.batch.overwrite,
+            running: false,
+            summary: None,
+            error: None,
+        };
         Self {
             settings,
             dictionaries: Vec::new(),
@@ -314,7 +342,7 @@ impl DemagogApp {
             focus_find: false,
             last_window_title: "Demagog-RS".to_string(),
             window_icon_applied: false,
-            batch: batch::BatchState::default(),
+            batch: batch_state,
         }
     }
 
@@ -1161,6 +1189,7 @@ impl DemagogApp {
             }
             let added = dropped.iter().filter(|path| can_read_book(path)).count();
             self.batch.add_files(dropped);
+            self.persist_batch();
             if added > 0 {
                 self.set_status(
                     StatusLevel::Info,

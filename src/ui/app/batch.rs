@@ -1,5 +1,6 @@
 use super::*;
-use crate::services::batch::{BatchOptions, BatchOutputs, BatchSummary, run_batch};
+use crate::domain::{BatchQueueEntry, BatchSettings};
+use crate::services::batch::{BatchInput, BatchOptions, BatchOutputs, BatchSummary, run_batch};
 
 #[derive(Debug, Clone)]
 pub(super) enum BatchItemStatus {
@@ -12,6 +13,7 @@ pub(super) enum BatchItemStatus {
 #[derive(Debug, Clone)]
 pub(super) struct BatchItem {
     pub path: PathBuf,
+    pub base_dir: PathBuf,
     pub status: BatchItemStatus,
 }
 
@@ -47,17 +49,31 @@ impl Default for BatchState {
 impl BatchState {
     pub fn add_files(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
         for path in paths {
-            if !can_read_book(&path) || self.items.iter().any(|item| item.path == path) {
-                continue;
-            }
-            if self.output_dir.is_none() {
+            let base_dir = path.parent().unwrap_or(Path::new("")).to_path_buf();
+            if self.try_push(path.clone(), base_dir) && self.output_dir.is_none() {
                 self.output_dir = path.parent().map(|parent| parent.join("processed"));
             }
-            self.items.push(BatchItem {
-                path,
-                status: BatchItemStatus::Queued,
-            });
         }
+    }
+
+    pub fn add_folder_files(&mut self, paths: impl IntoIterator<Item = PathBuf>, base: &Path) {
+        for path in paths {
+            if self.try_push(path, base.to_path_buf()) && self.output_dir.is_none() {
+                self.output_dir = Some(base.join("processed"));
+            }
+        }
+    }
+
+    fn try_push(&mut self, path: PathBuf, base_dir: PathBuf) -> bool {
+        if !can_read_book(&path) || self.items.iter().any(|item| item.path == path) {
+            return false;
+        }
+        self.items.push(BatchItem {
+            path,
+            base_dir,
+            status: BatchItemStatus::Queued,
+        });
+        true
     }
 
     pub fn clear(&mut self) {
@@ -87,10 +103,30 @@ impl BatchState {
     }
 }
 
-fn collect_books_recursive(dir: &Path) -> Vec<PathBuf> {
+pub(super) fn restore_queue(entries: &[BatchQueueEntry]) -> (Vec<BatchItem>, usize) {
+    let mut items = Vec::new();
+    let mut dropped = 0;
+    for entry in entries {
+        if entry.path.is_file() {
+            items.push(BatchItem {
+                path: entry.path.clone(),
+                base_dir: entry.base_dir.clone(),
+                status: BatchItemStatus::Queued,
+            });
+        } else {
+            dropped += 1;
+        }
+    }
+    (items, dropped)
+}
+
+pub(super) fn collect_books_recursive(dir: &Path, exclude: Option<&Path>) -> Vec<PathBuf> {
     let mut books = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(current) = stack.pop() {
+        if exclude.is_some_and(|ex| current.starts_with(ex)) {
+            continue;
+        }
         let Ok(entries) = std::fs::read_dir(&current) else {
             continue;
         };
@@ -108,6 +144,29 @@ fn collect_books_recursive(dir: &Path) -> Vec<PathBuf> {
 }
 
 impl DemagogApp {
+    pub(super) fn sync_batch_settings(&mut self) {
+        self.settings.batch = BatchSettings {
+            export_txt: self.batch.export_txt,
+            export_chunks: self.batch.export_chunks,
+            overwrite: self.batch.overwrite,
+            output_dir: self.batch.output_dir.clone(),
+            queue: self
+                .batch
+                .items
+                .iter()
+                .map(|item| BatchQueueEntry {
+                    path: item.path.clone(),
+                    base_dir: item.base_dir.clone(),
+                })
+                .collect(),
+        };
+    }
+
+    pub(super) fn persist_batch(&mut self) {
+        self.sync_batch_settings();
+        self.save_settings();
+    }
+
     pub(super) fn show_batch_window(&mut self, ctx: &egui::Context) {
         if !self.batch.open {
             return;
@@ -134,6 +193,7 @@ impl DemagogApp {
                             .pick_files()
                     {
                         self.batch.add_files(paths);
+                        self.persist_batch();
                     }
                     if ui
                         .add_enabled(editable, egui::Button::new("📁 Добавить папку"))
@@ -141,8 +201,10 @@ impl DemagogApp {
                         .clicked()
                         && let Some(dir) = rfd::FileDialog::new().pick_folder()
                     {
-                        let books = collect_books_recursive(&dir);
-                        self.batch.add_files(books);
+                        let books =
+                            collect_books_recursive(&dir, self.batch.output_dir.as_deref());
+                        self.batch.add_folder_files(books, &dir);
+                        self.persist_batch();
                     }
                     if ui
                         .add_enabled(
@@ -152,6 +214,7 @@ impl DemagogApp {
                         .clicked()
                     {
                         self.batch.clear();
+                        self.persist_batch();
                     }
                 });
                 ui.add_space(6.0);
@@ -171,19 +234,32 @@ impl DemagogApp {
                         && let Some(dir) = rfd::FileDialog::new().pick_folder()
                     {
                         self.batch.output_dir = Some(dir);
+                        self.persist_batch();
                     }
                 });
                 ui.horizontal_wrapped(|ui| {
-                    ui.add_enabled_ui(editable, |ui| {
-                        ui.checkbox(&mut self.batch.export_txt, "TXT результата")
-                            .on_hover_text("Один обработанный TXT на каждый входной файл");
-                        ui.checkbox(&mut self.batch.export_chunks, "JSON чанков")
-                            .on_hover_text("JSON с чанками для ComfyUI на каждый входной файл");
-                        ui.checkbox(&mut self.batch.overwrite, "Перезаписывать существующие")
-                            .on_hover_text(
-                                "Выкл: одноимённые файлы сохраняются с суффиксом (2), (3)…",
-                            );
-                    });
+                    let formats_changed = ui
+                        .add_enabled_ui(editable, |ui| {
+                            let txt = ui
+                                .checkbox(&mut self.batch.export_txt, "TXT результата")
+                                .on_hover_text("Один обработанный TXT на каждый входной файл")
+                                .changed();
+                            let chunks = ui
+                                .checkbox(&mut self.batch.export_chunks, "JSON чанков")
+                                .on_hover_text("JSON с чанками для ComfyUI на каждый входной файл")
+                                .changed();
+                            let overwrite = ui
+                                .checkbox(&mut self.batch.overwrite, "Перезаписывать существующие")
+                                .on_hover_text(
+                                    "Выкл: одноимённые файлы сохраняются с суффиксом (2), (3)…",
+                                )
+                                .changed();
+                            txt || chunks || overwrite
+                        })
+                        .inner;
+                    if formats_changed {
+                        self.persist_batch();
+                    }
                 });
                 ui.separator();
 
@@ -207,9 +283,10 @@ impl DemagogApp {
                             };
                             let name = item
                                 .path
-                                .file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_default();
+                                .strip_prefix(&item.base_dir)
+                                .unwrap_or(&item.path)
+                                .display()
+                                .to_string();
                             ui.horizontal_wrapped(|ui| {
                                 ui.label(icon);
                                 ui.label(name);
@@ -303,11 +380,14 @@ impl DemagogApp {
         self.is_busy = true;
         self.progress_ratio = 0.0;
 
-        let files: Vec<PathBuf> = self
+        let files: Vec<BatchInput> = self
             .batch
             .items
             .iter()
-            .map(|item| item.path.clone())
+            .map(|item| BatchInput {
+                path: item.path.clone(),
+                base_dir: item.base_dir.clone(),
+            })
             .collect();
         let processors: Vec<Arc<dyn TextProcessor>> = self
             .dictionaries

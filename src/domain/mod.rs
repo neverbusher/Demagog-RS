@@ -76,6 +76,38 @@ pub struct NormalizationStats {
     pub added_periods: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchQueueEntry {
+    pub path: PathBuf,
+    pub base_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchSettings {
+    #[serde(default = "default_true")]
+    pub export_txt: bool,
+    #[serde(default = "default_true")]
+    pub export_chunks: bool,
+    #[serde(default = "default_true")]
+    pub overwrite: bool,
+    #[serde(default)]
+    pub output_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub queue: Vec<BatchQueueEntry>,
+}
+
+impl Default for BatchSettings {
+    fn default() -> Self {
+        Self {
+            export_txt: true,
+            export_chunks: true,
+            overwrite: true,
+            output_dir: None,
+            queue: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ChunksExportPayload<'a> {
     pub title: &'a str,
@@ -250,6 +282,8 @@ pub struct AppSettings {
     pub chunk_config: ChunkConfig,
     #[serde(default)]
     pub cleanup: TextCleanupConfig,
+    #[serde(default)]
+    pub batch: BatchSettings,
     pub dic_folder: PathBuf,
     pub disabled_dictionaries: Vec<String>,
     #[serde(default = "default_true")]
@@ -269,6 +303,7 @@ impl Default for AppSettings {
             stress_format: StressFormat::PlusBeforeVowel,
             chunk_config: ChunkConfig::default(),
             cleanup: TextCleanupConfig::default(),
+            batch: BatchSettings::default(),
             dic_folder: PathBuf::from("dic"),
             disabled_dictionaries: Vec::new(),
             group_dictionaries_by_type: true,
@@ -732,6 +767,69 @@ mod tests {
 
         assert!(loaded.cleanup.remove_empty_lines);
         assert!(!loaded.cleanup.add_line_end_periods);
+    }
+
+    #[test]
+    fn batch_settings_default_when_absent_from_json() {
+        let mut value =
+            serde_json::to_value(AppSettings::default()).expect("serialize default settings");
+        value
+            .as_object_mut()
+            .expect("settings object")
+            .remove("batch");
+
+        let loaded = AppSettings::from_json(
+            &serde_json::to_vec(&value).expect("legacy JSON"),
+            PathBuf::from("dic"),
+        )
+        .expect("load settings without batch");
+
+        assert_eq!(loaded.batch, BatchSettings::default());
+        assert!(loaded.batch.export_txt);
+        assert!(loaded.batch.export_chunks);
+        assert!(loaded.batch.overwrite);
+        assert!(loaded.batch.output_dir.is_none());
+        assert!(loaded.batch.queue.is_empty());
+    }
+
+    #[test]
+    fn batch_settings_roundtrip_with_queue() {
+        let settings = AppSettings {
+            batch: BatchSettings {
+                export_txt: false,
+                export_chunks: true,
+                overwrite: false,
+                output_dir: Some(PathBuf::from("results")),
+                queue: vec![BatchQueueEntry {
+                    path: PathBuf::from("books/sub/book.fb2"),
+                    base_dir: PathBuf::from("books"),
+                }],
+            },
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(&settings).expect("serialize settings");
+        let parsed: AppSettings = serde_json::from_value(value).expect("deserialize settings");
+
+        assert_eq!(parsed.batch, settings.batch);
+    }
+
+    #[test]
+    fn batch_settings_partial_json_keeps_other_defaults() {
+        let mut value =
+            serde_json::to_value(AppSettings::default()).expect("serialize default settings");
+        value["batch"] = serde_json::json!({ "export_txt": false });
+
+        let loaded = AppSettings::from_json(
+            &serde_json::to_vec(&value).expect("partial JSON"),
+            PathBuf::from("dic"),
+        )
+        .expect("load partial batch settings");
+
+        assert!(!loaded.batch.export_txt);
+        assert!(loaded.batch.export_chunks);
+        assert!(loaded.batch.overwrite);
+        assert!(loaded.batch.queue.is_empty());
     }
 
     #[test]
