@@ -697,6 +697,7 @@ impl DemagogApp {
                                         )
                                     {
                                         self.document.raw_text = txt;
+                                        self.document.headings.clear();
                                         self.document.title = "Из буфера обмена".to_string();
                                         self.document.source_path = None;
                                         self.refresh_raw_char_count();
@@ -732,6 +733,7 @@ impl DemagogApp {
                                 )
                             {
                                 self.document.raw_text.clear();
+                                self.document.headings.clear();
                                 self.raw_char_count = 0;
                                 self.document.source_path = None;
                                 self.source_dirty = false;
@@ -774,6 +776,7 @@ impl DemagogApp {
                 })
                 .inner;
             if output.response.changed() {
+                self.document.headings.clear();
                 self.source_dirty = true;
                 self.splitter.stale = true;
                 self.refresh_raw_char_count();
@@ -822,6 +825,7 @@ impl DemagogApp {
                                 )
                             {
                                 self.document.raw_text = self.document.processed_text.clone();
+                                self.document.headings.clear();
                                 self.raw_char_count = self.processed_char_count;
                                 self.raw_pipeline_output.clear();
                                 self.source_dirty = true;
@@ -1297,6 +1301,7 @@ impl DemagogApp {
                 self.sync_disabled_dictionaries();
                 self.save_settings();
                 self.mark_result_stale();
+                self.splitter.stale = true;
                 apply_style_settings(ctx, &self.settings);
                 self.set_status(StatusLevel::Success, "Настройки сброшены");
             }

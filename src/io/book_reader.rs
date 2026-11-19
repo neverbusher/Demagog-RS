@@ -1446,9 +1446,13 @@ mod tests {
         archive.start_file("content.opf", opts).unwrap();
         archive.write_all(r#"<?xml version="1.0" encoding="utf-8"?><package><metadata><dc:title>Книга</dc:title></metadata><manifest><item id="c1" href="Text/c1.xhtml" media-type="application/xhtml+xml"/><item id="c2" href="Text/c2.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/><itemref idref="c2"/></spine></package>"#.as_bytes()).unwrap();
         archive.start_file("Text/c1.xhtml", opts).unwrap();
-        archive.write_all("<html><body><h1>Глава 1</h1><p>Текст один.</p></body></html>".as_bytes()).unwrap();
+        archive
+            .write_all("<html><body><h1>Глава 1</h1><p>Текст один.</p></body></html>".as_bytes())
+            .unwrap();
         archive.start_file("Text/c2.xhtml", opts).unwrap();
-        archive.write_all("<html><body><h1>Глава 2</h1><p>Текст два.</p></body></html>".as_bytes()).unwrap();
+        archive
+            .write_all("<html><body><h1>Глава 2</h1><p>Текст два.</p></body></html>".as_bytes())
+            .unwrap();
         archive.finish().unwrap();
 
         let doc = EpubDocumentReader.read_document(&path).expect("read epub");

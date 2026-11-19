@@ -1566,3 +1566,60 @@ fn knigorez_empty_keywords_show_validation_error() {
 
     assert!(harness.get_all_by_label_contains("ключевых слов").count() >= 1);
 }
+
+#[test]
+fn knigorez_headings_invalidated_when_source_text_cleared() {
+    use crate::domain::BookHeading;
+    use egui::accesskit::Role;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::{NodeT, Queryable};
+
+    let mut app = ui_test_app("Глава 1\nТекст главы.", "", Vec::new());
+    app.document.headings = vec![BookHeading {
+        offset: 0,
+        title: "Глава 1".to_string(),
+    }];
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1280.0, 900.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+    harness.run();
+
+    harness.get_by_label("🗑 Очистить").click();
+    harness.run_steps(1);
+    assert!(harness.state().document.raw_text.is_empty());
+    assert!(
+        harness.state().document.headings.is_empty(),
+        "headings must be invalidated when the source text is cleared"
+    );
+
+    harness.get_by_role(Role::MultilineTextInput).click();
+    harness.run_steps(1);
+    harness
+        .get_by_role(Role::MultilineTextInput)
+        .type_text("Новый текст без структуры глав");
+    harness.run();
+    assert_eq!(
+        harness.state().document.raw_text,
+        "Новый текст без структуры глав"
+    );
+    assert!(
+        harness.state().document.headings.is_empty(),
+        "headings must stay invalidated after editing the source text"
+    );
+
+    harness.get_by_label("🔪 Книгорез").click();
+    harness.run();
+    assert_eq!(
+        harness
+            .get_all_by_label_contains("В этой книге нет структуры глав")
+            .count(),
+        1
+    );
+    assert!(
+        harness
+            .get_by_label_contains("По оглавлению")
+            .accesskit_node()
+            .is_disabled(),
+        "TOC checkbox must be disabled when the book has no headings"
+    );
+}

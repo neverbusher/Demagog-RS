@@ -210,7 +210,12 @@ pub(crate) fn target_key(path: &Path) -> String {
     path.to_string_lossy().to_lowercase()
 }
 
-pub(crate) fn unique_target(dir: &Path, file_name: &str, overwrite: bool, used: &HashSet<String>) -> PathBuf {
+pub(crate) fn unique_target(
+    dir: &Path,
+    file_name: &str,
+    overwrite: bool,
+    used: &HashSet<String>,
+) -> PathBuf {
     // `used` guards against two inputs of the same run mapping to one target:
     // overwrite may replace previous runs' files, never a sibling's result.
     // Keys are lowercased because Windows paths are case-insensitive.
@@ -938,8 +943,14 @@ mod tests {
         let out = root.join("out");
 
         let inputs = vec![
-            BatchInput { path: book1, base_dir: in1 },
-            BatchInput { path: book2, base_dir: in2 },
+            BatchInput {
+                path: book1,
+                base_dir: in1,
+            },
+            BatchInput {
+                path: book2,
+                base_dir: in2,
+            },
         ];
         let summary = run_batch(
             &inputs,
@@ -953,8 +964,14 @@ mod tests {
         .expect("batch runs");
 
         assert_eq!(summary.succeeded, 2);
-        assert_eq!(std::fs::read_to_string(out.join("Book.txt")).unwrap(), "Первая.");
-        assert_eq!(std::fs::read_to_string(out.join("book (2).txt")).unwrap(), "Вторая.");
+        assert_eq!(
+            std::fs::read_to_string(out.join("Book.txt")).unwrap(),
+            "Первая."
+        );
+        assert_eq!(
+            std::fs::read_to_string(out.join("book (2).txt")).unwrap(),
+            "Вторая."
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

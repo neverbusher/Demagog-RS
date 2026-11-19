@@ -279,6 +279,7 @@ impl DemagogApp {
     fn run_split_preview(&mut self) {
         if let Err(err) = book_splitter::validate_config(&self.settings.split) {
             self.set_status(StatusLevel::Warning, err);
+            self.splitter.stale = true;
             return;
         }
         let parts = book_splitter::split_book(
