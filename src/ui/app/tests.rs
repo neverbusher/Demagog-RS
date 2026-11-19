@@ -1527,3 +1527,42 @@ fn batch_state_syncs_to_settings_and_restores() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn knigorez_tab_previews_parts_on_open() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = ui_test_app(
+        "Вступление.\nГлава 1\nТекст один.\nГлава 2\nТекст два.",
+        "",
+        Vec::new(),
+    );
+    app.active_tab = ActiveTab::BookCutter;
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1100.0, 800.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+    harness.run();
+
+    assert_eq!(harness.get_all_by_label_contains("Частей: 3").count(), 1);
+    assert!(harness.get_all_by_label_contains("01 Вступление").count() >= 1);
+    harness.get_by_label("🔍 Тест").click();
+    harness.run();
+    assert_eq!(harness.get_all_by_label_contains("Частей: 3").count(), 1);
+}
+
+#[test]
+fn knigorez_empty_keywords_show_validation_error() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = ui_test_app("Глава 1\nТекст.", "", Vec::new());
+    app.settings.split.keywords = "  ".to_string();
+    app.active_tab = ActiveTab::BookCutter;
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1100.0, 800.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+    harness.run();
+
+    assert!(harness.get_all_by_label_contains("ключевых слов").count() >= 1);
+}

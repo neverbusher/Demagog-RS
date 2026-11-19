@@ -24,6 +24,7 @@ use crate::services::stress::RussianStressFormatter;
 use crate::ui::palette;
 
 mod batch;
+mod splitter;
 mod views;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +32,7 @@ enum ActiveTab {
     RawText,
     ProcessedText,
     Chunks,
+    BookCutter,
     DiffAndStats,
     Settings,
 }
@@ -215,6 +217,7 @@ pub struct DemagogApp {
     last_window_title: String,
     window_icon_applied: bool,
     batch: batch::BatchState,
+    splitter: splitter::SplitterState,
 }
 
 enum WorkerMessage {
@@ -344,6 +347,7 @@ impl DemagogApp {
             last_window_title: "Demagog-RS".to_string(),
             window_icon_applied: false,
             batch: batch_state,
+            splitter: splitter::SplitterState::default(),
         }
     }
 
@@ -819,6 +823,7 @@ impl DemagogApp {
                                         }
                                         self.source_dirty = false;
                                         self.result_state.reset();
+                                        self.splitter = splitter::SplitterState::default();
                                         self.find_dirty = true;
                                     }
                                     Err(err) => {

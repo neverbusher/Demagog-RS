@@ -635,6 +635,7 @@ impl DemagogApp {
                     ActiveTab::Chunks,
                     format!("✂ Чанки ({})", self.document.chunks.len()),
                 );
+                ui.selectable_value(&mut self.active_tab, ActiveTab::BookCutter, "🔪 Книгорез");
                 ui.selectable_value(
                     &mut self.active_tab,
                     ActiveTab::DiffAndStats,
@@ -658,6 +659,7 @@ impl DemagogApp {
                 ActiveTab::RawText => self.show_raw_text_tab(ui),
                 ActiveTab::ProcessedText => self.show_processed_text_tab(ui, theme),
                 ActiveTab::Chunks => self.show_chunks_tab(ui, theme),
+                ActiveTab::BookCutter => self.show_splitter_tab(ui, theme),
                 ActiveTab::DiffAndStats => self.show_diff_tab(ui, theme),
                 ActiveTab::Settings => self.show_settings_tab(ui, ctx),
             }
@@ -699,6 +701,7 @@ impl DemagogApp {
                                         self.document.source_path = None;
                                         self.refresh_raw_char_count();
                                         self.source_dirty = true;
+                                        self.splitter.stale = true;
                                         self.mark_result_stale();
                                         self.find_dirty = true;
                                         self.find_last_edit = Instant::now();
@@ -772,6 +775,7 @@ impl DemagogApp {
                 .inner;
             if output.response.changed() {
                 self.source_dirty = true;
+                self.splitter.stale = true;
                 self.refresh_raw_char_count();
                 self.mark_result_stale();
                 self.find_dirty = true;
@@ -821,6 +825,7 @@ impl DemagogApp {
                                 self.raw_char_count = self.processed_char_count;
                                 self.raw_pipeline_output.clear();
                                 self.source_dirty = true;
+                                self.splitter.stale = true;
                                 self.mark_result_stale();
                                 self.find_dirty = true;
                                 self.find_last_edit = Instant::now();
