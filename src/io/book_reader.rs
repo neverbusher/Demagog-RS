@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use zip::ZipArchive;
 
-use crate::domain::BookDocument;
+use crate::domain::{BookDocument, BookHeading};
 use crate::io::encoding::{decode_text_bytes, looks_like_text_bytes};
 use crate::ports::DocumentReader;
 
@@ -184,11 +184,13 @@ impl DocumentReader for Fb2DocumentReader {
             return cancelled_book();
         }
         let xml = decode_xml_with_declared_encoding(&bytes);
+        let mut headings = Vec::new();
         let text = extract_xml_paragraphs(
             &xml,
             &["p", "v", "subtitle", "title", "text-author"],
             &["binary", "description"],
             cancel,
+            Some(&mut headings),
         )?;
         if text.trim().is_empty() {
             return Err("В FB2 не найден текст книги.".to_string());
@@ -201,7 +203,7 @@ impl DocumentReader for Fb2DocumentReader {
             raw_text: text,
             processed_text: String::new(),
             chunks: Vec::new(),
-            headings: Vec::new(),
+            headings,
         })
     }
 }
@@ -360,6 +362,7 @@ impl DocumentReader for EpubDocumentReader {
         let title = title.unwrap_or_else(|| document_title_from_path(path));
 
         let mut full_text = String::new();
+        let mut headings: Vec<BookHeading> = Vec::new();
         let mut total_bytes: u64 = 0;
         for name in entries {
             if book_cancelled(cancel) {
@@ -379,12 +382,16 @@ impl DocumentReader for EpubDocumentReader {
                 &["p", "h1", "h2", "h3", "h4", "li", "div"],
                 &["head", "style", "script"],
                 cancel,
+                None,
             ) {
                 Ok(part) => part,
                 Err(_) if book_cancelled(cancel) => return cancelled_book(),
                 Err(e) => return Err(format!("Ошибка разбора главы «{name}»: {e}")),
             };
             if !part.trim().is_empty() {
+                let offset = full_text.len() + if full_text.is_empty() { 0 } else { 2 };
+                let title = part.trim().lines().next().unwrap_or("").trim().to_string();
+                headings.push(BookHeading { offset, title });
                 if !full_text.is_empty() {
                     full_text.push_str("\n\n");
                 }
@@ -401,7 +408,7 @@ impl DocumentReader for EpubDocumentReader {
             raw_text: full_text,
             processed_text: String::new(),
             chunks: Vec::new(),
-            headings: Vec::new(),
+            headings,
         })
     }
 }
@@ -767,6 +774,7 @@ fn extract_xml_paragraphs(
     block_tags: &[&str],
     skip_tags: &[&str],
     cancel: Option<&AtomicBool>,
+    mut headings: Option<&mut Vec<BookHeading>>,
 ) -> Result<String, String> {
     let mut reader = Reader::from_str(xml_str);
     reader.config_mut().trim_text(false);
@@ -774,6 +782,8 @@ fn extract_xml_paragraphs(
     let mut out = String::with_capacity(xml_str.len() / 2);
     let mut skip_depth = 0usize;
     let mut in_body = !xml_str.contains("<body");
+    let mut section_depth = 0usize;
+    let mut title_start: Option<usize> = None;
 
     loop {
         if book_cancelled(cancel) {
@@ -798,6 +808,14 @@ fn extract_xml_paragraphs(
                 {
                     out.push('\n');
                 }
+                if skip_depth == 0 && in_body {
+                    if local == "section" {
+                        section_depth += 1;
+                    }
+                    if local == "title" && section_depth > 0 && headings.is_some() {
+                        title_start = Some(out.len());
+                    }
+                }
             }
             Ok(Event::End(e)) => {
                 let local_bytes = e.local_name();
@@ -813,6 +831,25 @@ fn extract_xml_paragraphs(
                 {
                     out.push('\n');
                 }
+                if skip_depth == 0 && in_body {
+                    if local == "section" {
+                        section_depth = section_depth.saturating_sub(1);
+                    }
+                    if local == "title" {
+                        if let (Some(start), Some(headings)) =
+                            (title_start.take(), headings.as_mut())
+                        {
+                            if let Some(title) =
+                                out[start..].lines().map(str::trim).find(|l| !l.is_empty())
+                            {
+                                headings.push(BookHeading {
+                                    offset: start,
+                                    title: title.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
             }
             Ok(Event::Text(t)) if skip_depth == 0 && in_body => {
                 match t.unescape_with(resolve_html_entity) {
@@ -826,6 +863,12 @@ fn extract_xml_paragraphs(
         }
     }
 
+    let trim_start = out.len() - out.trim_start().len();
+    if let Some(headings) = headings.as_mut() {
+        for heading in headings.iter_mut() {
+            heading.offset = heading.offset.saturating_sub(trim_start);
+        }
+    }
     Ok(out.trim().to_string())
 }
 
@@ -999,7 +1042,7 @@ mod tests {
     fn fb2_xml_parsing_honors_cancel_flag() {
         let cancel = AtomicBool::new(true);
         let xml = "<body><p>Глава</p></body>";
-        let error = extract_xml_paragraphs(xml, &["p"], &[], Some(&cancel))
+        let error = extract_xml_paragraphs(xml, &["p"], &[], Some(&cancel), None)
             .expect_err("cancelled parsing must report cancellation");
         assert!(error.contains("отмен"), "{error}");
     }
@@ -1110,6 +1153,7 @@ mod tests {
             &["p", "v", "subtitle", "title", "text-author"],
             &["binary", "description"],
             None,
+            None,
         )
         .expect("well-formed FB2");
 
@@ -1133,7 +1177,7 @@ mod tests {
     #[test]
     fn html_entities_do_not_drop_text() {
         let xml = "<html><body><p>Первый&nbsp;абзац &mdash; продолжение.</p></body></html>";
-        let text = extract_xml_paragraphs(xml, &["p"], &[], None)
+        let text = extract_xml_paragraphs(xml, &["p"], &[], None, None)
             .expect("well-formed XHTML with HTML entities");
 
         assert!(text.contains("Первый"), "text before entity lost: {text}");
@@ -1147,7 +1191,7 @@ mod tests {
     fn malformed_fb2_reports_an_error_instead_of_empty_text() {
         let xml = "<FictionBook><body><p>Текст</body></FictionBook>";
         assert!(
-            extract_xml_paragraphs(xml, &["p"], &["description"], None).is_err(),
+            extract_xml_paragraphs(xml, &["p"], &["description"], None, None).is_err(),
             "broken XML must not silently become an empty book"
         );
     }
@@ -1348,5 +1392,82 @@ mod tests {
             read_limited_with_cancel(std::io::Cursor::new(b"12345678901"), "chapter", 10, None)
                 .expect_err("entry above the limit");
         assert!(error.contains("больше"), "{error}");
+    }
+
+    #[test]
+    fn fb2_captures_section_titles_as_headings() {
+        let dir = std::env::temp_dir().join(format!("demagog-fb2-head-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("book.fb2");
+        std::fs::write(
+            &path,
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<FictionBook><description><title-info><book-title>Книга</book-title></title-info></description>
+<body><section><title><p>Глава первая</p></title><p>Текст один.</p></section>
+<section><title><p>Глава вторая</p></title><p>Текст два.</p></section></body></FictionBook>"#,
+        )
+        .expect("write fb2");
+        let doc = Fb2DocumentReader.read_document(&path).expect("read fb2");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(doc.headings.len(), 2);
+        assert_eq!(doc.headings[0].title, "Глава первая");
+        assert!(doc.raw_text[doc.headings[0].offset..].starts_with("Глава первая"));
+        assert_eq!(doc.headings[1].title, "Глава вторая");
+        assert!(doc.raw_text[doc.headings[1].offset..].starts_with("Глава вторая"));
+    }
+
+    #[test]
+    fn fb2_heading_offsets_survive_leading_trim() {
+        let dir = std::env::temp_dir().join(format!("demagog-fb2-trim-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("book.fb2");
+        std::fs::write(
+            &path,
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<FictionBook><body>   \n  <section><title><p>Глава</p></title><p>Текст.</p></section></body></FictionBook>",
+        )
+        .expect("write fb2");
+        let doc = Fb2DocumentReader.read_document(&path).expect("read fb2");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(doc.headings.len(), 1);
+        assert!(doc.raw_text[doc.headings[0].offset..].starts_with("Глава"));
+    }
+
+    #[test]
+    fn epub_captures_spine_documents_as_headings() {
+        let dir = std::env::temp_dir().join(format!("demagog-epub-head-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("book.epub");
+        let file = File::create(&path).expect("create epub");
+        let mut archive = zip::ZipWriter::new(file);
+        use std::io::Write;
+        let opts = zip::write::SimpleFileOptions::default();
+        archive.start_file("META-INF/container.xml", opts).unwrap();
+        archive.write_all(r#"<?xml version="1.0" encoding="utf-8"?><container><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>"#.as_bytes()).unwrap();
+        archive.start_file("content.opf", opts).unwrap();
+        archive.write_all(r#"<?xml version="1.0" encoding="utf-8"?><package><metadata><dc:title>Книга</dc:title></metadata><manifest><item id="c1" href="Text/c1.xhtml" media-type="application/xhtml+xml"/><item id="c2" href="Text/c2.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/><itemref idref="c2"/></spine></package>"#.as_bytes()).unwrap();
+        archive.start_file("Text/c1.xhtml", opts).unwrap();
+        archive.write_all("<html><body><h1>Глава 1</h1><p>Текст один.</p></body></html>".as_bytes()).unwrap();
+        archive.start_file("Text/c2.xhtml", opts).unwrap();
+        archive.write_all("<html><body><h1>Глава 2</h1><p>Текст два.</p></body></html>".as_bytes()).unwrap();
+        archive.finish().unwrap();
+
+        let doc = EpubDocumentReader.read_document(&path).expect("read epub");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(doc.headings.len(), 2);
+        assert_eq!(doc.headings[0].offset, 0);
+        assert_eq!(doc.headings[0].title, "Глава 1");
+        assert_eq!(doc.headings[1].title, "Глава 2");
+        assert!(doc.raw_text[doc.headings[1].offset..].starts_with("Глава 2"));
+    }
+
+    #[test]
+    fn txt_documents_have_no_headings() {
+        let dir = std::env::temp_dir().join(format!("demagog-txt-head-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("book.txt");
+        std::fs::write(&path, "Глава 1\nТекст.").expect("write txt");
+        let doc = TxtDocumentReader.read_document(&path).expect("read txt");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(doc.headings.is_empty());
     }
 }
