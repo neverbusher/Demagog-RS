@@ -59,7 +59,7 @@ impl TextChunker for SentenceAwareChunker {
     }
 }
 
-fn split_into_sentences(paragraph: &str) -> Vec<String> {
+pub(crate) fn split_into_sentences(paragraph: &str) -> Vec<String> {
     let mut sentences = Vec::new();
     let mut cur = String::new();
     let chars: Vec<char> = paragraph.chars().collect();
@@ -93,7 +93,7 @@ fn split_into_sentences(paragraph: &str) -> Vec<String> {
     sentences
 }
 
-fn split_long_sentence(sentence: &str, max_chars: usize) -> Vec<String> {
+pub(crate) fn split_long_sentence(sentence: &str, max_chars: usize) -> Vec<String> {
     let mut parts = Vec::new();
     let mut cur = String::new();
 

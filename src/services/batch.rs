@@ -74,7 +74,7 @@ pub fn run_batch(
     })?;
 
     let mut summary = BatchSummary::default();
-    let mut used: HashSet<PathBuf> = HashSet::new();
+    let mut used: HashSet<String> = HashSet::new();
     let total = files.len();
     for (index, input) in files.iter().enumerate() {
         if is_cancelled(cancel) {
@@ -99,10 +99,10 @@ pub fn run_batch(
             Ok(outputs) => {
                 summary.succeeded += 1;
                 if let Some(path) = &outputs.txt {
-                    used.insert(path.clone());
+                    used.insert(target_key(&path));
                 }
                 if let Some(path) = &outputs.json {
-                    used.insert(path.clone());
+                    used.insert(target_key(&path));
                 }
                 send(
                     progress_tx,
@@ -147,7 +147,7 @@ fn process_one(
     pipeline: &ProcessingPipeline,
     options: &BatchOptions,
     cancel: Option<&AtomicBool>,
-    used: &HashSet<PathBuf>,
+    used: &HashSet<String>,
 ) -> Result<BatchOutputs, String> {
     let doc = reader.read_document_with_cancel(&input.path, cancel)?;
     let result = pipeline
@@ -206,10 +206,15 @@ fn process_one(
     Ok(outputs)
 }
 
-fn unique_target(dir: &Path, file_name: &str, overwrite: bool, used: &HashSet<PathBuf>) -> PathBuf {
+pub(crate) fn target_key(path: &Path) -> String {
+    path.to_string_lossy().to_lowercase()
+}
+
+pub(crate) fn unique_target(dir: &Path, file_name: &str, overwrite: bool, used: &HashSet<String>) -> PathBuf {
     // `used` guards against two inputs of the same run mapping to one target:
     // overwrite may replace previous runs' files, never a sibling's result.
-    let is_free = |path: &Path| !used.contains(path) && (overwrite || !path.exists());
+    // Keys are lowercased because Windows paths are case-insensitive.
+    let is_free = |path: &Path| !used.contains(&target_key(path)) && (overwrite || !path.exists());
     let target = dir.join(file_name);
     if is_free(&target) {
         return target;
@@ -228,7 +233,7 @@ fn unique_target(dir: &Path, file_name: &str, overwrite: bool, used: &HashSet<Pa
     }
 }
 
-fn output_stem(path: &Path) -> String {
+pub(crate) fn output_stem(path: &Path) -> String {
     let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
     if file_name.to_ascii_lowercase().ends_with(".fb2.zip") {
         return file_name[..file_name.len() - ".fb2.zip".len()].to_string();
@@ -917,6 +922,39 @@ mod tests {
         );
         assert!(out.join("book_chunks.json").exists());
         assert!(out.join("book_chunks (2).json").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn same_run_case_differing_names_get_suffix() {
+        let root = temp_dir("intrarun-case");
+        let in1 = root.join("in1");
+        let in2 = root.join("in2");
+        std::fs::create_dir_all(&in1).unwrap();
+        std::fs::create_dir_all(&in2).unwrap();
+        let book1 = write_book(&in1, "Book.txt", "Первая.");
+        let book2 = write_book(&in2, "book.txt", "Вторая.");
+        let out = root.join("out");
+
+        let inputs = vec![
+            BatchInput { path: book1, base_dir: in1 },
+            BatchInput { path: book2, base_dir: in2 },
+        ];
+        let summary = run_batch(
+            &inputs,
+            &CompositeBookReader::new(),
+            &[],
+            &pipeline(),
+            &options(out.clone()),
+            None,
+            None,
+        )
+        .expect("batch runs");
+
+        assert_eq!(summary.succeeded, 2);
+        assert_eq!(std::fs::read_to_string(out.join("Book.txt")).unwrap(), "Первая.");
+        assert_eq!(std::fs::read_to_string(out.join("book (2).txt")).unwrap(), "Вторая.");
 
         let _ = std::fs::remove_dir_all(&root);
     }

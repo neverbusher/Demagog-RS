@@ -255,6 +255,7 @@ impl DemagogApp {
             raw_text: sample_text,
             processed_text: String::new(),
             chunks: Vec::new(),
+            headings: Vec::new(),
         };
 
         let mut app = Self::from_parts(settings, document);

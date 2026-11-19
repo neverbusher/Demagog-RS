@@ -62,6 +62,54 @@ impl Default for ChunkConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BookHeading {
+    pub offset: usize,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SplitConfig {
+    pub by_size: bool,
+    pub max_chars: usize,
+    pub by_keywords: bool,
+    pub keywords: String,
+    pub by_blank_lines: bool,
+    pub by_all_caps: bool,
+    pub by_toc: bool,
+    pub min_chars: usize,
+    pub remove_heading: bool,
+    pub template: String,
+    pub add_number: bool,
+    pub start_number: usize,
+    pub output_dir: Option<PathBuf>,
+    pub subfolder: bool,
+    pub overwrite: bool,
+}
+
+impl Default for SplitConfig {
+    fn default() -> Self {
+        Self {
+            by_size: true,
+            max_chars: 10_000,
+            by_keywords: true,
+            keywords: "Глава, Часть, Пролог, Эпилог".to_string(),
+            by_blank_lines: false,
+            by_all_caps: false,
+            by_toc: false,
+            min_chars: 0,
+            remove_heading: false,
+            template: "%Number% %FirstLine%".to_string(),
+            add_number: true,
+            start_number: 1,
+            output_dir: None,
+            subfolder: false,
+            overwrite: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct TextCleanupConfig {
     #[serde(default)]
@@ -245,6 +293,7 @@ pub struct BookDocument {
     pub raw_text: String,
     pub processed_text: String,
     pub chunks: Vec<String>,
+    pub headings: Vec<BookHeading>,
 }
 
 #[derive(Debug, Clone)]
@@ -284,6 +333,8 @@ pub struct AppSettings {
     pub cleanup: TextCleanupConfig,
     #[serde(default)]
     pub batch: BatchSettings,
+    #[serde(default)]
+    pub split: SplitConfig,
     pub dic_folder: PathBuf,
     pub disabled_dictionaries: Vec<String>,
     #[serde(default = "default_true")]
@@ -304,6 +355,7 @@ impl Default for AppSettings {
             chunk_config: ChunkConfig::default(),
             cleanup: TextCleanupConfig::default(),
             batch: BatchSettings::default(),
+            split: SplitConfig::default(),
             dic_folder: PathBuf::from("dic"),
             disabled_dictionaries: Vec::new(),
             group_dictionaries_by_type: true,
@@ -399,6 +451,9 @@ impl AppSettings {
         }
         settings.ui_font_size = settings.ui_font_size.clamp(12.0, 28.0);
         settings.editor_font_size = settings.editor_font_size.clamp(12.0, 36.0);
+        settings.split.max_chars = settings.split.max_chars.clamp(1_000, 500_000);
+        settings.split.min_chars = settings.split.min_chars.min(100_000);
+        settings.split.start_number = settings.split.start_number.max(1);
         Ok(settings)
     }
 
@@ -830,6 +885,35 @@ mod tests {
         assert!(loaded.batch.export_chunks);
         assert!(loaded.batch.overwrite);
         assert!(loaded.batch.queue.is_empty());
+    }
+
+    #[test]
+    fn split_config_roundtrips_and_defaults_when_missing() {
+        let mut settings = AppSettings::default();
+        settings.split.by_toc = true;
+        settings.split.max_chars = 1234;
+        let json = serde_json::to_string(&settings).unwrap();
+        let restored: AppSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.split, settings.split);
+
+        let mut value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&AppSettings::default()).unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("split");
+        let restored: AppSettings = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.split, SplitConfig::default());
+    }
+
+    #[test]
+    fn split_config_values_are_clamped_on_load() {
+        let mut settings = AppSettings::default();
+        settings.split.max_chars = 0;
+        settings.split.start_number = 0;
+        settings.split.min_chars = 200_000;
+        let json = serde_json::to_string(&settings).unwrap();
+        let restored = AppSettings::from_json(json.as_bytes(), PathBuf::from("dic")).unwrap();
+        assert_eq!(restored.split.max_chars, 1_000);
+        assert_eq!(restored.split.start_number, 1);
+        assert_eq!(restored.split.min_chars, 100_000);
     }
 
     #[test]

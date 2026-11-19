@@ -66,6 +66,7 @@ impl DocumentReader for TxtDocumentReader {
             raw_text: text,
             processed_text: String::new(),
             chunks: Vec::new(),
+            headings: Vec::new(),
         })
     }
 }
@@ -200,6 +201,7 @@ impl DocumentReader for Fb2DocumentReader {
             raw_text: text,
             processed_text: String::new(),
             chunks: Vec::new(),
+            headings: Vec::new(),
         })
     }
 }
@@ -322,6 +324,7 @@ impl DocumentReader for DocxDocumentReader {
             raw_text: text,
             processed_text: String::new(),
             chunks: Vec::new(),
+            headings: Vec::new(),
         })
     }
 }
@@ -398,6 +401,7 @@ impl DocumentReader for EpubDocumentReader {
             raw_text: full_text,
             processed_text: String::new(),
             chunks: Vec::new(),
+            headings: Vec::new(),
         })
     }
 }

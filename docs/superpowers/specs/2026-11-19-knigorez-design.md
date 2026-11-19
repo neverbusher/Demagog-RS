@@ -137,5 +137,5 @@ pub fn split_book(text: &str, headings: &[BookHeading], config: &SplitConfig) ->
 - `src/ui/app/mod.rs` — вкладка, состояние, wiring.
 - `src/ui/app/splitter.rs` — UI вкладки (новый).
 - `src/ui/app/views.rs` — кнопка вкладки и match-ветка.
-- `src/ui/app/tests.rs`, `src/main.rs` — конструкторы `BookDocument`.
+- `src/ui/app/tests.rs` — конструкторы `BookDocument` (`main.rs` их не содержит).
 - `CHANGELOG.md` — запись о фиче.

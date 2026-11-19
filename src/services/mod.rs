@@ -1,4 +1,5 @@
 pub mod batch;
+pub mod book_splitter;
 pub mod chunker;
 pub mod dictionary_audit;
 pub mod dictionary_check;

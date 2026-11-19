@@ -414,6 +414,7 @@ fn ui_test_app(raw_text: &str, processed_text: &str, chunks: Vec<String>) -> Dem
         raw_text: raw_text.to_string(),
         processed_text: processed_text.to_string(),
         chunks,
+        headings: Vec::new(),
     };
     let mut app = DemagogApp::from_parts(AppSettings::default(), document);
     app.window_icon_applied = true;
@@ -493,6 +494,7 @@ fn finished_worker_messages_clear_cancel_flag() {
         raw_text: "Текст".to_string(),
         processed_text: String::new(),
         chunks: Vec::new(),
+        headings: Vec::new(),
     })))
     .unwrap();
 
@@ -675,6 +677,7 @@ fn poll_worker_resets_cancel_flag_on_book_load() {
         raw_text: "Текст".to_string(),
         processed_text: String::new(),
         chunks: Vec::new(),
+        headings: Vec::new(),
     })))
     .unwrap();
     app.rx = Some(rx);
@@ -1515,6 +1518,7 @@ fn batch_state_syncs_to_settings_and_restores() {
         raw_text: String::new(),
         processed_text: String::new(),
         chunks: Vec::new(),
+        headings: Vec::new(),
     };
     let restored = DemagogApp::from_parts(app.settings.clone(), document);
     assert_eq!(restored.batch.items.len(), 1);
