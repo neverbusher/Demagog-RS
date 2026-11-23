@@ -103,6 +103,13 @@ impl BatchState {
     }
 }
 
+fn batch_setup_error(result: Result<BatchOutcome, AppError>) -> Option<String> {
+    match result {
+        Err(error @ AppError::Failed(_)) => Some(error.to_string()),
+        Err(AppError::Cancelled(_)) | Ok(_) => None,
+    }
+}
+
 pub(super) fn restore_queue(entries: &[BatchQueueEntry]) -> (Vec<BatchItem>, usize) {
     let mut items = Vec::new();
     let mut dropped = 0;
@@ -441,10 +448,31 @@ impl DemagogApp {
             );
             drop(btx);
             let _ = forwarder.join();
-            if let Err(error) = result {
-                let _ = tx.send(WorkerMessage::BatchSetupError(error.to_string()));
+            if let Some(error) = batch_setup_error(result) {
+                let _ = tx.send(WorkerMessage::BatchSetupError(error));
                 ctx.request_repaint();
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batch_setup_error_only_reports_failed_results() {
+        assert_eq!(
+            batch_setup_error(Err(AppError::io("  Ошибка пакета\n"))),
+            Some("  Ошибка пакета\n".to_string())
+        );
+        assert_eq!(
+            batch_setup_error(Err(AppError::cancelled("Пакет отменён"))),
+            None
+        );
+        assert_eq!(
+            batch_setup_error(Ok(BatchOutcome::Completed(Default::default()))),
+            None
+        );
     }
 }
