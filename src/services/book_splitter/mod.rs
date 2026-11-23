@@ -691,6 +691,61 @@ mod tests {
     }
 
     #[test]
+    fn run_split_batch_pre_cancelled_processes_nothing() {
+        use crate::io::book_reader::CompositeBookReader;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::mpsc;
+
+        let root = temp_dir("splitprecancel");
+        let book = write_book(&root, "book.txt", "Глава 1\n\nТекст.");
+        let out = root.join("out");
+        let cancel = AtomicBool::new(true);
+
+        let (tx, rx) = mpsc::channel();
+        let summary = run_split_batch(
+            &flat(&[book]),
+            &CompositeBookReader::new(),
+            &split_batch_options(out.clone()),
+            Some(&cancel),
+            Some(&tx),
+        );
+        drop(tx);
+
+        assert_eq!(
+            summary,
+            BatchSplitSummary {
+                succeeded: 0,
+                failed: 0,
+                cancelled: true
+            }
+        );
+
+        let messages: Vec<BatchSplitProgress> = rx.iter().collect();
+        assert!(
+            messages
+                .iter()
+                .all(|message| !matches!(message, BatchSplitProgress::FileFinished { .. }))
+        );
+        assert!(matches!(
+            messages.last(),
+            Some(BatchSplitProgress::Completed {
+                succeeded: 0,
+                failed: 0,
+                cancelled: true
+            })
+        ));
+
+        let output_is_empty = match std::fs::read_dir(&out) {
+            Ok(mut entries) => entries.next().is_none(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) => panic!("failed to inspect output directory: {error}"),
+        };
+        assert!(output_is_empty, "pre-cancelled batch created output");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn run_split_batch_continues_after_error() {
         use crate::io::book_reader::CompositeBookReader;
 
