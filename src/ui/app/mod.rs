@@ -8,15 +8,15 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use crate::domain::{
-    AppSettings, BookDocument, ChunkConfig, ChunksExportPayload, DictionaryMeta, DictionaryTag,
-    PipelineProgress, PipelineReport, StressFormat, ThemeMode,
+    AppError, AppSettings, BookDocument, ChunkConfig, ChunksExportPayload, DictionaryMeta,
+    DictionaryTag, PipelineProgress, PipelineReport, StressFormat, ThemeMode,
 };
 use crate::engine::loader::{
     CompiledDictionary, DictionaryLoadReport, load_dictionaries_parallel_with_cancel,
 };
 use crate::io::book_reader::{CompositeBookReader, SUPPORTED_BOOK_FORMATS, can_read_book};
 use crate::io::settings_store;
-use crate::ports::{DocumentReader, StressFormatter, TextChunker, TextProcessor};
+use crate::ports::{DocumentReader, StressFormatter, TextChunker, TextProcessor, is_cancelled};
 use crate::services::batch::{BatchProgress, BatchSummary};
 use crate::services::book_splitter::{BatchSplitProgress, BatchSplitSummary};
 use crate::services::chunker::SentenceAwareChunker;
@@ -238,6 +238,27 @@ enum WorkerMessage {
     BatchSetupError(String),
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum WorkerOutcome<T> {
+    Cancelled,
+    Completed(T),
+    Failed(AppError),
+}
+
+fn classify_worker_result<T>(
+    result: Result<T, AppError>,
+    cancel: Option<&AtomicBool>,
+) -> WorkerOutcome<T> {
+    if is_cancelled(cancel) {
+        return WorkerOutcome::Cancelled;
+    }
+    match result {
+        Ok(value) => WorkerOutcome::Completed(value),
+        Err(AppError::Cancelled(_)) => WorkerOutcome::Cancelled,
+        Err(error) => WorkerOutcome::Failed(error),
+    }
+}
+
 impl DemagogApp {
     #[cfg(not(feature = "sw"))]
     #[cfg(feature = "eframe-backend")]
@@ -433,24 +454,23 @@ impl DemagogApp {
         std::thread::spawn(move || {
             let start = Instant::now();
             let result = load_dictionaries_parallel_with_cancel(&folder, Some(cancel.as_ref()));
-            if cancel.load(Ordering::Relaxed) {
-                let _ = tx.send(WorkerMessage::Pipeline(PipelineProgress::Cancelled));
-            } else {
-                match result {
-                    Ok(report) => {
-                        let DictionaryLoadReport { compiled, errors } = report;
-                        let elapsed_ms = start.elapsed().as_millis();
-                        let _ = tx.send(WorkerMessage::DictionariesCompiled {
-                            compiled,
-                            errors,
-                            elapsed_ms,
-                        });
-                    }
-                    Err(e) => {
-                        let _ = tx.send(WorkerMessage::Pipeline(PipelineProgress::Error(
-                            e.to_string(),
-                        )));
-                    }
+            match classify_worker_result(result, Some(cancel.as_ref())) {
+                WorkerOutcome::Cancelled => {
+                    let _ = tx.send(WorkerMessage::Pipeline(PipelineProgress::Cancelled));
+                }
+                WorkerOutcome::Completed(report) => {
+                    let DictionaryLoadReport { compiled, errors } = report;
+                    let elapsed_ms = start.elapsed().as_millis();
+                    let _ = tx.send(WorkerMessage::DictionariesCompiled {
+                        compiled,
+                        errors,
+                        elapsed_ms,
+                    });
+                }
+                WorkerOutcome::Failed(error) => {
+                    let _ = tx.send(WorkerMessage::Pipeline(PipelineProgress::Error(
+                        error.to_string(),
+                    )));
                 }
             }
             ctx.request_repaint();
@@ -476,12 +496,18 @@ impl DemagogApp {
         self.rx = Some(rx);
         std::thread::spawn(move || {
             let result = dictionary_check::run_check_with_cancel(&folder, Some(cancel.as_ref()));
-            if cancel.load(Ordering::Relaxed) {
-                let _ = tx.send(WorkerMessage::Pipeline(PipelineProgress::Cancelled));
-            } else {
-                let _ = tx.send(WorkerMessage::DictionaryCheckFinished(
-                    result.map_err(|error| error.to_string()),
-                ));
+            match classify_worker_result(result, Some(cancel.as_ref())) {
+                WorkerOutcome::Cancelled => {
+                    let _ = tx.send(WorkerMessage::Pipeline(PipelineProgress::Cancelled));
+                }
+                WorkerOutcome::Completed(report) => {
+                    let _ = tx.send(WorkerMessage::DictionaryCheckFinished(Ok(report)));
+                }
+                WorkerOutcome::Failed(error) => {
+                    let _ = tx.send(WorkerMessage::DictionaryCheckFinished(Err(
+                        error.to_string()
+                    )));
+                }
             }
             ctx.request_repaint();
         });
@@ -1209,12 +1235,16 @@ impl DemagogApp {
         std::thread::spawn(move || {
             let reader = CompositeBookReader::new();
             let result = reader.read_document_with_cancel(&path, Some(cancel.as_ref()));
-            if cancel.load(Ordering::Relaxed) {
-                let _ = tx.send(WorkerMessage::Pipeline(PipelineProgress::Cancelled));
-            } else {
-                let _ = tx.send(WorkerMessage::BookLoaded(
-                    result.map_err(|error| error.to_string()),
-                ));
+            match classify_worker_result(result, Some(cancel.as_ref())) {
+                WorkerOutcome::Cancelled => {
+                    let _ = tx.send(WorkerMessage::Pipeline(PipelineProgress::Cancelled));
+                }
+                WorkerOutcome::Completed(document) => {
+                    let _ = tx.send(WorkerMessage::BookLoaded(Ok(document)));
+                }
+                WorkerOutcome::Failed(error) => {
+                    let _ = tx.send(WorkerMessage::BookLoaded(Err(error.to_string())));
+                }
             }
             ctx.request_repaint();
         });
@@ -2423,6 +2453,56 @@ fn confirm_destructive(description: &str) -> bool {
         .set_description(description)
         .show()
         == rfd::MessageDialogResult::Yes
+}
+
+#[cfg(test)]
+mod worker_outcome_tests {
+    use super::{WorkerOutcome, classify_worker_result};
+    use crate::domain::AppError;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn typed_cancellation_is_cancelled_when_flag_is_false() {
+        let cancel = AtomicBool::new(false);
+        let result = Err(AppError::Cancelled("Чтение книги отменено"));
+
+        assert_eq!(
+            classify_worker_result::<()>(result, Some(&cancel)),
+            WorkerOutcome::Cancelled
+        );
+    }
+
+    #[test]
+    fn cancellation_flag_wins_over_a_real_failure() {
+        let cancel = AtomicBool::new(true);
+        let result = Err(AppError::Failed("Ошибка чтения книги".to_string()));
+
+        assert_eq!(
+            classify_worker_result::<()>(result, Some(&cancel)),
+            WorkerOutcome::Cancelled
+        );
+    }
+
+    #[test]
+    fn real_failure_is_preserved_when_flag_is_false() {
+        let cancel = AtomicBool::new(false);
+        let error = AppError::Failed("Ошибка чтения книги".to_string());
+
+        assert_eq!(
+            classify_worker_result::<()>(Err(error.clone()), Some(&cancel)),
+            WorkerOutcome::Failed(error)
+        );
+    }
+
+    #[test]
+    fn successful_value_is_completed() {
+        let cancel = AtomicBool::new(false);
+
+        assert_eq!(
+            classify_worker_result(Ok(42), Some(&cancel)),
+            WorkerOutcome::Completed(42)
+        );
+    }
 }
 
 #[cfg(test)]

@@ -68,8 +68,10 @@ impl DocumentReader for EpubDocumentReader {
                 None,
             ) {
                 Ok(part) => part,
-                Err(_) if book_cancelled(cancel) => return cancelled_book(),
-                Err(e) => return Err(format!("Ошибка разбора главы «{name}»: {e}").into()),
+                Err(error) if book_cancelled(cancel) || error.is_cancelled() => {
+                    return cancelled_book();
+                }
+                Err(error) => return Err(format!("Ошибка разбора главы «{name}»: {error}").into()),
             };
             if !part.trim().is_empty() {
                 let offset = full_text.len() + if full_text.is_empty() { 0 } else { 2 };

@@ -486,7 +486,7 @@ pub fn run_check_with_cancel(dir: &Path, cancel: Option<&AtomicBool>) -> AppResu
     let audit = match audit_dictionaries_with_cancel(dir, cancel) {
         Ok(audit) => audit,
         Err(error) => {
-            if is_cancelled() {
+            if is_cancelled() || error.is_cancelled() {
                 return Err(check_cancelled());
             }
             order
