@@ -2400,6 +2400,15 @@ fn editor_layouter<'a>(
     }
 }
 
+// Нативное модальное окно в тестах ждёт клика и вешает прогон, поэтому тесты
+// подтверждают действие сразу; сама логика «спросить перед потерей текста»
+// проверяется чистыми функциями (`text_would_be_lost` и т. п.).
+#[cfg(test)]
+fn confirm_destructive(_description: &str) -> bool {
+    true
+}
+
+#[cfg(not(test))]
 fn confirm_destructive(description: &str) -> bool {
     rfd::MessageDialog::new()
         .set_title("Demagog-RS")
