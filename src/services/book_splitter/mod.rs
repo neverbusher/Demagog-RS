@@ -35,6 +35,15 @@ use std::path::PathBuf;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{AppError, AppFailure, FailureKind};
+
+    fn expect_failure(error: &AppError, kind: FailureKind) -> &AppFailure {
+        let AppError::Failed(failure) = error else {
+            panic!("expected {kind:?} failure, got {error:?}");
+        };
+        assert_eq!(failure.kind, kind);
+        failure
+    }
 
     fn cfg() -> SplitConfig {
         SplitConfig {
@@ -170,13 +179,24 @@ mod tests {
 
     #[test]
     fn validate_config_rejects_no_methods_and_empty_keywords() {
-        assert!(validate_config(&cfg()).is_err());
+        let error = validate_config(&cfg()).expect_err("no split methods must fail");
+        let failure = expect_failure(&error, FailureKind::InvalidData);
+        assert_eq!(failure.message, "Включите хотя бы один способ деления");
+        assert_eq!(error.to_string(), failure.message);
+
         let config = SplitConfig {
             by_keywords: true,
             keywords: " , ".to_string(),
             ..cfg()
         };
-        assert!(validate_config(&config).is_err());
+        let error = validate_config(&config).expect_err("empty keywords must fail");
+        let failure = expect_failure(&error, FailureKind::InvalidData);
+        assert_eq!(
+            failure.message,
+            "Введите одно или несколько ключевых слов для поиска"
+        );
+        assert_eq!(error.to_string(), failure.message);
+
         let config = SplitConfig {
             by_keywords: true,
             ..cfg()
@@ -552,7 +572,10 @@ mod tests {
             title: None,
             text: "Текст.".to_string(),
         }];
-        assert!(export_parts(&parts, &cfg(), "book").is_err());
+        let error = export_parts(&parts, &cfg(), "book").expect_err("missing destination");
+        let failure = expect_failure(&error, FailureKind::InvalidData);
+        assert_eq!(failure.message, "Не выбрана папка назначения");
+        assert_eq!(error.to_string(), failure.message);
     }
 
     #[test]
@@ -560,15 +583,64 @@ mod tests {
         let dir = temp_dir("blocked");
         let blocker = dir.join("blocker");
         std::fs::write(&blocker, "file, not a dir").unwrap();
+        let destination = blocker.join("out");
         let config = SplitConfig {
-            output_dir: Some(blocker.join("out")),
+            output_dir: Some(destination.clone()),
             ..cfg()
         };
         let parts = vec![BookPart {
             title: None,
             text: "Текст.".to_string(),
         }];
-        assert!(export_parts(&parts, &config, "book").is_err());
+        let error = export_parts(&parts, &config, "book").expect_err("blocked destination");
+        let failure = expect_failure(&error, FailureKind::Io);
+        let expected_prefix = format!("Не удалось создать папка {}: ", destination.display());
+        assert!(
+            failure.message.starts_with(&expected_prefix),
+            "expected prefix {expected_prefix:?}, actual {:?}",
+            failure.message
+        );
+        assert_eq!(error.to_string(), failure.message);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_write_errors_are_io_and_keep_partial_success() {
+        let dir = temp_dir("partial-export");
+        let blocked_target = dir.join("01 Текст.txt");
+        std::fs::create_dir_all(&blocked_target).unwrap();
+        let config = SplitConfig {
+            output_dir: Some(dir.clone()),
+            ..cfg()
+        };
+        let parts = vec![
+            BookPart {
+                title: None,
+                text: "Текст.".to_string(),
+            },
+            BookPart {
+                title: None,
+                text: "Вторая часть.".to_string(),
+            },
+        ];
+
+        let summary = export_parts(&parts, &config, "book").expect("partial export completes");
+
+        assert_eq!(summary.saved, 1);
+        assert_eq!(summary.errors.len(), 1);
+        let failure = expect_failure(&summary.errors[0], FailureKind::Io);
+        assert!(
+            failure
+                .message
+                .starts_with(&format!("{}: ", blocked_target.display())),
+            "{}",
+            failure.message
+        );
+        assert_eq!(summary.errors[0].to_string(), failure.message);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("02 Вторая часть.txt")).unwrap(),
+            "Вторая часть."
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -941,6 +1013,7 @@ mod tests {
     #[test]
     fn run_split_batch_fails_when_target_files_exist_with_overwrite_on() {
         use crate::io::book_reader::CompositeBookReader;
+        use std::sync::mpsc;
 
         let root = temp_dir("splitblock");
         let input = root.join("in");
@@ -950,14 +1023,20 @@ mod tests {
         let existing = out.join("book").join("Глава 1.txt");
         std::fs::create_dir_all(existing.parent().unwrap()).unwrap();
         std::fs::write(&existing, "старое").unwrap();
+        let expected = format!(
+            "Файлы уже существуют и будут затёрты: {}",
+            existing.display()
+        );
 
+        let (tx, rx) = mpsc::channel();
         let outcome = run_split_batch(
             &flat(&[book]),
             &CompositeBookReader::new(),
             &split_batch_options(out.clone()),
             None,
-            None,
+            Some(&tx),
         );
+        drop(tx);
 
         assert_eq!(
             outcome,
@@ -967,6 +1046,14 @@ mod tests {
             })
         );
         assert_eq!(std::fs::read_to_string(&existing).unwrap(), "старое");
+        let messages: Vec<BatchSplitProgress> = rx.iter().collect();
+        assert!(messages.iter().any(|message| match message {
+            BatchSplitProgress::FileFinished {
+                index: 0,
+                outcome: Err(text),
+            } => text == &expected,
+            _ => false,
+        }));
 
         let _ = std::fs::remove_dir_all(&root);
     }

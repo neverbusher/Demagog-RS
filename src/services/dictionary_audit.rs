@@ -119,8 +119,9 @@ pub fn audit_dictionaries_with_cancel(
             report.skipped.push((name, purpose));
             continue;
         }
-        let bytes = std::fs::read(&path)
-            .map_err(|error| format!("Не удалось прочитать {}: {error}", path.display()))?;
+        let bytes = std::fs::read(&path).map_err(|error| {
+            AppError::io(format!("Не удалось прочитать {}: {error}", path.display()))
+        })?;
         let (content, _) = decode_text_bytes(&bytes);
         let mut total_rules = 0usize;
         let mut candidates = Vec::new();
@@ -252,6 +253,34 @@ mod tests {
             "cancelled dictionary audit must report cancellation"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dictionary_read_failure_is_io() {
+        use crate::domain::FailureKind;
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = temp_dir();
+        let dictionary = dir.join("60_пост обработка@.dic");
+        std::fs::write(&dictionary, "дренажом=дренажем\n").unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&dictionary)
+            .expect("lock dictionary fixture");
+        let io_error = std::fs::read(&dictionary).expect_err("locked dictionary is unreadable");
+        let expected = format!("Не удалось прочитать {}: {io_error}", dictionary.display());
+
+        let error = audit_dictionaries_with_cancel(&dir, None).expect_err("audit must fail");
+
+        let AppError::Failed(failure) = error else {
+            panic!("audit read failure must be a genuine failure: {error:?}");
+        };
+        assert_eq!(failure.kind, FailureKind::Io);
+        assert_eq!(failure.message, expected);
+        drop(lock);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

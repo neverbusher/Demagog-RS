@@ -80,7 +80,7 @@ pub fn run_batch(
     progress_tx: Option<&Sender<BatchProgress>>,
 ) -> AppResult<BatchOutcome> {
     std::fs::create_dir_all(&options.output_dir).map_err(|e| {
-        AppError::failed(format!(
+        AppError::io(format!(
             "Не удалось создать папку {}: {e}",
             options.output_dir.display()
         ))
@@ -166,7 +166,7 @@ fn process_one(
         None,
     )?;
     if result.processed_text.trim().is_empty() {
-        return Err(AppError::failed("Пустой результат обработки"));
+        return Err(AppError::invalid_data("Пустой результат обработки"));
     }
 
     let relative = match input.path.strip_prefix(&input.base_dir) {
@@ -176,8 +176,12 @@ fn process_one(
     let target_dir = options
         .output_dir
         .join(relative.parent().unwrap_or(Path::new("")));
-    std::fs::create_dir_all(&target_dir)
-        .map_err(|e| format!("Не удалось создать папку {}: {e}", target_dir.display()))?;
+    std::fs::create_dir_all(&target_dir).map_err(|e| {
+        AppError::io(format!(
+            "Не удалось создать папку {}: {e}",
+            target_dir.display()
+        ))
+    })?;
 
     let stem = output_stem(&input.path);
     let mut outputs = BatchOutputs {
@@ -188,7 +192,7 @@ fn process_one(
     if options.export_txt {
         let target = unique_target(&target_dir, &format!("{stem}.txt"), options.overwrite, used);
         std::fs::write(&target, &result.processed_text)
-            .map_err(|e| format!("Не удалось записать {}: {e}", target.display()))?;
+            .map_err(|e| AppError::io(format!("Не удалось записать {}: {e}", target.display())))?;
         outputs.txt = Some(target);
     }
     if options.export_chunks {
@@ -204,9 +208,10 @@ fn process_one(
             chunk_count: result.chunks.len(),
             chunks: &result.chunks,
         };
-        let json = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
+        let json = serde_json::to_string_pretty(&payload)
+            .map_err(|e| AppError::serialization(e.to_string()))?;
         std::fs::write(&target, json)
-            .map_err(|e| format!("Не удалось записать {}: {e}", target.display()))?;
+            .map_err(|e| AppError::io(format!("Не удалось записать {}: {e}", target.display())))?;
         outputs.json = Some(target);
     }
     Ok(outputs)
@@ -225,8 +230,8 @@ fn send(tx: Option<&Sender<BatchProgress>>, msg: BatchProgress) {
 mod tests {
     use super::*;
     use crate::domain::{
-        BookDocument, ChunkConfig, DictionaryKind, FailureKind, ProcessOutput, StressFormat,
-        TextCleanupConfig,
+        AppFailure, BookDocument, ChunkConfig, DictionaryKind, FailureKind, ProcessOutput,
+        StressFormat, TextCleanupConfig,
     };
     use crate::io::book_reader::CompositeBookReader;
     use crate::services::chunker::SentenceAwareChunker;
@@ -280,6 +285,14 @@ mod tests {
 
     fn collect(rx: mpsc::Receiver<BatchProgress>) -> Vec<BatchProgress> {
         rx.iter().collect()
+    }
+
+    fn expect_failure(error: &AppError, kind: FailureKind) -> &AppFailure {
+        let AppError::Failed(failure) = error else {
+            panic!("expected {kind:?} failure, got {error:?}");
+        };
+        assert_eq!(failure.kind, kind);
+        failure
     }
 
     struct CancelOnSecondFile {
@@ -811,17 +824,190 @@ mod tests {
         assert!(!out.join("alpha.txt").exists());
         assert!(!out.join("alpha_chunks.json").exists());
         let messages = collect(rx);
-        assert!(messages.iter().any(|m| matches!(
-            m,
+        assert!(messages.iter().any(|message| match message {
             BatchProgress::FileFinished {
                 index: 0,
-                outcome: Err(_)
-            }
-        )));
+                outcome: Err(message),
+            } => message == "Пустой результат обработки",
+            _ => false,
+        }));
         assert!(matches!(
             messages.last(),
             Some(BatchProgress::Finished(finished)) if *finished == outcome
         ));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn empty_processed_result_is_invalid_data() {
+        let root = temp_dir("empty-category");
+        let alpha = write_book(&root, "alpha.txt", "Текст.");
+        let processors: Vec<Arc<dyn TextProcessor>> = vec![Arc::new(EmptyingProcessor)];
+
+        let error = process_one(
+            &flat(&[alpha]).remove(0),
+            &CompositeBookReader::new(),
+            &processors,
+            &pipeline(),
+            &options(root.join("out")),
+            None,
+            &HashSet::new(),
+        )
+        .expect_err("empty processed result must fail");
+
+        let failure = expect_failure(&error, FailureKind::InvalidData);
+        assert_eq!(failure.message, "Пустой результат обработки");
+        assert_eq!(error.to_string(), failure.message);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn nested_output_directory_failure_is_io() {
+        let root = temp_dir("nested-setup-category");
+        let input = root.join("in");
+        let sub = input.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let book = write_book(&sub, "book.txt", "Текст.");
+        let out = root.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let blocker = out.join("sub");
+        std::fs::write(&blocker, "file, not a dir").unwrap();
+        let batch_input = BatchInput {
+            path: book,
+            base_dir: input,
+        };
+
+        let error = process_one(
+            &batch_input,
+            &CompositeBookReader::new(),
+            &[],
+            &pipeline(),
+            &options(out),
+            None,
+            &HashSet::new(),
+        )
+        .expect_err("nested output directory setup must fail");
+
+        let failure = expect_failure(&error, FailureKind::Io);
+        assert!(
+            failure
+                .message
+                .starts_with(&format!("Не удалось создать папку {}: ", blocker.display())),
+            "{}",
+            failure.message
+        );
+        assert_eq!(error.to_string(), failure.message);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn txt_write_failure_is_io_and_batch_continues() {
+        let root = temp_dir("txt-write-category");
+        let alpha = write_book(&root, "alpha.txt", "Первый текст.");
+        let beta = write_book(&root, "beta.txt", "Второй текст.");
+        let out = root.join("out");
+        let blocked_target = out.join("alpha.txt");
+        std::fs::create_dir_all(&blocked_target).unwrap();
+        let opts = options(out.clone());
+
+        let batch_input = BatchInput {
+            path: alpha.clone(),
+            base_dir: root.clone(),
+        };
+        let error = process_one(
+            &batch_input,
+            &CompositeBookReader::new(),
+            &[],
+            &pipeline(),
+            &opts,
+            None,
+            &HashSet::new(),
+        )
+        .expect_err("write to a directory must fail");
+        let failure = expect_failure(&error, FailureKind::Io);
+        assert!(
+            failure.message.starts_with(&format!(
+                "Не удалось записать {}: ",
+                blocked_target.display()
+            )),
+            "{}",
+            failure.message
+        );
+        assert_eq!(error.to_string(), failure.message);
+
+        let (tx, rx) = mpsc::channel();
+        let outcome = run_batch(
+            &flat(&[alpha, beta]),
+            &CompositeBookReader::new(),
+            &[],
+            &pipeline(),
+            &opts,
+            None,
+            Some(&tx),
+        )
+        .expect("batch runs");
+        drop(tx);
+
+        assert_eq!(
+            outcome,
+            BatchOutcome::Completed(BatchCounts {
+                succeeded: 1,
+                failed: 1,
+            })
+        );
+        assert!(out.join("beta.txt").exists());
+        let messages = collect(rx);
+        assert!(messages.iter().any(|message| match message {
+            BatchProgress::FileFinished {
+                index: 0,
+                outcome: Err(text),
+            } => {
+                text == &error.to_string()
+            }
+            _ => false,
+        }));
+        assert!(matches!(
+            messages.last(),
+            Some(BatchProgress::Finished(finished)) if *finished == outcome
+        ));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn chunks_write_failure_is_io() {
+        let root = temp_dir("chunks-write-category");
+        let alpha = write_book(&root, "alpha.txt", "Текст.");
+        let out = root.join("out");
+        let blocked_target = out.join("alpha_chunks.json");
+        std::fs::create_dir_all(&blocked_target).unwrap();
+        let mut opts = options(out);
+        opts.export_txt = false;
+
+        let error = process_one(
+            &flat(&[alpha]).remove(0),
+            &CompositeBookReader::new(),
+            &[],
+            &pipeline(),
+            &opts,
+            None,
+            &HashSet::new(),
+        )
+        .expect_err("write to a directory must fail");
+
+        let failure = expect_failure(&error, FailureKind::Io);
+        assert!(
+            failure.message.starts_with(&format!(
+                "Не удалось записать {}: ",
+                blocked_target.display()
+            )),
+            "{}",
+            failure.message
+        );
+        assert_eq!(error.to_string(), failure.message);
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -849,7 +1035,7 @@ mod tests {
         );
         match result {
             Err(AppError::Failed(failure)) => {
-                assert_eq!(failure.kind, FailureKind::Other);
+                assert_eq!(failure.kind, FailureKind::Io);
                 assert!(
                     failure.message.starts_with(&expected_prefix),
                     "{}",

@@ -75,10 +75,9 @@ impl AppError {
     }
 
     pub fn is_cancelled(&self) -> bool {
-        matches!(self, Self::Cancelled(_))
+        self.failure_kind().is_none()
     }
 
-    #[cfg_attr(not(test), expect(dead_code))]
     pub fn failure_kind(&self) -> Option<FailureKind> {
         match self {
             Self::Cancelled(_) => None,

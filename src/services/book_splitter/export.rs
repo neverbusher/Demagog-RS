@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::domain::SplitConfig;
+use crate::domain::{AppError, AppResult, SplitConfig};
 use crate::services::batch::{target_key, unique_target};
 
 use super::naming::{part_target, sanitize_file_name};
@@ -13,7 +13,7 @@ use super::split::BookPart;
 pub struct ExportSummary {
     pub saved: usize,
     pub dir: PathBuf,
-    pub errors: Vec<String>,
+    pub errors: Vec<AppError>,
 }
 
 /// Папка назначения для книги: база, либо база + подпапка с именем книги.
@@ -30,7 +30,7 @@ pub fn export_parts(
     parts: &[BookPart],
     config: &SplitConfig,
     source_name: &str,
-) -> Result<ExportSummary, String> {
+) -> AppResult<ExportSummary> {
     export_parts_into(parts, config, source_name, &mut HashSet::new())
 }
 
@@ -41,8 +41,9 @@ pub fn export_parts_into(
     config: &SplitConfig,
     source_name: &str,
     used: &mut HashSet<String>,
-) -> Result<ExportSummary, String> {
-    let dir = book_dir(config, source_name).ok_or("Не выбрана папка назначения")?;
+) -> AppResult<ExportSummary> {
+    let dir = book_dir(config, source_name)
+        .ok_or_else(|| AppError::invalid_data("Не выбрана папка назначения"))?;
     export_parts_to(parts, config, source_name, &dir, used)
 }
 
@@ -53,9 +54,9 @@ pub fn export_parts_to(
     source_name: &str,
     dir: &Path,
     used: &mut HashSet<String>,
-) -> Result<ExportSummary, String> {
+) -> AppResult<ExportSummary> {
     std::fs::create_dir_all(dir)
-        .map_err(|e| format!("Не удалось создать папку {}: {e}", dir.display()))?;
+        .map_err(|e| AppError::io(format!("Не удалось создать папка {}: {e}", dir.display())))?;
     let mut summary = ExportSummary {
         dir: dir.to_path_buf(),
         ..Default::default()
@@ -70,7 +71,9 @@ pub fn export_parts_to(
         used.insert(target_key(&target));
         match std::fs::write(&target, &part.text) {
             Ok(()) => summary.saved += 1,
-            Err(e) => summary.errors.push(format!("{}: {e}", target.display())),
+            Err(e) => summary
+                .errors
+                .push(AppError::io(format!("{}: {e}", target.display()))),
         }
     }
     Ok(summary)

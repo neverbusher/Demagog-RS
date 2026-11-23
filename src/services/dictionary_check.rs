@@ -279,8 +279,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// Hashes every top-level .dic/.rex file, sorted by name.
-pub fn dictionary_hashes(dir: &Path) -> Result<Vec<(String, String)>, String> {
-    let paths = sorted_dictionary_paths(dir).map_err(|error| error.to_string())?;
+pub fn dictionary_hashes(dir: &Path) -> AppResult<Vec<(String, String)>> {
+    let paths = sorted_dictionary_paths(dir)?;
     let mut out = Vec::new();
     for path in paths {
         let name = path
@@ -288,25 +288,27 @@ pub fn dictionary_hashes(dir: &Path) -> Result<Vec<(String, String)>, String> {
             .and_then(|name| name.to_str())
             .unwrap_or("<unknown>")
             .to_string();
-        let bytes = std::fs::read(&path)
-            .map_err(|error| format!("Не удалось прочитать {}: {error}", path.display()))?;
+        let bytes = std::fs::read(&path).map_err(|error| {
+            AppError::io(format!("Не удалось прочитать {}: {error}", path.display()))
+        })?;
         out.push((name, sha256_hex(&bytes)));
     }
     out.sort();
     Ok(out)
 }
 
-pub fn write_manifest(dir: &Path, manifest: &Path) -> Result<usize, String> {
+pub fn write_manifest(dir: &Path, manifest: &Path) -> AppResult<usize> {
     let hashes = dictionary_hashes(dir)?;
     if let Some(parent) = manifest.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|error| format!("{}: {error}", parent.display()))?;
+            .map_err(|error| AppError::io(format!("{}: {error}", parent.display())))?;
     }
     let body: String = hashes
         .iter()
         .map(|(name, hash)| format!("{hash}  {name}\n"))
         .collect();
-    std::fs::write(manifest, body).map_err(|error| format!("{}: {error}", manifest.display()))?;
+    std::fs::write(manifest, body)
+        .map_err(|error| AppError::io(format!("{}: {error}", manifest.display())))?;
     Ok(hashes.len())
 }
 
@@ -485,7 +487,43 @@ pub fn run_check_with_cancel(dir: &Path, cancel: Option<&AtomicBool>) -> AppResu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicBool;
+    use crate::domain::{AppFailure, FailureKind};
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let sequence = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "demagog-dictionary-check-{tag}-{}-{stamp}-{sequence}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    fn expect_failure(error: &AppError, kind: FailureKind) -> &AppFailure {
+        let AppError::Failed(failure) = error else {
+            panic!("expected {kind:?} failure, got {error:?}");
+        };
+        assert_eq!(failure.kind, kind);
+        failure
+    }
+
+    #[cfg(windows)]
+    fn lock_for_read(path: &std::path::Path) -> std::fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(path)
+            .expect("lock dictionary fixture")
+    }
 
     #[test]
     fn unnumbered_yo_dictionary_passes_order_check() {
@@ -560,6 +598,98 @@ mod tests {
         assert!(drift.iter().any(|w| w.contains("10_a.dic")));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dictionary_hashes_propagates_directory_io() {
+        let root = temp_dir("hash-directory-io");
+        let blocker = root.join("not-a-directory");
+        std::fs::write(&blocker, "file").unwrap();
+        let io_error = std::fs::read_dir(&blocker).expect_err("read_dir must fail");
+        let expected = format!(
+            "Не удалось открыть папку словарей {}: {io_error}",
+            blocker.display()
+        );
+
+        let error = dictionary_hashes(&blocker).expect_err("dictionary hashes must fail");
+
+        let failure = expect_failure(&error, FailureKind::Io);
+        assert_eq!(failure.message, expected);
+        assert_eq!(error.to_string(), failure.message);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dictionary_hashes_reports_dictionary_read_failure_as_io() {
+        let root = temp_dir("hash-read-io");
+        let dictionary = root.join("10_a.dic");
+        std::fs::write(&dictionary, "а=б\n").unwrap();
+        let lock = lock_for_read(&dictionary);
+        let io_error = std::fs::read(&dictionary).expect_err("locked dictionary is unreadable");
+        let expected = format!("Не удалось прочитать {}: {io_error}", dictionary.display());
+
+        let error = dictionary_hashes(&root).expect_err("dictionary hashes must fail");
+
+        let failure = expect_failure(&error, FailureKind::Io);
+        assert_eq!(failure.message, expected);
+        assert_eq!(error.to_string(), failure.message);
+        drop(lock);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn write_manifest_propagates_dictionary_directory_io() {
+        let root = temp_dir("manifest-hash-io");
+        let blocker = root.join("not-a-directory");
+        std::fs::write(&blocker, "file").unwrap();
+        let expected = dictionary_hashes(&blocker).expect_err("dictionary hashes must fail");
+
+        let error = write_manifest(&blocker, &root.join("manifest.sha256"))
+            .expect_err("manifest write must fail");
+
+        assert_eq!(error, expected);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn write_manifest_reports_directory_creation_failure_as_io() {
+        let root = temp_dir("manifest-directory-io");
+        let dictionaries = root.join("dic");
+        std::fs::create_dir_all(&dictionaries).unwrap();
+        std::fs::write(dictionaries.join("10_a.dic"), "а=б\n").unwrap();
+        let blocker = root.join("not-a-directory");
+        std::fs::write(&blocker, "file").unwrap();
+        let manifest = blocker.join("manifest.sha256");
+        let io_error =
+            std::fs::create_dir_all(&blocker).expect_err("manifest parent creation must fail");
+        let expected = format!("{}: {io_error}", blocker.display());
+
+        let error = write_manifest(&dictionaries, &manifest).expect_err("manifest write must fail");
+
+        let failure = expect_failure(&error, FailureKind::Io);
+        assert_eq!(failure.message, expected);
+        assert_eq!(error.to_string(), failure.message);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn write_manifest_reports_write_failure_as_io() {
+        let root = temp_dir("manifest-write-io");
+        let dictionaries = root.join("dic");
+        std::fs::create_dir_all(&dictionaries).unwrap();
+        std::fs::write(dictionaries.join("10_a.dic"), "а=б\n").unwrap();
+        let manifest = root.join("manifest.sha256");
+        std::fs::create_dir_all(&manifest).unwrap();
+        let io_error = std::fs::write(&manifest, "blocked").expect_err("directory write must fail");
+        let expected = format!("{}: {io_error}", manifest.display());
+
+        let error = write_manifest(&dictionaries, &manifest).expect_err("manifest write must fail");
+
+        let failure = expect_failure(&error, FailureKind::Io);
+        assert_eq!(failure.message, expected);
+        assert_eq!(error.to_string(), failure.message);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

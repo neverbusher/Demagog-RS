@@ -1,6 +1,6 @@
 //! Чистая нарезка текста книги на части (без ввода-вывода).
 
-use crate::domain::{BookHeading, SplitConfig};
+use crate::domain::{AppError, AppResult, BookHeading, SplitConfig};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BookPart {
@@ -14,17 +14,21 @@ struct Boundary {
     rank: u8,
 }
 
-pub fn validate_config(config: &SplitConfig) -> Result<(), String> {
+pub fn validate_config(config: &SplitConfig) -> AppResult<()> {
     if !(config.by_size
         || config.by_keywords
         || config.by_blank_lines
         || config.by_all_caps
         || config.by_toc)
     {
-        return Err("Включите хотя бы один способ деления".to_string());
+        return Err(AppError::invalid_data(
+            "Включите хотя бы один способ деления",
+        ));
     }
     if config.by_keywords && parse_keywords(&config.keywords).is_empty() {
-        return Err("Введите одно или несколько ключевых слов для поиска".to_string());
+        return Err(AppError::invalid_data(
+            "Введите одно или несколько ключевых слов для поиска",
+        ));
     }
     Ok(())
 }

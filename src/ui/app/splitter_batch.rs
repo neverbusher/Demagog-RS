@@ -138,7 +138,7 @@ impl DemagogApp {
             return;
         }
         if let Err(err) = validate_config(&self.settings.split) {
-            self.splitter.batch_queue.error = Some(err);
+            self.splitter.batch_queue.error = Some(err.to_string());
             return;
         }
         self.splitter.batch_queue.warning = None;

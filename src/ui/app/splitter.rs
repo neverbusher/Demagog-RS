@@ -362,7 +362,7 @@ impl DemagogApp {
 
     fn run_split_preview(&mut self) {
         if let Err(err) = validate_config(&self.settings.split) {
-            self.set_status(StatusLevel::Warning, err);
+            self.set_status(StatusLevel::Warning, err.to_string());
             self.splitter.stale = true;
             return;
         }
@@ -396,7 +396,7 @@ impl DemagogApp {
 
     fn export_split_parts(&mut self) {
         if let Err(err) = validate_config(&self.settings.split) {
-            self.set_status(StatusLevel::Error, err);
+            self.set_status(StatusLevel::Error, err.to_string());
             return;
         }
         let parts = book_splitter::split_book(
@@ -436,12 +436,17 @@ impl DemagogApp {
                             "Сохранено {} частей, ошибок: {}. {}",
                             summary.saved,
                             summary.errors.len(),
-                            summary.errors.join("; ")
+                            summary
+                                .errors
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join("; ")
                         ),
                     );
                 }
             }
-            Err(err) => self.set_status(StatusLevel::Error, err),
+            Err(err) => self.set_status(StatusLevel::Error, err.to_string()),
         }
     }
 }
