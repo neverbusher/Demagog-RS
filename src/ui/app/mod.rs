@@ -297,7 +297,7 @@ impl DemagogApp {
         );
         app.reload_dictionaries_async(egui_ctx);
         if let Some(warning) = settings_warning {
-            app.set_status(StatusLevel::Error, warning);
+            app.set_status(StatusLevel::Error, warning.to_string());
         }
         let missing = app
             .settings

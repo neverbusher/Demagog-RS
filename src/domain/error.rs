@@ -66,7 +66,6 @@ impl AppError {
         Self::typed_failure(FailureKind::InvalidData, message)
     }
 
-    #[cfg_attr(not(test), expect(dead_code))]
     pub fn serialization(message: impl Into<String>) -> Self {
         Self::typed_failure(FailureKind::Serialization, message)
     }
