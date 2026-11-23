@@ -100,19 +100,16 @@ pub(super) fn extract_xml_paragraphs(
                     if local == "section" {
                         section_depth = section_depth.saturating_sub(1);
                     }
-                    if local == "title" {
-                        if let (Some(start), Some(headings)) =
+                    if local == "title"
+                        && let (Some(start), Some(headings)) =
                             (title_start.take(), headings.as_mut())
-                        {
-                            if let Some(title) =
-                                out[start..].lines().map(str::trim).find(|l| !l.is_empty())
-                            {
-                                headings.push(BookHeading {
-                                    offset: start,
-                                    title: title.to_string(),
-                                });
-                            }
-                        }
+                        && let Some(title) =
+                            out[start..].lines().map(str::trim).find(|l| !l.is_empty())
+                    {
+                        headings.push(BookHeading {
+                            offset: start,
+                            title: title.to_string(),
+                        });
                     }
                 }
             }

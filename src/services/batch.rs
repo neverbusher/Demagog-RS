@@ -99,10 +99,10 @@ pub fn run_batch(
             Ok(outputs) => {
                 summary.succeeded += 1;
                 if let Some(path) = &outputs.txt {
-                    used.insert(target_key(&path));
+                    used.insert(target_key(path));
                 }
                 if let Some(path) = &outputs.json {
-                    used.insert(target_key(&path));
+                    used.insert(target_key(path));
                 }
                 send(
                     progress_tx,

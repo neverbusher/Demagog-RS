@@ -152,9 +152,10 @@ impl DemagogApp {
             }
             self.splitter.batch_queue.warning = Some(warning);
         }
-        for status in &mut self.splitter.batch_queue.statuses {
-            *status = BatchSplitStatus::Queued;
-        }
+        self.splitter
+            .batch_queue
+            .statuses
+            .fill(BatchSplitStatus::Queued);
         self.splitter.batch_queue.summary = None;
         self.splitter.batch_queue.error = None;
         self.splitter.batch_queue.running = true;

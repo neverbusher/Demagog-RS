@@ -141,8 +141,10 @@ mod tests {
     fn missing_dic_folder_is_replaced_with_the_default_folder() {
         let dir = temp_dir("folder");
         let path = dir.join("settings.json");
-        let mut settings = AppSettings::default();
-        settings.dic_folder = dir.join("gone");
+        let settings = AppSettings {
+            dic_folder: dir.join("gone"),
+            ..Default::default()
+        };
         save_to_path(&settings, &path).expect("save settings");
 
         let (loaded, warning) = load_from_path(&path, dir.clone());

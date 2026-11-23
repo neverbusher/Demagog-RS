@@ -312,11 +312,11 @@ impl DemagogApp {
                             .map(|p| p.display().to_string())
                             .unwrap_or_else(|| "не выбрана".to_string());
                         ui.label(RichText::new(dir_text).weak());
-                        if ui.button("📂 Выбрать…").clicked() {
-                            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                                self.settings.split.output_dir = Some(dir);
-                                changed = true;
-                            }
+                        if ui.button("📂 Выбрать…").clicked()
+                            && let Some(dir) = rfd::FileDialog::new().pick_folder()
+                        {
+                            self.settings.split.output_dir = Some(dir);
+                            changed = true;
                         }
                     });
                     ui.end_row();

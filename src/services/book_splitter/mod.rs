@@ -243,7 +243,7 @@ mod tests {
             ..cfg()
         };
         let text = "Абзац один.\n\nАбзац два.\n\nАбзац три.";
-        let parts = split_book(&text, &[], &config);
+        let parts = split_book(text, &[], &config);
         assert!(parts[0].text.contains("\n\n"));
     }
 
@@ -616,7 +616,8 @@ mod tests {
             text: "Одинаково.".to_string(),
         };
         let mut used = HashSet::new();
-        export_parts_into(&[part.clone()], &config, "book", &mut used).expect("first export");
+        export_parts_into(std::slice::from_ref(&part), &config, "book", &mut used)
+            .expect("first export");
         let summary =
             export_parts_into(&[part], &config, "book", &mut used).expect("second export");
         assert_eq!(summary.saved, 1);
