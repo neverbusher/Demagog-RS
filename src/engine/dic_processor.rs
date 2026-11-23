@@ -283,6 +283,9 @@ impl DicProcessor {
             .par_iter()
             .map(|chunk| Self::compile_sequential("chunk".to_string(), chunk))
             .collect();
+        if parts.is_empty() {
+            return Self::compile_sequential(name, content);
+        }
         let mut merged = parts.remove(0);
         merged.name = name;
         for part in parts {
@@ -532,12 +535,16 @@ impl DicProcessor {
             let bytes = current.as_bytes();
 
             while idx < bytes.len() {
-                let ch = current[idx..].chars().next().unwrap();
+                let Some(ch) = current[idx..].chars().next() else {
+                    break;
+                };
                 if is_word_token_char(ch) {
                     let start = idx;
                     idx += ch.len_utf8();
                     while idx < bytes.len() {
-                        let nc = current[idx..].chars().next().unwrap();
+                        let Some(nc) = current[idx..].chars().next() else {
+                            break;
+                        };
                         if is_word_token_char(nc) {
                             idx += nc.len_utf8();
                         } else {

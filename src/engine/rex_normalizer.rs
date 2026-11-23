@@ -29,11 +29,15 @@ fn sanitize_regex_escapes(input: &str) -> String {
                     | 'a' | 'f' | 'v' | 'x' | 'u' | 'p' | 'P' | '.' | '+' | '*' | '?' | '('
                     | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|' | '-' => {
                         out.push('\\');
-                        out.push(chars.next().unwrap());
+                        if let Some(escaped) = chars.next() {
+                            out.push(escaped);
+                        }
                     }
                     // Redundant escape on literal char (e.g. \:, \,, \х, \°, \€) -> keep literal char
                     _ => {
-                        out.push(chars.next().unwrap());
+                        if let Some(escaped) = chars.next() {
+                            out.push(escaped);
+                        }
                     }
                 }
             } else {

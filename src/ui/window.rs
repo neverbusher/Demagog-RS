@@ -10,77 +10,71 @@ pub(crate) fn app_icon() -> Arc<IconData> {
     APP_ICON
         .get_or_init(|| {
             let bytes = include_bytes!("../../assets/icon.png");
-            let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
-            let mut reader = decoder
-                .read_info()
-                .expect("bundled app icon must be a valid PNG");
-            let mut rgba = vec![0; reader.output_buffer_size()];
-            let info = reader
-                .next_frame(&mut rgba)
-                .expect("bundled app icon must decode");
-            rgba.truncate(info.buffer_size());
-            assert_eq!(info.color_type, png::ColorType::Rgba);
-            assert_eq!(info.bit_depth, png::BitDepth::Eight);
-            Arc::new(IconData {
-                rgba,
-                width: info.width,
-                height: info.height,
-            })
+            Arc::new(decode_png_icon(bytes).unwrap_or_else(transparent_icon))
         })
         .clone()
+}
+
+/// Decodes a bundled PNG, returning `None` instead of panicking if the asset
+/// is malformed. The caller falls back to a transparent 1×1 icon.
+fn decode_png_icon(bytes: &[u8]) -> Option<IconData> {
+    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    let mut reader = decoder.read_info().ok()?;
+    let mut rgba = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut rgba).ok()?;
+    if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
+        return None;
+    }
+    rgba.truncate(info.buffer_size());
+    Some(IconData {
+        rgba,
+        width: info.width,
+        height: info.height,
+    })
+}
+
+fn transparent_icon() -> IconData {
+    IconData {
+        rgba: vec![0, 0, 0, 0],
+        width: 1,
+        height: 1,
+    }
 }
 
 /// The software backend only calls winit's `set_window_icon`, which sets
 /// `ICON_SMALL`. Set both sizes explicitly so the taskbar and Alt+Tab match
 /// the glow build.
-fn runtime_icon_at(wanted_size: u16) -> IconData {
+fn runtime_icon_at(wanted_size: u16) -> Option<IconData> {
     let image_count = u16::from_le_bytes([ICON_FILE[4], ICON_FILE[5]]);
     for index in 0..image_count {
         let base = 6 + usize::from(index) * 16;
-        if u16::from(ICON_FILE[base]) != wanted_size {
+        let entry = ICON_FILE.get(base..base + 16)?;
+        if u16::from(entry[0]) != wanted_size {
             continue;
         }
-        let byte_count =
-            u32::from_le_bytes(ICON_FILE[base + 8..base + 12].try_into().unwrap()) as usize;
-        let byte_offset =
-            u32::from_le_bytes(ICON_FILE[base + 12..base + 16].try_into().unwrap()) as usize;
-        let decoder = png::Decoder::new(std::io::Cursor::new(
-            &ICON_FILE[byte_offset..byte_offset + byte_count],
-        ));
-        let mut reader = decoder
-            .read_info()
-            .expect("embedded runtime icon must decode");
-        let mut rgba = vec![0; reader.output_buffer_size()];
-        let info = reader
-            .next_frame(&mut rgba)
-            .expect("embedded runtime icon must decode");
-        rgba.truncate(info.buffer_size());
-        assert_eq!(info.color_type, png::ColorType::Rgba);
-        assert_eq!(info.bit_depth, png::BitDepth::Eight);
-        rgba.truncate(usize::try_from(info.width * info.height * 4).unwrap());
-        return IconData {
-            rgba,
-            width: info.width,
-            height: info.height,
-        };
+        let byte_count = u32::from_le_bytes(entry[8..12].try_into().ok()?) as usize;
+        let byte_offset = u32::from_le_bytes(entry[12..16].try_into().ok()?) as usize;
+        let data = ICON_FILE.get(byte_offset..byte_offset.checked_add(byte_count)?)?;
+        return decode_png_icon(data);
     }
-    IconData {
-        rgba: Vec::new(),
-        width: 0,
-        height: 0,
-    }
+    None
 }
 
 pub(crate) fn runtime_icons() -> (Arc<IconData>, Arc<IconData>) {
     RUNTIME_ICONS
-        .get_or_init(|| (Arc::new(runtime_icon_at(16)), Arc::new(runtime_icon_at(32))))
+        .get_or_init(|| {
+            (
+                Arc::new(runtime_icon_at(16).unwrap_or_else(transparent_icon)),
+                Arc::new(runtime_icon_at(32).unwrap_or_else(transparent_icon)),
+            )
+        })
         .clone()
 }
 
 /// The program icon has separate small and large representations. Use both so
 /// the title bar and Alt+Tab/taskbar slots do not scale the same 512px PNG.
 #[cfg(windows)]
-pub(crate) fn apply_window_icon(_icon: &IconData) -> bool {
+pub(crate) fn apply_window_icon() -> bool {
     use std::cell::Cell;
     use std::ffi::c_void;
     use std::ptr::null_mut;
@@ -287,7 +281,7 @@ pub(crate) fn apply_window_icon(_icon: &IconData) -> bool {
 }
 
 #[cfg(not(windows))]
-pub(crate) fn apply_window_icon(_icon: &IconData) -> bool {
+pub(crate) fn apply_window_icon() -> bool {
     true
 }
 

@@ -1931,16 +1931,17 @@ impl DemagogApp {
     pub(crate) fn shutdown(&mut self) {
         self.sync_disabled_dictionaries();
         self.save_settings();
-        // Exit immediately so Windows reclaims the ~6.6M heap-allocated dictionary strings
-        // in 1ms instead of running sequential HeapFree destructors for 5 seconds.
-        std::process::exit(0);
+        // Releasing millions of dictionary strings takes seconds on Windows.
+        // The process is exiting, so skip the destructor walk and let the OS
+        // reclaim the heap during normal backend teardown.
+        std::mem::forget(std::mem::take(&mut self.dictionaries));
     }
 
     pub(crate) fn update_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.poll_worker();
         if !self.window_icon_applied {
-            self.window_icon_applied = super::window::apply_window_icon(&super::window::app_icon());
+            self.window_icon_applied = super::window::apply_window_icon();
         }
         let theme = self.settings.theme();
 
@@ -1950,6 +1951,7 @@ impl DemagogApp {
                 "Есть несохранённые изменения исходного текста или результата.\nВыйти без сохранения?",
             ) {
                 self.shutdown();
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
 
