@@ -530,14 +530,13 @@ pub fn run_check_with_cancel(dir: &Path, cancel: Option<&AtomicBool>) -> AppResu
             None,
         );
         match result {
-            Some(result) if result.processed_text == case.expected => passed += 1,
-            Some(result) => order.failures.push(format!(
+            Ok(result) if result.processed_text == case.expected => passed += 1,
+            Ok(result) => order.failures.push(format!(
                 "{}: ожидалось «{}», получено «{}»",
                 case.name, case.expected, result.processed_text
             )),
-            None => order
-                .failures
-                .push(format!("{}: обработка отменена", case.name)),
+            Err(error) if error.is_cancelled() => return Err(check_cancelled()),
+            Err(error) => return Err(error),
         }
     }
 

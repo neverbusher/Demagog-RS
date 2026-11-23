@@ -754,7 +754,7 @@ impl DemagogApp {
                 Arc::new(RussianStressFormatter),
                 Arc::new(SentenceAwareChunker),
             );
-            if let Some(result) = pipeline.execute(
+            let result = pipeline.execute(
                 &input_text,
                 &active_processors,
                 PipelineOptions {
@@ -765,8 +765,17 @@ impl DemagogApp {
                 },
                 Some(cancel.as_ref()),
                 Some(&ptx),
-            ) {
-                let _ = ptx.send(PipelineProgress::Completed(result));
+            );
+            match classify_worker_result(result, Some(cancel.as_ref())) {
+                WorkerOutcome::Cancelled => {
+                    let _ = ptx.send(PipelineProgress::Cancelled);
+                }
+                WorkerOutcome::Completed(result) => {
+                    let _ = ptx.send(PipelineProgress::Completed(result));
+                }
+                WorkerOutcome::Failed(error) => {
+                    let _ = ptx.send(PipelineProgress::Error(error.to_string()));
+                }
             }
             drop(ptx);
             let _ = forwarder.join();

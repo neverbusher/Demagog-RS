@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
 
-use crate::domain::ChunksExportPayload;
+use crate::domain::{AppError, AppResult, ChunksExportPayload};
 use crate::ports::{DocumentReader, TextProcessor, is_cancelled};
 use crate::services::pipeline::{PipelineOptions, ProcessingPipeline};
 
@@ -113,7 +113,7 @@ pub fn run_batch(
                 );
             }
             Err(err) => {
-                if is_cancelled(cancel) {
+                if is_cancelled(cancel) || err.is_cancelled() {
                     summary.cancelled = true;
                     send(progress_tx, BatchProgress::Cancelled);
                     return Ok(summary);
@@ -123,7 +123,7 @@ pub fn run_batch(
                     progress_tx,
                     BatchProgress::FileFinished {
                         index,
-                        outcome: Err(err),
+                        outcome: Err(err.to_string()),
                     },
                 );
             }
@@ -148,21 +148,17 @@ fn process_one(
     options: &BatchOptions,
     cancel: Option<&AtomicBool>,
     used: &HashSet<String>,
-) -> Result<BatchOutputs, String> {
-    let doc = reader
-        .read_document_with_cancel(&input.path, cancel)
-        .map_err(|error| error.to_string())?;
-    let result = pipeline
-        .execute(
-            &doc.raw_text,
-            processors,
-            options.pipeline.clone(),
-            cancel,
-            None,
-        )
-        .ok_or_else(|| "Обработка отменена".to_string())?;
+) -> AppResult<BatchOutputs> {
+    let doc = reader.read_document_with_cancel(&input.path, cancel)?;
+    let result = pipeline.execute(
+        &doc.raw_text,
+        processors,
+        options.pipeline.clone(),
+        cancel,
+        None,
+    )?;
     if result.processed_text.trim().is_empty() {
-        return Err("Пустой результат обработки".to_string());
+        return Err(AppError::failed("Пустой результат обработки"));
     }
 
     let relative = match input.path.strip_prefix(&input.base_dir) {

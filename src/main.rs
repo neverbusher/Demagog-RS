@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::domain::{ChunkConfig, StressFormat, TextCleanupConfig};
+use crate::domain::{AppError, ChunkConfig, StressFormat, TextCleanupConfig};
 use crate::engine::loader::{DictionaryLoadReport, load_dictionaries_parallel};
 use crate::io::book_reader::CompositeBookReader;
 use crate::ports::DocumentReader;
@@ -223,7 +223,7 @@ fn run_cli_or_bench(args: &[String]) {
         Arc::new(SentenceAwareChunker),
     );
 
-    let Some(result) = pipeline.execute(
+    let result = match pipeline.execute(
         &doc.raw_text,
         &processors,
         PipelineOptions {
@@ -234,9 +234,16 @@ fn run_cli_or_bench(args: &[String]) {
         },
         None,
         None,
-    ) else {
-        eprintln!("Обработка отменена");
-        return;
+    ) {
+        Ok(result) => result,
+        Err(AppError::Cancelled(_)) => {
+            eprintln!("Обработка отменена");
+            return;
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            return;
+        }
     };
 
     println!("------------------------------------------------------------");

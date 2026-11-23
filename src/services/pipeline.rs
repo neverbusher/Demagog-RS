@@ -4,11 +4,13 @@ use std::sync::mpsc::Sender;
 use std::time::Instant;
 
 use crate::domain::{
-    ChunkConfig, PipelineProgress, PipelineReport, PipelineResult, StepReport, StressFormat,
-    TextCleanupConfig,
+    AppError, AppResult, ChunkConfig, PipelineProgress, PipelineReport, PipelineResult, StepReport,
+    StressFormat, TextCleanupConfig,
 };
 use crate::ports::{StressFormatter, TextChunker, TextProcessor, is_cancelled};
 use crate::services::normalize::normalize_text;
+
+const CANCELLED_ACTION: &str = "Обработка отменена";
 
 pub struct ProcessingPipeline {
     stress_formatter: Arc<dyn StressFormatter>,
@@ -38,7 +40,7 @@ impl ProcessingPipeline {
         options: PipelineOptions,
         cancel: Option<&AtomicBool>,
         progress_tx: Option<&Sender<PipelineProgress>>,
-    ) -> Option<PipelineResult> {
+    ) -> AppResult<PipelineResult> {
         let PipelineOptions {
             stress_format,
             chunk_config,
@@ -52,8 +54,7 @@ impl ProcessingPipeline {
 
         for (idx, proc) in processors.iter().enumerate() {
             if is_cancelled(cancel) {
-                notify_cancelled(progress_tx);
-                return None;
+                return Err(AppError::cancelled(CANCELLED_ACTION));
             }
             if let Some(tx) = progress_tx {
                 let _ = tx.send(PipelineProgress::StepStarted {
@@ -92,8 +93,7 @@ impl ProcessingPipeline {
         }
 
         if is_cancelled(cancel) {
-            notify_cancelled(progress_tx);
-            return None;
+            return Err(AppError::cancelled(CANCELLED_ACTION));
         }
 
         let raw_text = current;
@@ -101,14 +101,12 @@ impl ProcessingPipeline {
             .stress_formatter
             .format_stress(&raw_text, stress_format);
         if is_cancelled(cancel) {
-            notify_cancelled(progress_tx);
-            return None;
+            return Err(AppError::cancelled(CANCELLED_ACTION));
         }
         let (processed_text, cleanup_stats) = normalize_text(&processed_text, &cleanup);
         report.cleanup = cleanup_stats;
         if is_cancelled(cancel) {
-            notify_cancelled(progress_tx);
-            return None;
+            return Err(AppError::cancelled(CANCELLED_ACTION));
         }
         let chunks = self
             .chunker
@@ -123,24 +121,19 @@ impl ProcessingPipeline {
         };
 
         if is_cancelled(cancel) {
-            notify_cancelled(progress_tx);
-            return None;
+            return Err(AppError::cancelled(CANCELLED_ACTION));
         }
 
-        Some(result)
-    }
-}
-
-fn notify_cancelled(progress_tx: Option<&Sender<PipelineProgress>>) {
-    if let Some(tx) = progress_tx {
-        let _ = tx.send(PipelineProgress::Cancelled);
+        Ok(result)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{DictionaryKind, NormalizationStats, ProcessOutput, ReplacementEvent};
+    use crate::domain::{
+        AppError, DictionaryKind, NormalizationStats, ProcessOutput, ReplacementEvent,
+    };
     use crate::ports::TextProcessor;
     use crate::services::chunker::SentenceAwareChunker;
     use crate::services::stress::RussianStressFormatter;
@@ -442,7 +435,7 @@ mod tests {
             Some(&flag),
             None,
         );
-        assert!(result.is_some());
+        assert!(result.is_ok());
         assert!(seen.load(Ordering::Relaxed));
     }
 
@@ -486,8 +479,8 @@ mod tests {
         canceller.join().unwrap();
 
         assert!(
-            result.is_none(),
-            "cancelled pipeline must not return a result"
+            matches!(result, Err(AppError::Cancelled(_))),
+            "cancelled pipeline must return a typed cancellation"
         );
         let processed = calls.load(Ordering::Relaxed);
         assert!(
@@ -527,10 +520,43 @@ mod tests {
         );
 
         assert!(
-            result.is_none(),
-            "cancelled pipeline must not return a result"
+            matches!(result, Err(AppError::Cancelled(_))),
+            "cancelled pipeline must return a typed cancellation"
         );
         assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn pre_cancelled_pipeline_returns_error_without_final_progress() {
+        let pipeline = ProcessingPipeline::new(
+            Arc::new(RussianStressFormatter),
+            Arc::new(SentenceAwareChunker),
+        );
+        let cancel = AtomicBool::new(true);
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let result = pipeline.execute(
+            "текст",
+            &[],
+            PipelineOptions {
+                stress_format: StressFormat::PlusBeforeVowel,
+                chunk_config: ChunkConfig::default(),
+                capture_diff: false,
+                cleanup: TextCleanupConfig::default(),
+            },
+            Some(&cancel),
+            Some(&tx),
+        );
+        drop(tx);
+
+        assert!(matches!(result, Err(AppError::Cancelled(_))));
+        assert!(
+            rx.try_iter().all(|message| matches!(
+                message,
+                PipelineProgress::StepStarted { .. } | PipelineProgress::StepFinished(_)
+            )),
+            "pipeline must leave final progress to the caller"
+        );
     }
 
     #[test]
