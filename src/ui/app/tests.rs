@@ -1,6 +1,7 @@
 use super::*;
 use crate::domain::{DictionaryKind, ProcessOutput};
-use crate::services::batch::{BatchCounts, BatchOutcome};
+use crate::services::batch::{BatchCounts, BatchOutcome, BatchProgress};
+use crate::services::book_splitter::BatchSplitProgress;
 
 #[test]
 fn text_would_be_lost_for_non_empty_text() {
@@ -500,13 +501,13 @@ fn finished_worker_messages_clear_cancel_flag() {
     .unwrap();
 
     let mut app = ui_test_app("", "Результат", Vec::new());
-    app.rx = Some(rx);
-    app.is_busy = true;
-    app.cancel_flag = Some(Arc::new(AtomicBool::new(false)));
+    app.worker.rx = Some(rx);
+    app.worker.is_busy = true;
+    app.worker.cancel_flag = Some(Arc::new(AtomicBool::new(false)));
     app.poll_worker();
 
-    assert!(app.cancel_flag.is_none());
-    assert!(!app.is_busy);
+    assert!(app.worker.cancel_flag.is_none());
+    assert!(!app.worker.is_busy);
 }
 
 #[test]
@@ -615,9 +616,9 @@ fn cancel_button_requests_a_newly_cancelable_operation() {
     use std::sync::atomic::AtomicBool;
 
     let mut app = ui_test_app("Исходный текст", "Результат", Vec::new());
-    app.is_busy = true;
+    app.worker.is_busy = true;
     let cancel = Arc::new(AtomicBool::new(false));
-    app.cancel_flag = Some(Arc::clone(&cancel));
+    app.worker.cancel_flag = Some(Arc::clone(&cancel));
 
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1120.0, 720.0))
@@ -669,8 +670,8 @@ fn primary_controls_stay_inside_window_at_large_user_fonts() {
 #[test]
 fn poll_worker_resets_cancel_flag_on_book_load() {
     let mut app = ui_test_app("", "", Vec::new());
-    app.is_busy = true;
-    app.cancel_flag = Some(Arc::new(AtomicBool::new(false)));
+    app.worker.is_busy = true;
+    app.worker.cancel_flag = Some(Arc::new(AtomicBool::new(false)));
     let (tx, rx) = mpsc::channel();
     tx.send(WorkerMessage::BookLoaded(Ok(BookDocument {
         title: "Тест".to_string(),
@@ -681,12 +682,12 @@ fn poll_worker_resets_cancel_flag_on_book_load() {
         headings: Vec::new(),
     })))
     .unwrap();
-    app.rx = Some(rx);
+    app.worker.rx = Some(rx);
 
     app.poll_worker();
 
-    assert!(app.cancel_flag.is_none());
-    assert!(!app.is_busy);
+    assert!(app.worker.cancel_flag.is_none());
+    assert!(!app.worker.is_busy);
 }
 
 #[test]
@@ -874,7 +875,7 @@ fn editors_are_disabled_while_processing() {
     use egui_kittest::kittest::{NodeT, Queryable};
 
     let mut app = ui_test_app("Исходный текст", "", Vec::new());
-    app.is_busy = true;
+    app.worker.is_busy = true;
 
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1280.0, 900.0))
@@ -888,7 +889,7 @@ fn editors_are_disabled_while_processing() {
         "the active text editor must be disabled while processing"
     );
 
-    harness.state_mut().is_busy = false;
+    harness.state_mut().worker.is_busy = false;
     harness.run_steps(1);
     assert!(
         harness
@@ -1055,8 +1056,8 @@ fn escape_closes_find_while_cancel_is_pending() {
     use egui_kittest::Harness;
 
     let mut app = ui_test_app("текст", "", Vec::new());
-    app.is_busy = true;
-    app.cancel_flag = Some(Arc::new(AtomicBool::new(true)));
+    app.worker.is_busy = true;
+    app.worker.cancel_flag = Some(Arc::new(AtomicBool::new(true)));
     app.find_open = true;
 
     let mut harness = Harness::builder()
@@ -1078,7 +1079,7 @@ fn save_and_export_are_disabled_while_busy() {
     use egui_kittest::kittest::{NodeT, Queryable};
 
     let mut app = ui_test_app("исходник", "результат", vec!["чанк".to_string()]);
-    app.is_busy = true;
+    app.worker.is_busy = true;
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1280.0, 900.0))
         .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
@@ -1144,7 +1145,7 @@ fn save_source_is_disabled_while_busy() {
     use egui_kittest::kittest::{NodeT, Queryable};
 
     let mut app = ui_test_app("исходник", "", Vec::new());
-    app.is_busy = true;
+    app.worker.is_busy = true;
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1280.0, 900.0))
         .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
@@ -1333,10 +1334,10 @@ fn batch_cancel_resets_running_items_to_queued() {
         std::env::temp_dir().join("demagog-batch-cancel-b.txt"),
     ]);
     app.batch.running = true;
-    app.is_busy = true;
+    app.worker.is_busy = true;
 
     let (tx, rx) = mpsc::channel();
-    app.rx = Some(rx);
+    app.worker.rx = Some(rx);
     tx.send(WorkerMessage::Batch(BatchProgress::FileStarted {
         index: 0,
         total: 2,
@@ -1358,9 +1359,9 @@ fn batch_cancel_resets_running_items_to_queued() {
         batch::BatchItemStatus::Queued
     ));
     assert!(!app.batch.running);
-    assert!(!app.is_busy);
+    assert!(!app.worker.is_busy);
     assert_eq!(app.batch.summary, Some(outcome));
-    assert_eq!(app.progress_ratio, 0.0);
+    assert_eq!(app.worker.progress_ratio, 0.0);
     assert_eq!(app.status_line, "Пакетная обработка отменена");
     assert_eq!(app.status_level, StatusLevel::Warning);
 }
@@ -1371,14 +1372,14 @@ fn batch_completion_uses_service_counts_and_finishes_progress() {
 
     let mut app = ui_test_app("", "", Vec::new());
     app.batch.running = true;
-    app.is_busy = true;
+    app.worker.is_busy = true;
     let outcome = BatchOutcome::Completed(BatchCounts {
         succeeded: 3,
         failed: 2,
     });
 
     let (tx, rx) = mpsc::channel();
-    app.rx = Some(rx);
+    app.worker.rx = Some(rx);
     tx.send(WorkerMessage::Batch(BatchProgress::Finished(outcome)))
         .unwrap();
     drop(tx);
@@ -1386,9 +1387,9 @@ fn batch_completion_uses_service_counts_and_finishes_progress() {
     app.poll_worker();
 
     assert!(!app.batch.running);
-    assert!(!app.is_busy);
+    assert!(!app.worker.is_busy);
     assert_eq!(app.batch.summary, Some(outcome));
-    assert_eq!(app.progress_ratio, 1.0);
+    assert_eq!(app.worker.progress_ratio, 1.0);
     assert_eq!(app.status_line, "Пакет готов: обработано 3, ошибок 2");
     assert_eq!(app.status_level, StatusLevel::Warning);
 }
@@ -1421,15 +1422,18 @@ fn batch_run_through_app_worker_writes_outputs_and_updates_queue() {
     };
 
     app.start_batch(egui::Context::default());
-    assert!(app.is_busy);
+    assert!(app.worker.is_busy);
     assert!(app.batch.running);
 
     let deadline = Instant::now() + Duration::from_secs(15);
-    while app.is_busy && Instant::now() < deadline {
+    while app.worker.is_busy && Instant::now() < deadline {
         app.poll_worker();
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert!(!app.is_busy, "batch did not finish within the deadline");
+    assert!(
+        !app.worker.is_busy,
+        "batch did not finish within the deadline"
+    );
 
     assert!(!app.batch.running);
     assert!(matches!(
@@ -1444,7 +1448,7 @@ fn batch_run_through_app_worker_writes_outputs_and_updates_queue() {
             failed: 0,
         })
     );
-    assert_eq!(app.progress_ratio, 1.0);
+    assert_eq!(app.worker.progress_ratio, 1.0);
     assert_eq!(app.status_line, "Пакет готов: обработано 1, ошибок 0");
     assert_eq!(app.status_level, StatusLevel::Success);
     assert_eq!(
@@ -1657,11 +1661,11 @@ fn knigorez_batch_cancellation_resets_running_and_renders_service_counts() {
         std::env::temp_dir().join("demagog-knigorez-cancel-b.txt"),
     ]);
     app.splitter.batch_queue.running = true;
-    app.is_busy = true;
-    app.cancel_flag = Some(Arc::new(AtomicBool::new(false)));
+    app.worker.is_busy = true;
+    app.worker.cancel_flag = Some(Arc::new(AtomicBool::new(false)));
 
     let (tx, rx) = mpsc::channel();
-    app.rx = Some(rx);
+    app.worker.rx = Some(rx);
     tx.send(WorkerMessage::BookSplit(BatchSplitProgress::FileStarted {
         index: 0,
         total: 2,
@@ -1700,10 +1704,10 @@ fn knigorez_batch_cancellation_resets_running_and_renders_service_counts() {
         splitter::BatchSplitStatus::Queued
     ));
     assert!(!app.splitter.batch_queue.running);
-    assert!(!app.is_busy);
-    assert!(app.cancel_flag.is_none());
+    assert!(!app.worker.is_busy);
+    assert!(app.worker.cancel_flag.is_none());
     assert_eq!(app.splitter.batch_queue.summary, Some(outcome));
-    assert_eq!(app.progress_ratio, 1.0);
+    assert_eq!(app.worker.progress_ratio, 1.0);
     assert_eq!(app.status_line, "Отменено: нарезано 1, ошибок 0");
     assert_eq!(app.status_level, StatusLevel::Success);
     app.status_line.clear();
@@ -1734,11 +1738,11 @@ fn knigorez_batch_completion_uses_service_counts_and_renders_summary() {
         std::env::temp_dir().join("demagog-knigorez-done-b.txt"),
     ]);
     app.splitter.batch_queue.running = true;
-    app.is_busy = true;
-    app.cancel_flag = Some(Arc::new(AtomicBool::new(false)));
+    app.worker.is_busy = true;
+    app.worker.cancel_flag = Some(Arc::new(AtomicBool::new(false)));
 
     let (tx, rx) = mpsc::channel();
-    app.rx = Some(rx);
+    app.worker.rx = Some(rx);
     tx.send(WorkerMessage::BookSplit(BatchSplitProgress::FileFinished {
         index: 0,
         outcome: Ok(2),
@@ -1770,10 +1774,10 @@ fn knigorez_batch_completion_uses_service_counts_and_renders_summary() {
         splitter::BatchSplitStatus::Failed(_)
     ));
     assert!(!app.splitter.batch_queue.running);
-    assert!(!app.is_busy);
-    assert!(app.cancel_flag.is_none());
+    assert!(!app.worker.is_busy);
+    assert!(app.worker.cancel_flag.is_none());
     assert_eq!(app.splitter.batch_queue.summary, Some(outcome));
-    assert_eq!(app.progress_ratio, 1.0);
+    assert_eq!(app.worker.progress_ratio, 1.0);
     assert_eq!(app.status_line, "Пакетный книгорез: 3 частей, ошибок 2");
     assert_eq!(app.status_level, StatusLevel::Warning);
 

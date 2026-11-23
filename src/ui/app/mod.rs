@@ -4,32 +4,30 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::domain::{
-    AppError, AppSettings, BookDocument, ChunkConfig, ChunksExportPayload, DictionaryMeta,
-    DictionaryTag, PipelineProgress, PipelineReport, StressFormat, ThemeMode,
+    AppSettings, BookDocument, ChunkConfig, ChunksExportPayload, DictionaryMeta, DictionaryTag,
+    PipelineProgress, PipelineReport, StressFormat, ThemeMode,
 };
-use crate::engine::loader::{
-    CompiledDictionary, DictionaryLoadReport, load_dictionaries_parallel_with_cancel,
-};
+use crate::engine::loader::{DictionaryLoadReport, load_dictionaries_parallel_with_cancel};
 use crate::io::book_reader::{CompositeBookReader, SUPPORTED_BOOK_FORMATS, can_read_book};
 use crate::io::settings_store;
-use crate::ports::{DocumentReader, StressFormatter, TextChunker, TextProcessor, is_cancelled};
-use crate::services::batch::BatchProgress;
-use crate::services::book_splitter::BatchSplitProgress;
+use crate::ports::{DocumentReader, StressFormatter, TextChunker, TextProcessor};
 use crate::services::chunker::SentenceAwareChunker;
 use crate::services::dictionary_check::{self, CheckReport};
 use crate::services::pipeline::{PipelineOptions, ProcessingPipeline};
 use crate::services::stress::RussianStressFormatter;
 use crate::ui::palette;
-use splitter::BatchSplitStatus;
 
 mod batch;
 mod splitter;
 mod splitter_batch;
 mod views;
+mod worker;
+
+use worker::{WorkerMessage, WorkerOutcome, classify_worker_result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActiveTab {
@@ -189,21 +187,17 @@ pub struct DemagogApp {
     status_line: String,
     status_level: StatusLevel,
     last_error: Option<String>,
-    is_busy: bool,
+    worker: worker::WorkerState,
     processing_snapshot: Option<ProcessingSnapshot>,
-    progress_ratio: f32,
-    rx: Option<Receiver<WorkerMessage>>,
     check_report: Option<CheckReport>,
     show_check_window: bool,
     diff_filter: String,
     dic_search_filter: String,
     last_copied_chunk: Option<usize>,
     capture_diff_on_run: bool,
-    dic_load_errors: Vec<String>,
     source_dirty: bool,
     result_state: ResultState,
     chunk_apply_pending: bool,
-    cancel_flag: Option<Arc<AtomicBool>>,
     find_open: bool,
     find_query: String,
     find_matches: FindMatches,
@@ -222,41 +216,6 @@ pub struct DemagogApp {
     window_icon_applied: bool,
     batch: batch::BatchState,
     splitter: splitter::SplitterState,
-}
-
-enum WorkerMessage {
-    DictionariesCompiled {
-        compiled: Vec<CompiledDictionary>,
-        errors: Vec<String>,
-        elapsed_ms: u128,
-    },
-    BookLoaded(Result<BookDocument, String>),
-    Pipeline(PipelineProgress),
-    DictionaryCheckFinished(Result<CheckReport, String>),
-    Batch(BatchProgress),
-    BookSplit(BatchSplitProgress),
-    BatchSetupError(String),
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum WorkerOutcome<T> {
-    Cancelled,
-    Completed(T),
-    Failed(AppError),
-}
-
-fn classify_worker_result<T>(
-    result: Result<T, AppError>,
-    cancel: Option<&AtomicBool>,
-) -> WorkerOutcome<T> {
-    if is_cancelled(cancel) {
-        return WorkerOutcome::Cancelled;
-    }
-    match result {
-        Ok(value) => WorkerOutcome::Completed(value),
-        Err(AppError::Cancelled(_)) => WorkerOutcome::Cancelled,
-        Err(error) => WorkerOutcome::Failed(error),
-    }
 }
 
 impl DemagogApp {
@@ -344,21 +303,17 @@ impl DemagogApp {
             status_line: String::new(),
             status_level: StatusLevel::Info,
             last_error: None,
-            is_busy: false,
+            worker: worker::WorkerState::default(),
             processing_snapshot: None,
-            progress_ratio: 0.0,
-            rx: None,
             check_report: None,
             show_check_window: false,
             diff_filter: String::new(),
             dic_search_filter: String::new(),
             last_copied_chunk: None,
             capture_diff_on_run: false,
-            dic_load_errors: Vec::new(),
             source_dirty: false,
             result_state: ResultState::new(result_format),
             chunk_apply_pending: false,
-            cancel_flag: None,
             find_open: false,
             find_query: String::new(),
             find_matches: FindMatches::default(),
@@ -393,10 +348,7 @@ impl DemagogApp {
         self.capture_diff_on_run = false;
         self.last_copied_chunk = None;
         self.chunk_apply_pending = false;
-        self.is_busy = false;
-        self.progress_ratio = 0.0;
-        self.cancel_flag = None;
-        self.rx = None;
+        self.worker = worker::WorkerState::default();
         self.status_line.clear();
         self.status_level = StatusLevel::Info;
         self.last_error = None;
@@ -418,7 +370,6 @@ impl DemagogApp {
         self.splitter = splitter::SplitterState::default();
         self.batch = batch::BatchState::default();
         self.dictionaries.clear();
-        self.dic_load_errors.clear();
         self.check_report = None;
         self.show_check_window = false;
         self.processing_snapshot = None;
@@ -430,12 +381,12 @@ impl DemagogApp {
     }
 
     fn reload_dictionaries_async(&mut self, ctx: egui::Context) {
-        if self.is_busy {
+        if self.worker.is_busy {
             return;
         }
-        self.is_busy = true;
-        self.progress_ratio = 0.1;
-        self.dic_load_errors.clear();
+        self.worker.is_busy = true;
+        self.worker.progress_ratio = 0.1;
+        self.worker.dic_load_errors.clear();
         // Drop the old set so a failed reload cannot leave dictionaries from
         // the previous folder usable for processing.
         self.dictionaries.clear();
@@ -447,9 +398,9 @@ impl DemagogApp {
 
         let folder = self.settings.dic_folder.clone();
         let cancel = Arc::new(AtomicBool::new(false));
-        self.cancel_flag = Some(Arc::clone(&cancel));
+        self.worker.cancel_flag = Some(Arc::clone(&cancel));
         let (tx, rx) = mpsc::channel();
-        self.rx = Some(rx);
+        self.worker.rx = Some(rx);
 
         std::thread::spawn(move || {
             let start = Instant::now();
@@ -478,11 +429,11 @@ impl DemagogApp {
     }
 
     fn check_dictionaries_async(&mut self, ctx: egui::Context) {
-        if self.is_busy {
+        if self.worker.is_busy {
             return;
         }
-        self.is_busy = true;
-        self.progress_ratio = 0.25;
+        self.worker.is_busy = true;
+        self.worker.progress_ratio = 0.25;
         self.check_report = None;
         self.show_check_window = false;
         self.set_status(
@@ -491,9 +442,9 @@ impl DemagogApp {
         );
         let folder = self.settings.dic_folder.clone();
         let cancel = Arc::new(AtomicBool::new(false));
-        self.cancel_flag = Some(Arc::clone(&cancel));
+        self.worker.cancel_flag = Some(Arc::clone(&cancel));
         let (tx, rx) = mpsc::channel();
-        self.rx = Some(rx);
+        self.worker.rx = Some(rx);
         std::thread::spawn(move || {
             let result = dictionary_check::run_check_with_cancel(&folder, Some(cancel.as_ref()));
             match classify_worker_result(result, Some(cancel.as_ref())) {
@@ -694,7 +645,7 @@ impl DemagogApp {
     }
 
     fn start_processing(&mut self, ctx: egui::Context, capture_diff: bool) {
-        if self.is_busy {
+        if self.worker.is_busy {
             return;
         }
         let active_processors: Vec<Arc<dyn TextProcessor>> = self
@@ -719,8 +670,8 @@ impl DemagogApp {
         self.sync_disabled_dictionaries();
         self.save_settings();
 
-        self.is_busy = true;
-        self.progress_ratio = 0.0;
+        self.worker.is_busy = true;
+        self.worker.progress_ratio = 0.0;
         self.report = PipelineReport::default();
         self.reset_long_list_state();
         for d in &mut self.dictionaries {
@@ -734,9 +685,9 @@ impl DemagogApp {
         let chunk_config = self.settings.chunk_config.clone();
         let cleanup = self.settings.cleanup;
         let cancel = Arc::new(AtomicBool::new(false));
-        self.cancel_flag = Some(Arc::clone(&cancel));
+        self.worker.cancel_flag = Some(Arc::clone(&cancel));
         let (tx, rx) = mpsc::channel();
-        self.rx = Some(rx);
+        self.worker.rx = Some(rx);
 
         std::thread::spawn(move || {
             let (ptx, prx) = mpsc::channel();
@@ -782,399 +733,8 @@ impl DemagogApp {
         });
     }
 
-    fn poll_worker(&mut self) {
-        let mut finished = false;
-        let mut disconnected = false;
-        // The worker channel borrows `self.rx` for the whole loop, so status
-        // updates are collected here and applied once the borrow ends.
-        let mut pending_status: Option<(StatusLevel, String)> = None;
-
-        if let Some(rx) = &self.rx {
-            loop {
-                match rx.try_recv() {
-                    Ok(msg) => {
-                        match msg {
-                            WorkerMessage::DictionariesCompiled {
-                                compiled,
-                                errors,
-                                elapsed_ms,
-                            } => {
-                                let total_rules: usize =
-                                    compiled.iter().map(|c| c.meta.rule_count).sum();
-                                let settings = &self.settings;
-                                self.dictionaries = compiled
-                                    .into_iter()
-                                    .map(|compiled| {
-                                        let mut meta = compiled.meta;
-                                        meta.enabled = settings.is_dic_enabled(&meta.name);
-                                        LoadedDictionary {
-                                            meta,
-                                            processor: compiled.processor,
-                                        }
-                                    })
-                                    .collect();
-                                let mut status = format!(
-                                    "Готово: загружено {} словарей ({} правил) за {} мс",
-                                    self.dictionaries.len(),
-                                    format_num(total_rules),
-                                    elapsed_ms
-                                );
-                                if !errors.is_empty() {
-                                    status.push_str(&format!(
-                                        " | пропущено с ошибкой: {}",
-                                        errors.len()
-                                    ));
-                                }
-                                let level = if errors.is_empty() {
-                                    StatusLevel::Success
-                                } else {
-                                    StatusLevel::Warning
-                                };
-                                pending_status = Some((level, status));
-                                self.dic_load_errors = errors;
-                                if !self.document.processed_text.is_empty()
-                                    || !self.document.chunks.is_empty()
-                                {
-                                    self.result_state.mark_stale();
-                                }
-                                self.cancel_flag = None;
-                                self.is_busy = false;
-                                self.progress_ratio = 1.0;
-                                finished = true;
-                            }
-                            WorkerMessage::DictionaryCheckFinished(result) => {
-                                self.is_busy = false;
-                                self.progress_ratio = 1.0;
-                                match result {
-                                    Ok(report) => {
-                                        let failures = report.order.failures.len();
-                                        let warnings = report.order.warnings.len();
-                                        let total = dictionary_check::GOLDEN_CASES.len();
-                                        let mut status = if failures > 0 {
-                                            format!(
-                                                "Проверка словарей: ошибок {failures} (эталонных фраз {}/{total})",
-                                                report.passed
-                                            )
-                                        } else if warnings > 0 {
-                                            format!(
-                                                "Проверка словарей: OK с предупреждениями (эталонных фраз {}/{total})",
-                                                report.passed
-                                            )
-                                        } else {
-                                            format!(
-                                                "Проверка словарей: OK (эталонных фраз {}/{total})",
-                                                report.passed
-                                            )
-                                        };
-                                        if report.audit.total_candidates > 0 {
-                                            status.push_str(&format!(
-                                                " | фонетических кандидатов: {}",
-                                                report.audit.total_candidates
-                                            ));
-                                        }
-                                        let level = if failures > 0 {
-                                            StatusLevel::Error
-                                        } else if warnings > 0 {
-                                            StatusLevel::Warning
-                                        } else {
-                                            StatusLevel::Success
-                                        };
-                                        pending_status = Some((level, status));
-                                        self.check_report = Some(report);
-                                        self.show_check_window = true;
-                                    }
-                                    Err(error) => {
-                                        pending_status = Some((
-                                            StatusLevel::Error,
-                                            format!("Проверка словарей: {error}"),
-                                        ));
-                                    }
-                                }
-                                self.cancel_flag = None;
-                                finished = true;
-                            }
-                            WorkerMessage::BookLoaded(result) => {
-                                match result {
-                                    Ok(doc) => {
-                                        let chars = doc.raw_text.chars().count();
-                                        pending_status = Some((
-                                            StatusLevel::Success,
-                                            format!(
-                                                "Открыта книга «{}» ({} символов)",
-                                                doc.title,
-                                                format_num(chars)
-                                            ),
-                                        ));
-                                        self.document = doc;
-                                        self.raw_char_count = chars;
-                                        self.processed_char_count = 0;
-                                        self.diff_cache_valid = false;
-                                        self.raw_pipeline_output.clear();
-                                        self.active_tab = ActiveTab::RawText;
-                                        self.last_copied_chunk = None;
-                                        self.report = PipelineReport::default();
-                                        for d in &mut self.dictionaries {
-                                            d.meta.last_ms = None;
-                                            d.meta.last_replacements = None;
-                                        }
-                                        self.source_dirty = false;
-                                        self.result_state.reset();
-                                        self.splitter = splitter::SplitterState::default();
-                                        self.find_dirty = true;
-                                    }
-                                    Err(err) => {
-                                        pending_status = Some((StatusLevel::Error, err));
-                                    }
-                                }
-                                self.cancel_flag = None;
-                                self.is_busy = false;
-                                self.progress_ratio = 0.0;
-                                finished = true;
-                            }
-                            WorkerMessage::Pipeline(progress) => match progress {
-                                PipelineProgress::StepStarted { index, total, name } => {
-                                    self.progress_ratio = index as f32 / total.max(1) as f32;
-                                    pending_status = Some((
-                                        StatusLevel::Info,
-                                        format!("[{index}/{total}] Обработка: {name}..."),
-                                    ));
-                                }
-                                PipelineProgress::StepFinished(step) => {
-                                    if let Some(d) = self
-                                        .dictionaries
-                                        .iter_mut()
-                                        .find(|d| d.meta.name == step.dictionary_name)
-                                    {
-                                        d.meta.last_ms = Some(step.elapsed_ms);
-                                        d.meta.last_replacements = Some(step.replacements_count);
-                                    }
-                                }
-                                PipelineProgress::Completed(result) => {
-                                    let source_changed =
-                                        self.processing_snapshot.take().is_some_and(|snapshot| {
-                                            snapshot.source_changed(&self.document.raw_text)
-                                        });
-                                    let summary = format!(
-                                        "Обработано за {} мс | Замен: {} | Чанков: {}",
-                                        result.report.total_ms,
-                                        format_num(result.report.total_replacements),
-                                        result.chunks.len()
-                                    );
-                                    self.raw_pipeline_output = result.raw_text;
-                                    self.document.processed_text = result.processed_text;
-                                    self.document.chunks = result.chunks;
-                                    self.processed_char_count =
-                                        self.document.processed_text.chars().count();
-                                    self.diff_cache_valid = false;
-                                    let had_events = !result.report.events.is_empty();
-                                    self.report = result.report;
-                                    self.result_state.mark_computed(self.settings.stress_format);
-                                    if source_changed {
-                                        self.result_state.mark_stale();
-                                        pending_status = Some((
-                                            StatusLevel::Warning,
-                                            format!(
-                                                "{summary} | Исходный текст изменён во время обработки — результат устарел, обработайте заново"
-                                            ),
-                                        ));
-                                    } else {
-                                        pending_status = Some((StatusLevel::Success, summary));
-                                    }
-                                    self.last_copied_chunk = None;
-                                    self.find_dirty = true;
-                                    self.cancel_flag = None;
-                                    self.is_busy = false;
-                                    self.progress_ratio = 1.0;
-                                    if had_events && self.capture_diff_on_run {
-                                        self.active_tab = ActiveTab::DiffAndStats;
-                                    } else if self.active_tab == ActiveTab::RawText {
-                                        self.active_tab = ActiveTab::ProcessedText;
-                                    }
-                                    finished = true;
-                                }
-                                PipelineProgress::Cancelled => {
-                                    pending_status = Some((
-                                        StatusLevel::Warning,
-                                        "Операция отменена".to_string(),
-                                    ));
-                                    self.cancel_flag = None;
-                                    self.is_busy = false;
-                                    self.progress_ratio = 0.0;
-                                    finished = true;
-                                }
-                                PipelineProgress::Error(err) => {
-                                    pending_status =
-                                        Some((StatusLevel::Error, format!("Ошибка: {err}")));
-                                    self.cancel_flag = None;
-                                    self.is_busy = false;
-                                    self.progress_ratio = 0.0;
-                                    finished = true;
-                                }
-                            },
-                            WorkerMessage::Batch(progress) => match progress {
-                                BatchProgress::FileStarted { index, total, name } => {
-                                    if let Some(item) = self.batch.items.get_mut(index) {
-                                        item.status = batch::BatchItemStatus::Running;
-                                    }
-                                    self.progress_ratio = index as f32 / total.max(1) as f32;
-                                    pending_status = Some((
-                                        StatusLevel::Info,
-                                        format!("Пакет [{}/{}]: {}...", index + 1, total, name),
-                                    ));
-                                }
-                                BatchProgress::FileFinished { index, outcome } => {
-                                    if let Some(item) = self.batch.items.get_mut(index) {
-                                        item.status = match outcome {
-                                            Ok(outputs) => batch::BatchItemStatus::Done(outputs),
-                                            Err(error) => batch::BatchItemStatus::Failed(error),
-                                        };
-                                    }
-                                    let total = self.batch.items.len().max(1);
-                                    self.progress_ratio = (index + 1) as f32 / total as f32;
-                                }
-                                BatchProgress::Finished(outcome) => {
-                                    self.batch.running = false;
-                                    self.batch.summary = Some(outcome);
-                                    let counts = outcome.counts();
-                                    if outcome.is_cancelled() {
-                                        for item in &mut self.batch.items {
-                                            if matches!(
-                                                item.status,
-                                                batch::BatchItemStatus::Running
-                                            ) {
-                                                item.status = batch::BatchItemStatus::Queued;
-                                            }
-                                        }
-                                        self.progress_ratio = 0.0;
-                                        pending_status = Some((
-                                            StatusLevel::Warning,
-                                            "Пакетная обработка отменена".to_string(),
-                                        ));
-                                    } else {
-                                        self.progress_ratio = 1.0;
-                                        let level = if counts.failed > 0 {
-                                            StatusLevel::Warning
-                                        } else {
-                                            StatusLevel::Success
-                                        };
-                                        pending_status = Some((
-                                            level,
-                                            format!(
-                                                "Пакет готов: обработано {}, ошибок {}",
-                                                counts.succeeded, counts.failed
-                                            ),
-                                        ));
-                                    }
-                                    self.cancel_flag = None;
-                                    self.is_busy = false;
-                                    finished = true;
-                                }
-                            },
-                            WorkerMessage::BookSplit(progress) => match progress {
-                                BatchSplitProgress::FileStarted { index, total, name } => {
-                                    if let Some(status) =
-                                        self.splitter.batch_queue.statuses.get_mut(index)
-                                    {
-                                        *status = BatchSplitStatus::Running;
-                                    }
-                                    self.progress_ratio = index as f32 / total.max(1) as f32;
-                                    pending_status = Some((
-                                        StatusLevel::Info,
-                                        format!("Нарезка [{}/{}]: {}...", index + 1, total, name),
-                                    ));
-                                }
-                                BatchSplitProgress::FileFinished { index, outcome } => {
-                                    if let Some(status) =
-                                        self.splitter.batch_queue.statuses.get_mut(index)
-                                    {
-                                        *status = match outcome {
-                                            Ok(parts) => BatchSplitStatus::Done(parts),
-                                            Err(error) => BatchSplitStatus::Failed(error),
-                                        };
-                                    }
-                                    let total = self.splitter.batch_queue.statuses.len().max(1);
-                                    self.progress_ratio = (index + 1) as f32 / total as f32;
-                                }
-                                BatchSplitProgress::Finished(outcome) => {
-                                    self.splitter.batch_queue.running = false;
-                                    for status in &mut self.splitter.batch_queue.statuses {
-                                        if matches!(status, BatchSplitStatus::Running) {
-                                            *status = BatchSplitStatus::Queued;
-                                        }
-                                    }
-                                    self.splitter.batch_queue.summary = Some(outcome);
-                                    self.cancel_flag = None;
-                                    self.is_busy = false;
-                                    self.progress_ratio = 1.0;
-                                    let counts = outcome.counts();
-                                    let level = if counts.failed > 0 {
-                                        StatusLevel::Warning
-                                    } else {
-                                        StatusLevel::Success
-                                    };
-                                    let text = if outcome.is_cancelled() {
-                                        format!(
-                                            "Отменено: нарезано {}, ошибок {}",
-                                            counts.succeeded, counts.failed
-                                        )
-                                    } else {
-                                        format!(
-                                            "Пакетный книгорез: {} частей, ошибок {}",
-                                            counts.succeeded, counts.failed
-                                        )
-                                    };
-                                    pending_status = Some((level, text));
-                                    finished = true;
-                                }
-                            },
-                            WorkerMessage::BatchSetupError(error) => {
-                                self.batch.running = false;
-                                self.batch.error = Some(error.clone());
-                                self.cancel_flag = None;
-                                self.is_busy = false;
-                                self.progress_ratio = 0.0;
-                                pending_status = Some((
-                                    StatusLevel::Error,
-                                    format!("Пакетная обработка: {error}"),
-                                ));
-                                finished = true;
-                            }
-                        }
-
-                        if finished {
-                            break;
-                        }
-                    }
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        disconnected = true;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if let Some((level, text)) = pending_status {
-            self.set_status(level, text);
-        }
-
-        if finished || disconnected {
-            self.processing_snapshot = None;
-            if disconnected && !finished {
-                self.set_status(
-                    StatusLevel::Error,
-                    "Рабочий поток завершился неожиданно — попробуйте ещё раз",
-                );
-                self.cancel_flag = None;
-                self.is_busy = false;
-                self.progress_ratio = 0.0;
-            }
-            self.rx = None;
-        }
-    }
-
     fn open_book_dialog(&mut self, ctx: egui::Context) {
-        if self.is_busy {
+        if self.worker.is_busy {
             return;
         }
 
@@ -1192,7 +752,7 @@ impl DemagogApp {
     }
 
     fn load_book(&mut self, path: PathBuf, ctx: egui::Context) {
-        if self.is_busy {
+        if self.worker.is_busy {
             return;
         }
         if !can_read_book(&path) {
@@ -1207,14 +767,14 @@ impl DemagogApp {
             return;
         }
 
-        self.is_busy = true;
-        self.progress_ratio = 0.0;
+        self.worker.is_busy = true;
+        self.worker.progress_ratio = 0.0;
         self.set_status(StatusLevel::Info, format!("Чтение «{}»...", path.display()));
 
         let cancel = Arc::new(AtomicBool::new(false));
-        self.cancel_flag = Some(Arc::clone(&cancel));
+        self.worker.cancel_flag = Some(Arc::clone(&cancel));
         let (tx, rx) = mpsc::channel();
-        self.rx = Some(rx);
+        self.worker.rx = Some(rx);
         std::thread::spawn(move || {
             let reader = CompositeBookReader::new();
             let result = reader.read_document_with_cancel(&path, Some(cancel.as_ref()));
@@ -1243,24 +803,24 @@ impl DemagogApp {
         let process = KeyboardShortcut::new(Modifiers::CTRL, Key::Enter);
         let process_diff = KeyboardShortcut::new(Modifiers::CTRL | Modifiers::SHIFT, Key::Enter);
 
-        if !self.is_busy && ctx.input_mut(|i| i.consume_shortcut(&open)) {
+        if !self.worker.is_busy && ctx.input_mut(|i| i.consume_shortcut(&open)) {
             self.open_book_dialog(ctx.clone());
         }
-        if !self.is_busy && ctx.input_mut(|i| i.consume_shortcut(&process_diff)) {
+        if !self.worker.is_busy && ctx.input_mut(|i| i.consume_shortcut(&process_diff)) {
             self.capture_diff_on_run = true;
             self.start_processing(ctx.clone(), true);
         }
-        if !self.is_busy && ctx.input_mut(|i| i.consume_shortcut(&process)) {
+        if !self.worker.is_busy && ctx.input_mut(|i| i.consume_shortcut(&process)) {
             self.capture_diff_on_run = false;
             self.start_processing(ctx.clone(), false);
         }
-        if !self.is_busy && ctx.input_mut(|i| i.consume_shortcut(&save_source)) {
+        if !self.worker.is_busy && ctx.input_mut(|i| i.consume_shortcut(&save_source)) {
             self.save_source_txt();
         }
-        if !self.is_busy && ctx.input_mut(|i| i.consume_shortcut(&save)) {
+        if !self.worker.is_busy && ctx.input_mut(|i| i.consume_shortcut(&save)) {
             self.save_processed_txt();
         }
-        if !self.is_busy && ctx.input_mut(|i| i.consume_shortcut(&export)) {
+        if !self.worker.is_busy && ctx.input_mut(|i| i.consume_shortcut(&export)) {
             self.export_chunks_json();
         }
 
@@ -1289,7 +849,7 @@ impl DemagogApp {
             }
         }
 
-        if let Some(cancel) = self.cancel_flag.clone()
+        if let Some(cancel) = self.worker.cancel_flag.clone()
             && !cancel.load(Ordering::Relaxed)
             && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
         {
@@ -1342,7 +902,7 @@ impl DemagogApp {
             }
             return;
         }
-        if self.is_busy {
+        if self.worker.is_busy {
             self.set_status(
                 StatusLevel::Warning,
                 "Дождитесь завершения текущей операции",
@@ -1779,7 +1339,7 @@ impl DemagogApp {
     }
 
     fn choose_dictionary_folder(&mut self, ctx: egui::Context) {
-        if self.is_busy {
+        if self.worker.is_busy {
             return;
         }
         if let Some(dir) = rfd::FileDialog::new().pick_folder() {
@@ -1828,14 +1388,14 @@ impl DemagogApp {
     }
 
     fn show_status_left(&mut self, ui: &mut egui::Ui, theme: ThemeMode) {
-        if self.is_busy {
+        if self.worker.is_busy {
             ui.spinner();
             ui.add(
-                egui::ProgressBar::new(self.progress_ratio)
+                egui::ProgressBar::new(self.worker.progress_ratio)
                     .desired_width(180.0)
                     .show_percentage(),
             );
-            if let Some(cancel) = self.cancel_flag.clone() {
+            if let Some(cancel) = self.worker.cancel_flag.clone() {
                 let requested = cancel.load(Ordering::Relaxed);
                 if ui
                     .add_enabled(!requested, egui::Button::new("Отмена"))
@@ -1862,12 +1422,12 @@ impl DemagogApp {
         });
         ui.ctx().accesskit_node_builder(status.id, |node| {
             node.set_role(egui::accesskit::Role::Status);
-            node.set_live(status_live(self.is_busy, self.status_level));
+            node.set_live(status_live(self.worker.is_busy, self.status_level));
             node.set_live_atomic();
             node.set_label(self.status_line.clone());
         });
-        if !self.dic_load_errors.is_empty() {
-            status.on_hover_text(self.dic_load_errors.join("\n"));
+        if !self.worker.dic_load_errors.is_empty() {
+            status.on_hover_text(self.worker.dic_load_errors.join("\n"));
         }
         if self.status_level != StatusLevel::Error
             && let Some(error) = self.last_error.clone()
@@ -1902,13 +1462,16 @@ impl DemagogApp {
 
     fn show_status_counters(&self, ui: &mut egui::Ui, theme: ThemeMode, counters: &str) {
         ui.label(RichText::new(counters).weak());
-        if !self.dic_load_errors.is_empty() {
-            let details = self.dic_load_errors.join("\n");
+        if !self.worker.dic_load_errors.is_empty() {
+            let details = self.worker.dic_load_errors.join("\n");
             let errors = ui.add(
                 egui::Label::new(
-                    RichText::new(format!("Ошибки загрузки: {}", self.dic_load_errors.len()))
-                        .color(palette::warning_text(theme))
-                        .strong(),
+                    RichText::new(format!(
+                        "Ошибки загрузки: {}",
+                        self.worker.dic_load_errors.len()
+                    ))
+                    .color(palette::warning_text(theme))
+                    .strong(),
                 )
                 .sense(egui::Sense::click()),
             );

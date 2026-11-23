@@ -118,12 +118,12 @@ impl DemagogApp {
 
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(!self.is_busy, egui::Button::new("🔍 Тест"))
+                .add_enabled(!self.worker.is_busy, egui::Button::new("🔍 Тест"))
                 .clicked()
             {
                 self.run_split_preview();
             }
-            let can_export = !self.is_busy
+            let can_export = !self.worker.is_busy
                 && self.settings.split.output_dir.is_some()
                 && book_splitter::validate_config(&self.settings.split).is_ok();
             if ui
@@ -183,7 +183,7 @@ impl DemagogApp {
 
     pub(super) fn show_splitter_settings(&mut self, ui: &mut egui::Ui) -> bool {
         let mut changed = false;
-        ui.add_enabled_ui(!self.is_busy, |ui| {
+        ui.add_enabled_ui(!self.worker.is_busy, |ui| {
             egui::Grid::new("splitter_settings")
                 .num_columns(2)
                 .spacing([24.0, 8.0])

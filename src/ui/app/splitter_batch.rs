@@ -16,7 +16,10 @@ impl DemagogApp {
         ui.label("Пакетная нарезка");
         ui.horizontal_wrapped(|ui| {
             if ui
-                .add_enabled(!self.is_busy, egui::Button::new("➕ Добавить файлы…"))
+                .add_enabled(
+                    !self.worker.is_busy,
+                    egui::Button::new("➕ Добавить файлы…"),
+                )
                 .on_hover_text("Выбрать несколько книг (TXT, FB2, EPUB, DOCX, ZIP)")
                 .clicked()
                 && let Some(paths) = rfd::FileDialog::new()
@@ -73,15 +76,16 @@ impl DemagogApp {
         ui.horizontal_wrapped(|ui| {
             if self.splitter.batch_queue.running {
                 if ui.button("⏹ Отмена").clicked()
-                    && let Some(flag) = &self.cancel_flag
+                    && let Some(flag) = &self.worker.cancel_flag
                 {
                     flag.store(true, Ordering::Relaxed);
                 }
             } else if ui
                 .add_enabled(
-                    self.splitter
-                        .batch_queue
-                        .can_start(self.is_busy, self.settings.split.output_dir.is_some()),
+                    self.splitter.batch_queue.can_start(
+                        self.worker.is_busy,
+                        self.settings.split.output_dir.is_some(),
+                    ),
                     egui::Button::new("▶ Нарезать пакет"),
                 )
                 .on_disabled_hover_text("Добавьте файлы и выберите папку назначения")
@@ -130,11 +134,10 @@ impl DemagogApp {
     }
 
     fn start_batch_split(&mut self, ctx: egui::Context) {
-        if !self
-            .splitter
-            .batch_queue
-            .can_start(self.is_busy, self.settings.split.output_dir.is_some())
-        {
+        if !self.splitter.batch_queue.can_start(
+            self.worker.is_busy,
+            self.settings.split.output_dir.is_some(),
+        ) {
             return;
         }
         if let Err(err) = validate_config(&self.settings.split) {
@@ -160,15 +163,15 @@ impl DemagogApp {
         self.splitter.batch_queue.summary = None;
         self.splitter.batch_queue.error = None;
         self.splitter.batch_queue.running = true;
-        self.is_busy = true;
-        self.progress_ratio = 0.0;
+        self.worker.is_busy = true;
+        self.worker.progress_ratio = 0.0;
 
         let files = self.splitter.batch_queue.files.clone();
         let config = self.settings.split.clone();
         let cancel = Arc::new(AtomicBool::new(false));
-        self.cancel_flag = Some(Arc::clone(&cancel));
+        self.worker.cancel_flag = Some(Arc::clone(&cancel));
         let (tx, rx) = mpsc::channel();
-        self.rx = Some(rx);
+        self.worker.rx = Some(rx);
 
         std::thread::spawn(move || {
             let (btx, brx) = mpsc::channel();

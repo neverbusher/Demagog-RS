@@ -1,5 +1,5 @@
 use super::*;
-use crate::domain::{BatchQueueEntry, BatchSettings};
+use crate::domain::{AppError, BatchQueueEntry, BatchSettings};
 use crate::services::batch::{BatchInput, BatchOptions, BatchOutcome, BatchOutputs, run_batch};
 
 #[derive(Debug, Clone)]
@@ -326,16 +326,16 @@ impl DemagogApp {
                 ui.horizontal_wrapped(|ui| {
                     if self.batch.running {
                         if ui.button("⏹ Отмена").clicked()
-                            && let Some(flag) = &self.cancel_flag
+                            && let Some(flag) = &self.worker.cancel_flag
                         {
                             flag.store(true, Ordering::Relaxed);
                         }
                     } else if ui
                         .add_enabled(
-                            self.batch.can_start(self.is_busy),
+                            self.batch.can_start(self.worker.is_busy),
                             egui::Button::new("▶ Старт"),
                         )
-                        .on_disabled_hover_text(self.batch.start_disabled_hint(self.is_busy))
+                        .on_disabled_hover_text(self.batch.start_disabled_hint(self.worker.is_busy))
                         .clicked()
                     {
                         self.start_batch(ctx.clone());
@@ -372,7 +372,7 @@ impl DemagogApp {
     }
 
     pub(super) fn start_batch(&mut self, ctx: egui::Context) {
-        if !self.batch.can_start(self.is_busy) {
+        if !self.batch.can_start(self.worker.is_busy) {
             return;
         }
         let Some(output_dir) = self.batch.output_dir.clone() else {
@@ -385,8 +385,8 @@ impl DemagogApp {
         self.batch.summary = None;
         self.batch.error = None;
         self.batch.running = true;
-        self.is_busy = true;
-        self.progress_ratio = 0.0;
+        self.worker.is_busy = true;
+        self.worker.progress_ratio = 0.0;
 
         let files: Vec<BatchInput> = self
             .batch
@@ -417,9 +417,9 @@ impl DemagogApp {
         };
 
         let cancel = Arc::new(AtomicBool::new(false));
-        self.cancel_flag = Some(Arc::clone(&cancel));
+        self.worker.cancel_flag = Some(Arc::clone(&cancel));
         let (tx, rx) = mpsc::channel();
-        self.rx = Some(rx);
+        self.worker.rx = Some(rx);
 
         std::thread::spawn(move || {
             let (btx, brx) = mpsc::channel();

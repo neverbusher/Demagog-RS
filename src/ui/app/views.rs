@@ -28,7 +28,7 @@ impl DemagogApp {
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
                     if ui
-                        .add_enabled(!self.is_busy, egui::Button::new("Открыть книгу"))
+                        .add_enabled(!self.worker.is_busy, egui::Button::new("Открыть книгу"))
                         .on_hover_text("Открыть TXT, FB2, FB2.ZIP, EPUB, DOCX, ZIP или MD (Ctrl+O)")
                         .clicked()
                     {
@@ -36,7 +36,7 @@ impl DemagogApp {
                     }
 
                     if ui
-                        .add_enabled(!self.is_busy, egui::Button::new("🔄 Сброс"))
+                        .add_enabled(!self.worker.is_busy, egui::Button::new("🔄 Сброс"))
                         .on_hover_text("Сбросить состояние?")
                         .clicked()
                     {
@@ -53,7 +53,7 @@ impl DemagogApp {
 
                     let enabled_dictionaries =
                         self.dictionaries.iter().filter(|d| d.meta.enabled).count();
-                    let can_run = !self.is_busy && enabled_dictionaries > 0;
+                    let can_run = !self.worker.is_busy && enabled_dictionaries > 0;
                     let run_disabled_hint = if enabled_dictionaries == 0 {
                         "Включите хотя бы один словарь"
                     } else {
@@ -87,7 +87,7 @@ impl DemagogApp {
 
                     ui.separator();
                     let prev_fmt = self.settings.stress_format;
-                    ui.add_enabled_ui(!self.is_busy, |ui| {
+                    ui.add_enabled_ui(!self.worker.is_busy, |ui| {
                         let format_label =
                             format!("Формат: {} ▼", self.settings.stress_format.short_label());
                         ui.menu_button(format_label, |ui| {
@@ -121,7 +121,7 @@ impl DemagogApp {
                     ui.separator();
                     if ui
                         .add_enabled(
-                            !self.document.processed_text.is_empty() && !self.is_busy,
+                            !self.document.processed_text.is_empty() && !self.worker.is_busy,
                             egui::Button::new("💾 Сохранить результат"),
                         )
                         .on_hover_text("Сохранить результат в TXT (Ctrl+S)")
@@ -131,7 +131,7 @@ impl DemagogApp {
                         self.save_processed_txt();
                     }
                     let can_export =
-                        !self.document.processed_text.trim().is_empty() && !self.is_busy;
+                        !self.document.processed_text.trim().is_empty() && !self.worker.is_busy;
                     if ui
                         .add_enabled(can_export, egui::Button::new("📦 Экспорт чанков"))
                         .on_hover_text("Экспортировать чанки в JSON (Ctrl+E)")
@@ -178,14 +178,14 @@ impl DemagogApp {
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
                     let open_response = ui
-                        .add_enabled(!self.is_busy, egui::Button::new("Открыть"))
+                        .add_enabled(!self.worker.is_busy, egui::Button::new("Открыть"))
                         .on_hover_text(
                             "Открыть TXT, FB2, FB2.ZIP, EPUB, DOCX, ZIP или MD (Ctrl+O)",
                         );
                     open_response.widget_info(|| {
                         egui::WidgetInfo::labeled(
                             egui::WidgetType::Button,
-                            !self.is_busy,
+                            !self.worker.is_busy,
                             "Открыть книгу",
                         )
                     });
@@ -193,7 +193,7 @@ impl DemagogApp {
                         self.open_book_dialog(ctx.clone());
                     }
                     if ui
-                        .add_enabled(!self.is_busy, egui::Button::new("🔄 Сброс"))
+                        .add_enabled(!self.worker.is_busy, egui::Button::new("🔄 Сброс"))
                         .on_hover_text("Сбросить состояние")
                         .clicked()
                     {
@@ -201,7 +201,7 @@ impl DemagogApp {
                     }
                     let enabled_dictionaries =
                         self.dictionaries.iter().filter(|d| d.meta.enabled).count();
-                    let can_run = !self.is_busy && enabled_dictionaries > 0;
+                    let can_run = !self.worker.is_busy && enabled_dictionaries > 0;
                     let run_disabled_hint = if enabled_dictionaries == 0 {
                         "Включите хотя бы один словарь"
                     } else {
@@ -240,7 +240,7 @@ impl DemagogApp {
                             ui.close();
                         }
                         ui.separator();
-                        ui.add_enabled_ui(!self.is_busy, |ui| {
+                        ui.add_enabled_ui(!self.worker.is_busy, |ui| {
                             for fmt in [
                                 StressFormat::PlusBeforeVowel,
                                 StressFormat::AcuteAccent,
@@ -261,7 +261,7 @@ impl DemagogApp {
                         ui.separator();
                         if ui
                             .add_enabled(
-                                !self.document.processed_text.is_empty() && !self.is_busy,
+                                !self.document.processed_text.is_empty() && !self.worker.is_busy,
                                 egui::Button::new("Сохранить результат"),
                             )
                             .on_disabled_hover_text("Сначала обработайте текст")
@@ -272,7 +272,8 @@ impl DemagogApp {
                         }
                         if ui
                             .add_enabled(
-                                !self.document.processed_text.trim().is_empty() && !self.is_busy,
+                                !self.document.processed_text.trim().is_empty()
+                                    && !self.worker.is_busy,
                                 egui::Button::new("Экспорт чанков"),
                             )
                             .on_disabled_hover_text("Результат пуст")
@@ -323,12 +324,12 @@ impl DemagogApp {
             let font = self.settings.ui_font_size;
             let estimate = counters.chars().count() as f32 * font * 0.6
                 + self.status_line.chars().count() as f32 * font * 0.6
-                + if self.dic_load_errors.is_empty() {
+                + if self.worker.dic_load_errors.is_empty() {
                     0.0
                 } else {
                     140.0
                 }
-                + if self.is_busy { 300.0 } else { 40.0 };
+                + if self.worker.is_busy { 300.0 } else { 40.0 };
             // Wrap only when the row is actually tight; otherwise keep the
             // status and counters on a single line.
             if ui.available_width() < estimate {
@@ -365,21 +366,21 @@ impl DemagogApp {
                     ui.spacing_mut().item_spacing.x = 10.0;
                     ui.horizontal_wrapped(|ui| {
                         if ui
-                            .add_enabled(!self.is_busy, egui::Button::new("🔄 Обновить"))
+                            .add_enabled(!self.worker.is_busy, egui::Button::new("🔄 Обновить"))
                             .on_hover_text("Перезагрузить словари с диска")
                             .clicked()
                         {
                             self.reload_dictionaries_async(ctx.clone());
                         }
                         if ui
-                            .add_enabled(!self.is_busy, egui::Button::new("Папка..."))
+                            .add_enabled(!self.worker.is_busy, egui::Button::new("Папка..."))
                             .clicked()
                         {
                             self.choose_dictionary_folder(ctx.clone());
                         }
                         ui.separator();
                         let selected = ui
-                            .add_enabled_ui(!self.is_busy, presets_menu)
+                            .add_enabled_ui(!self.worker.is_busy, presets_menu)
                             .inner;
                         if let Some(preset) = selected {
                             self.apply_preset(preset);
@@ -459,26 +460,26 @@ impl DemagogApp {
                                 }
                             } else if self.dictionaries.is_empty() {
                                 ui.label(
-                                    RichText::new(if self.is_busy {
+                                    RichText::new(if self.worker.is_busy {
                                         "Загрузка словарей..."
                                     } else {
                                         "Словари не загружены. Укажите папку со словарями."
                                     })
                                     .weak(),
                                 );
-                                if !self.is_busy && ui.button("Указать папку...").clicked() {
+                                if !self.worker.is_busy && ui.button("Указать папку...").clicked() {
                                     self.choose_dictionary_folder(ctx.clone());
                                 }
-                                if !self.dic_load_errors.is_empty() {
+                                if !self.worker.dic_load_errors.is_empty() {
                                     ui.label(
                                         RichText::new(format!(
                                             "Ошибок загрузки: {}",
-                                            self.dic_load_errors.len()
+                                            self.worker.dic_load_errors.len()
                                         ))
                                         .color(palette::warning_text(theme))
                                         .strong(),
                                     )
-                                    .on_hover_text(self.dic_load_errors.join("\n"));
+                                    .on_hover_text(self.worker.dic_load_errors.join("\n"));
                                 }
                             } else {
                                 ui.label(RichText::new("Все словари скрыты фильтром.").weak());
@@ -527,7 +528,7 @@ impl DemagogApp {
                                         ("часть", palette::warning_text(theme))
                                     };
                                     let mut state_response = ui
-                                        .add_enabled_ui(!self.is_busy, |ui| {
+                                        .add_enabled_ui(!self.worker.is_busy, |ui| {
                                             ui.small_button(
                                                 RichText::new(state_label).color(state_color),
                                             )
@@ -537,7 +538,7 @@ impl DemagogApp {
                                     state_response.widget_info(|| {
                                         egui::WidgetInfo::labeled(
                                             egui::WidgetType::Button,
-                                            !self.is_busy,
+                                            !self.worker.is_busy,
                                             format!(
                                                 "Группа {group_key}: {state_label}. Включить или отключить всю группу"
                                             ),
@@ -579,7 +580,7 @@ impl DemagogApp {
                                                 &mut changed_any,
                                                 false,
                                                 theme,
-                                                !self.is_busy,
+                                                !self.worker.is_busy,
                                             );
                                         }
                                         ui.add_space(6.0);
@@ -613,7 +614,7 @@ impl DemagogApp {
                                     &mut changed_any,
                                     true,
                                     theme,
-                                    !self.is_busy,
+                                    !self.worker.is_busy,
                                 );
                             }
                         }
@@ -662,7 +663,7 @@ impl DemagogApp {
                 ui.selectable_value(&mut self.active_tab, ActiveTab::Settings, "⚙ Настройки");
             });
             ui.separator();
-            if self.is_busy {
+            if self.worker.is_busy {
                 ui.label(
                     RichText::new("Идёт обработка — текст временно доступен только для чтения.")
                         .weak(),
@@ -686,7 +687,7 @@ impl DemagogApp {
         let line_height = editor_line_height(self.settings.editor_font_size);
         ui.add(egui::Label::new(RichText::new(&self.document.title).strong()).truncate());
         ui.horizontal_wrapped(|ui| {
-                        let can_mutate = text_mutations_enabled(self.is_busy);
+                        let can_mutate = text_mutations_enabled(self.worker.is_busy);
                         let save_source = ui
                             .add_enabled(
                                 can_mutate,
@@ -781,7 +782,7 @@ impl DemagogApp {
         );
         ScrollArea::vertical().show(ui, |ui| {
             let output = ui
-                .add_enabled_ui(text_mutations_enabled(self.is_busy), |ui| {
+                .add_enabled_ui(text_mutations_enabled(self.worker.is_busy), |ui| {
                     egui::TextEdit::multiline(&mut self.document.raw_text)
                         .desired_width(f32::INFINITY)
                         .desired_rows(28)
@@ -824,7 +825,7 @@ impl DemagogApp {
                         }
                         if ui
                             .add_enabled(
-                                has_result && text_mutations_enabled(self.is_busy),
+                                has_result && text_mutations_enabled(self.worker.is_busy),
                                 egui::Button::new("🔄 Заменить исходный текст"),
                             )
                             .on_hover_text(
@@ -884,7 +885,7 @@ impl DemagogApp {
         );
         ScrollArea::vertical().show(ui, |ui| {
             let output = ui
-                .add_enabled_ui(text_mutations_enabled(self.is_busy), |ui| {
+                .add_enabled_ui(text_mutations_enabled(self.worker.is_busy), |ui| {
                     egui::TextEdit::multiline(&mut self.document.processed_text)
                         .desired_width(f32::INFINITY)
                         .desired_rows(28)
@@ -913,14 +914,14 @@ impl DemagogApp {
             let label = ui.label("Макс. длина чанка (символов):");
             let slider = ui
                 .add_enabled(
-                    !self.is_busy,
+                    !self.worker.is_busy,
                     egui::Slider::new(&mut self.settings.chunk_config.max_chars, 150..=3000)
                         .step_by(50.0),
                 )
                 .labelled_by(label.id);
             self.apply_chunk_config_change(ui, slider.changed());
             let paragraphs_changed = ui
-                .add_enabled_ui(!self.is_busy, |ui| {
+                .add_enabled_ui(!self.worker.is_busy, |ui| {
                     ui.checkbox(
                         &mut self.settings.chunk_config.preserve_paragraphs,
                         "Не склеивать абзацы",
@@ -1205,7 +1206,7 @@ impl DemagogApp {
                     let chunk_label = ui.label("Макс. размер чанка:");
                     let chunk_response = ui
                         .add_enabled(
-                            !self.is_busy,
+                            !self.worker.is_busy,
                             egui::Slider::new(&mut self.settings.chunk_config.max_chars, 150..=3000)
                                 .step_by(50.0)
                                 .suffix(" симв."),
@@ -1216,7 +1217,7 @@ impl DemagogApp {
 
                     ui.label("Очистка текста:");
                     let cleanup_changed = ui
-                        .add_enabled_ui(!self.is_busy, |ui| {
+                        .add_enabled_ui(!self.worker.is_busy, |ui| {
                             ui.horizontal_wrapped(|ui| {
                                 let empty = ui
                                     .checkbox(
@@ -1249,7 +1250,7 @@ impl DemagogApp {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(self.settings.dic_folder.display().to_string());
                         if ui
-                            .add_enabled(!self.is_busy, egui::Button::new("Изменить..."))
+                            .add_enabled(!self.worker.is_busy, egui::Button::new("Изменить..."))
                             .on_disabled_hover_text("Доступно после завершения обработки")
                             .clicked()
                         {
@@ -1261,7 +1262,7 @@ impl DemagogApp {
                     ui.label("Проверка словарей:");
                     ui.horizontal_wrapped(|ui| {
                         let response = ui
-                            .add_enabled(!self.is_busy, egui::Button::new("🔎 Проверить словари"))
+                            .add_enabled(!self.worker.is_busy, egui::Button::new("🔎 Проверить словари"))
                             .on_hover_text(
                                 "Порядок этапов, 22 эталонные фразы и аудит фонетических кандидатов",
                             )
@@ -1301,7 +1302,7 @@ impl DemagogApp {
 
             ui.add_space(12.0);
             ui.separator();
-            let reset = ui.add_enabled(!self.is_busy, egui::Button::new("🔄 Сбросить настройки..."));
+            let reset = ui.add_enabled(!self.worker.is_busy, egui::Button::new("🔄 Сбросить настройки..."));
             if reset
                 .on_disabled_hover_text("Доступно после завершения обработки")
                 .clicked()
