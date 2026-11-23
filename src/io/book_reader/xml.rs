@@ -1,7 +1,7 @@
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 
-use crate::domain::BookHeading;
+use crate::domain::{AppError, AppResult, BookHeading};
 use crate::io::encoding::decode_text_bytes;
 use crate::ports::is_cancelled as book_cancelled;
 
@@ -40,7 +40,7 @@ pub(super) fn extract_xml_paragraphs(
     skip_tags: &[&str],
     cancel: Option<&std::sync::atomic::AtomicBool>,
     mut headings: Option<&mut Vec<BookHeading>>,
-) -> Result<String, String> {
+) -> AppResult<String> {
     let mut reader = Reader::from_str(xml_str);
     reader.config_mut().trim_text(false);
 
@@ -52,7 +52,7 @@ pub(super) fn extract_xml_paragraphs(
 
     loop {
         if book_cancelled(cancel) {
-            return Err("Загрузка книги отменена".to_string());
+            return Err(AppError::cancelled("Загрузка книги отменена"));
         }
         match reader.read_event() {
             Ok(Event::Start(e)) => {
@@ -120,7 +120,7 @@ pub(super) fn extract_xml_paragraphs(
                 }
             }
             Ok(Event::Eof) => break,
-            Err(e) => return Err(format!("Ошибка разбора XML: {e}")),
+            Err(e) => return Err(format!("Ошибка разбора XML: {e}").into()),
             _ => {}
         }
     }

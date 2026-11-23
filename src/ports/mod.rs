@@ -1,4 +1,6 @@
-use crate::domain::{BookDocument, ChunkConfig, DictionaryKind, ProcessOutput, StressFormat};
+use crate::domain::{
+    AppResult, BookDocument, ChunkConfig, DictionaryKind, ProcessOutput, StressFormat,
+};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -36,8 +38,8 @@ pub trait DocumentReader: Send + Sync {
         &self,
         path: &Path,
         cancel: Option<&AtomicBool>,
-    ) -> Result<BookDocument, String>;
-    fn read_document(&self, path: &Path) -> Result<BookDocument, String> {
+    ) -> AppResult<BookDocument>;
+    fn read_document(&self, path: &Path) -> AppResult<BookDocument> {
         self.read_document_with_cancel(path, None)
     }
 }

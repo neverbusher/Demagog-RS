@@ -2,7 +2,7 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
-use crate::domain::BookDocument;
+use crate::domain::{AppResult, BookDocument};
 use crate::io::encoding::{decode_text_bytes, looks_like_text_bytes};
 use crate::ports::{DocumentReader, is_cancelled as book_cancelled};
 
@@ -27,7 +27,7 @@ impl DocumentReader for TxtDocumentReader {
         &self,
         path: &Path,
         cancel: Option<&AtomicBool>,
-    ) -> Result<BookDocument, String> {
+    ) -> AppResult<BookDocument> {
         if book_cancelled(cancel) {
             return cancelled_book();
         }
@@ -39,11 +39,11 @@ impl DocumentReader for TxtDocumentReader {
             cancel,
         )?;
         if !looks_like_text_bytes(&bytes) {
-            return Err(format!("Файл не похож на текст. {SUPPORTED_BOOK_FORMATS}"));
+            return Err(format!("Файл не похож на текст. {SUPPORTED_BOOK_FORMATS}").into());
         }
         let (text, _) = decode_text_bytes(&bytes);
         if text.trim().is_empty() {
-            return Err("Файл пуст или не содержит читаемого текста.".to_string());
+            return Err("Файл пуст или не содержит читаемого текста.".into());
         }
         Ok(BookDocument {
             title: document_title_from_path(path),

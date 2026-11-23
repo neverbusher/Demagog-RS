@@ -6,7 +6,7 @@ use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 use zip::ZipArchive;
 
-use crate::domain::BookDocument;
+use crate::domain::{AppResult, BookDocument};
 use crate::io::encoding::decode_text_bytes;
 use crate::ports::{DocumentReader, is_cancelled as book_cancelled};
 
@@ -33,7 +33,7 @@ impl DocumentReader for DocxDocumentReader {
         &self,
         path: &Path,
         cancel: Option<&AtomicBool>,
-    ) -> Result<BookDocument, String> {
+    ) -> AppResult<BookDocument> {
         if book_cancelled(cancel) {
             return cancelled_book();
         }
@@ -56,11 +56,12 @@ impl DocumentReader for DocxDocumentReader {
         let doc_xml = {
             let entry = archive
                 .by_name("word/document.xml")
-                .map_err(|_| "Не найден word/document.xml в DOCX".to_string())?;
+                .map_err(|_| "Не найден word/document.xml в DOCX")?;
             if entry.size() > MAX_ARCHIVE_ENTRY_BYTES {
                 return Err(format!(
                     "word/document.xml больше допустимых {MAX_ARCHIVE_ENTRY_BYTES} байт"
-                ));
+                )
+                .into());
             }
             read_limited_with_cancel(entry, "word/document.xml", MAX_ARCHIVE_ENTRY_BYTES, cancel)?
         };
@@ -115,14 +116,14 @@ impl DocumentReader for DocxDocumentReader {
                     Err(_) => out.push_str(&String::from_utf8_lossy(&t)),
                 },
                 Ok(Event::Eof) => break,
-                Err(e) => return Err(format!("Ошибка разбора document.xml: {e}")),
+                Err(e) => return Err(format!("Ошибка разбора document.xml: {e}").into()),
                 _ => {}
             }
         }
 
         let text = out.trim().to_string();
         if text.is_empty() {
-            return Err("В DOCX не найден текст.".to_string());
+            return Err("В DOCX не найден текст.".into());
         }
         Ok(BookDocument {
             title,

@@ -13,7 +13,7 @@ mod xml;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
-use crate::domain::BookDocument;
+use crate::domain::{AppResult, BookDocument};
 use crate::io::paths::book_stem;
 use crate::ports::{DocumentReader, is_cancelled as book_cancelled};
 
@@ -63,7 +63,7 @@ impl DocumentReader for CompositeBookReader {
         &self,
         path: &Path,
         cancel: Option<&AtomicBool>,
-    ) -> Result<BookDocument, String> {
+    ) -> AppResult<BookDocument> {
         for r in &self.readers {
             if book_cancelled(cancel) {
                 return limits::cancelled_book();
@@ -72,9 +72,7 @@ impl DocumentReader for CompositeBookReader {
                 return r.read_document_with_cancel(path, cancel);
             }
         }
-        Err(format!(
-            "Формат файла не поддерживается. {SUPPORTED_BOOK_FORMATS}"
-        ))
+        Err(format!("Формат файла не поддерживается. {SUPPORTED_BOOK_FORMATS}").into())
     }
 }
 

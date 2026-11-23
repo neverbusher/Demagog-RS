@@ -7,7 +7,7 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::reader::Reader;
 use zip::ZipArchive;
 
-use crate::domain::{BookDocument, BookHeading};
+use crate::domain::{AppResult, BookDocument, BookHeading};
 use crate::ports::{DocumentReader, is_cancelled as book_cancelled};
 
 use super::document_title_from_path;
@@ -34,7 +34,7 @@ impl DocumentReader for EpubDocumentReader {
         &self,
         path: &Path,
         cancel: Option<&AtomicBool>,
-    ) -> Result<BookDocument, String> {
+    ) -> AppResult<BookDocument> {
         if book_cancelled(cancel) {
             return cancelled_book();
         }
@@ -56,7 +56,8 @@ impl DocumentReader for EpubDocumentReader {
             if total_bytes > MAX_ARCHIVE_TOTAL_BYTES {
                 return Err(format!(
                     "Суммарный размер распакованных глав больше допустимых {MAX_ARCHIVE_TOTAL_BYTES} байт"
-                ));
+                )
+                .into());
             }
             let chapter_xml = decode_xml_with_declared_encoding(&bytes);
             let part = match extract_xml_paragraphs(
@@ -68,7 +69,7 @@ impl DocumentReader for EpubDocumentReader {
             ) {
                 Ok(part) => part,
                 Err(_) if book_cancelled(cancel) => return cancelled_book(),
-                Err(e) => return Err(format!("Ошибка разбора главы «{name}»: {e}")),
+                Err(e) => return Err(format!("Ошибка разбора главы «{name}»: {e}").into()),
             };
             if !part.trim().is_empty() {
                 let offset = full_text.len() + if full_text.is_empty() { 0 } else { 2 };
@@ -82,7 +83,7 @@ impl DocumentReader for EpubDocumentReader {
         }
 
         if full_text.trim().is_empty() {
-            return Err("В EPUB не найден текст: файлы внутри повреждены или пусты.".to_string());
+            return Err("В EPUB не найден текст: файлы внутри повреждены или пусты.".into());
         }
         Ok(BookDocument {
             title,
@@ -99,14 +100,15 @@ fn read_epub_zip_entry(
     archive: &mut ZipArchive<File>,
     name: &str,
     cancel: Option<&AtomicBool>,
-) -> Result<Vec<u8>, String> {
+) -> AppResult<Vec<u8>> {
     let entry = archive
         .by_name(name)
         .map_err(|e| format!("В EPUB не найден файл «{name}»: {e}"))?;
     if entry.size() > MAX_ARCHIVE_ENTRY_BYTES {
         return Err(format!(
             "В EPUB файл «{name}» больше допустимых {MAX_ARCHIVE_ENTRY_BYTES} байт"
-        ));
+        )
+        .into());
     }
     read_limited_with_cancel(entry, name, MAX_ARCHIVE_ENTRY_BYTES, cancel)
 }
@@ -114,7 +116,7 @@ fn read_epub_zip_entry(
 fn epub_contents(
     archive: &mut ZipArchive<File>,
     cancel: Option<&AtomicBool>,
-) -> Result<EpubContents, String> {
+) -> AppResult<EpubContents> {
     let Some(container) = read_zip_entry_optional(archive, "META-INF/container.xml", cancel)?
     else {
         return Ok(EpubContents {
@@ -127,7 +129,7 @@ fn epub_contents(
     let opf = read_epub_zip_entry(archive, &opf_path, cancel)?;
     let entries = epub_spine_paths(&opf, &opf_path)?;
     if entries.is_empty() {
-        return Err("В OPF не найден spine с главами".to_string());
+        return Err("В OPF не найден spine с главами".into());
     }
     Ok(EpubContents {
         entries,
@@ -380,7 +382,7 @@ mod tests {
         let error = EpubDocumentReader
             .read_document_with_cancel(&path, Some(&cancel))
             .expect_err("cancelled book loading must report cancellation");
-        assert!(error.contains("отмен"), "{error}");
+        assert!(error.is_cancelled(), "{error}");
         let _ = std::fs::remove_file(path);
     }
 
@@ -402,7 +404,7 @@ mod tests {
         let cancel = AtomicBool::new(true);
         let error = read_epub_zip_entry(&mut archive, "chapter.xhtml", Some(&cancel))
             .expect_err("cancelled entry read must report cancellation");
-        assert!(error.contains("отмен"), "{error}");
+        assert!(error.is_cancelled(), "{error}");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -595,7 +597,7 @@ mod tests {
         let error = EpubDocumentReader
             .read_document(&epub.0)
             .expect_err("missing chapter must not be ignored");
-        assert!(error.contains("не найден файл"), "{error}");
+        assert!(error.to_string().contains("не найден файл"), "{error}");
     }
 
     #[test]

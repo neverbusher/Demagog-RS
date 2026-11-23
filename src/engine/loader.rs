@@ -3,12 +3,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use crate::domain::{DictionaryMeta, describe_dictionary};
+use crate::domain::{AppError, AppResult, DictionaryMeta, describe_dictionary};
 use crate::engine::dic_processor::DicProcessor;
 use crate::engine::hard_e_processor::HardEProcessor;
 use crate::engine::rex_processor::RexProcessor;
 use crate::io::encoding::decode_text_bytes;
-use crate::ports::{TextProcessor, is_cancelled as cancellation_error};
+use crate::ports::{TextProcessor, is_cancelled};
 
 pub struct CompiledDictionary {
     pub meta: DictionaryMeta,
@@ -20,7 +20,7 @@ pub struct DictionaryLoadReport {
     pub errors: Vec<String>,
 }
 
-pub fn sorted_dictionary_paths(dir: &Path) -> Result<Vec<PathBuf>, String> {
+pub fn sorted_dictionary_paths(dir: &Path) -> AppResult<Vec<PathBuf>> {
     let entries = std::fs::read_dir(dir)
         .map_err(|e| format!("Не удалось открыть папку словарей {}: {e}", dir.display()))?;
 
@@ -42,7 +42,7 @@ pub fn sorted_dictionary_paths(dir: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(paths)
 }
 
-pub fn load_dictionaries_parallel(dir: &Path) -> Result<DictionaryLoadReport, String> {
+pub fn load_dictionaries_parallel(dir: &Path) -> AppResult<DictionaryLoadReport> {
     load_dictionaries_parallel_with_cancel(dir, None)
 }
 
@@ -51,38 +51,41 @@ const DICTIONARY_CANCELLED: &str = "Загрузка словарей отмен
 pub fn load_dictionaries_parallel_with_cancel(
     dir: &Path,
     cancel: Option<&AtomicBool>,
-) -> Result<DictionaryLoadReport, String> {
-    if cancellation_error(cancel) {
-        return Err(DICTIONARY_CANCELLED.to_string());
+) -> AppResult<DictionaryLoadReport> {
+    if is_cancelled(cancel) {
+        return Err(AppError::cancelled(DICTIONARY_CANCELLED));
     }
     let paths = sorted_dictionary_paths(dir)?;
 
-    let results: Vec<Result<CompiledDictionary, String>> = paths
+    let results: Vec<Result<CompiledDictionary, AppError>> = paths
         .par_iter()
         .map(|path| {
-            if cancellation_error(cancel) {
-                return Err(DICTIONARY_CANCELLED.to_string());
+            if is_cancelled(cancel) {
+                return Err(AppError::cancelled(DICTIONARY_CANCELLED));
             }
             compile_single_dictionary_with_cancel(path, cancel).map_err(|err| {
+                if err.is_cancelled() {
+                    return err;
+                }
                 let name = path
                     .file_name()
                     .and_then(|s| s.to_str())
                     .unwrap_or("<unknown>");
-                format!("{name}: {err}")
+                AppError::failed(format!("{name}: {err}"))
             })
         })
         .collect();
 
-    if cancellation_error(cancel) {
-        return Err(DICTIONARY_CANCELLED.to_string());
+    if is_cancelled(cancel) {
+        return Err(AppError::cancelled(DICTIONARY_CANCELLED));
     }
     let mut compiled = Vec::with_capacity(results.len());
     let mut errors = Vec::new();
     for result in results {
         match result {
             Ok(dictionary) => compiled.push(dictionary),
-            Err(err) if err == DICTIONARY_CANCELLED => {}
-            Err(err) => errors.push(err),
+            Err(err) if err.is_cancelled() => {}
+            Err(err) => errors.push(err.to_string()),
         }
     }
 
@@ -92,9 +95,9 @@ pub fn load_dictionaries_parallel_with_cancel(
 pub fn compile_single_dictionary_with_cancel(
     path: &Path,
     cancel: Option<&AtomicBool>,
-) -> Result<CompiledDictionary, String> {
-    if cancellation_error(cancel) {
-        return Err(DICTIONARY_CANCELLED.to_string());
+) -> AppResult<CompiledDictionary> {
+    if is_cancelled(cancel) {
+        return Err(AppError::cancelled(DICTIONARY_CANCELLED));
     }
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let (content, encoding) = decode_text_bytes(&bytes);
@@ -106,8 +109,8 @@ pub fn compile_single_dictionary_with_cancel(
 
     let (tag, description, outputs_plus_stress) = describe_dictionary(&name, &content);
 
-    if cancellation_error(cancel) {
-        return Err(DICTIONARY_CANCELLED.to_string());
+    if is_cancelled(cancel) {
+        return Err(AppError::cancelled(DICTIONARY_CANCELLED));
     }
 
     let is_rex = path
@@ -189,7 +192,7 @@ mod tests {
             panic!("cancelled dictionary compilation must report cancellation")
         };
 
-        assert!(error.contains("отмен"), "{error}");
+        assert!(error.is_cancelled(), "{error}");
     }
 
     #[test]

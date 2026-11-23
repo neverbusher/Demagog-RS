@@ -4,7 +4,7 @@ use std::sync::atomic::AtomicBool;
 
 use zip::ZipArchive;
 
-use crate::domain::BookDocument;
+use crate::domain::{AppResult, BookDocument};
 use crate::ports::{DocumentReader, is_cancelled as book_cancelled};
 
 use super::document_title_from_path;
@@ -29,7 +29,7 @@ impl DocumentReader for Fb2DocumentReader {
         &self,
         path: &Path,
         cancel: Option<&AtomicBool>,
-    ) -> Result<BookDocument, String> {
+    ) -> AppResult<BookDocument> {
         if book_cancelled(cancel) {
             return cancelled_book();
         }
@@ -52,7 +52,8 @@ impl DocumentReader for Fb2DocumentReader {
                     if entry.size() > MAX_ARCHIVE_ENTRY_BYTES {
                         return Err(format!(
                             "FB2 в архиве больше допустимых {MAX_ARCHIVE_ENTRY_BYTES} байт"
-                        ));
+                        )
+                        .into());
                     }
                     fb2_bytes = read_limited_with_cancel(
                         entry,
@@ -93,7 +94,7 @@ impl DocumentReader for Fb2DocumentReader {
             Some(&mut headings),
         )?;
         if text.trim().is_empty() {
-            return Err("В FB2 не найден текст книги.".to_string());
+            return Err("В FB2 не найден текст книги.".into());
         }
         let title =
             xml_element_text(&xml, b"book-title").unwrap_or_else(|| document_title_from_path(path));
@@ -118,7 +119,7 @@ mod tests {
         let xml = "<body><p>Глава</p></body>";
         let error = extract_xml_paragraphs(xml, &["p"], &[], Some(&cancel), None)
             .expect_err("cancelled parsing must report cancellation");
-        assert!(error.contains("отмен"), "{error}");
+        assert!(error.is_cancelled(), "{error}");
     }
 
     #[test]

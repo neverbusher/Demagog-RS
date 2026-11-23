@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+mod error;
+pub use error::{AppError, AppResult};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ThemeMode {
     #[default]
