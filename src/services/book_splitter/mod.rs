@@ -14,7 +14,7 @@ mod export;
 mod naming;
 mod split;
 
-pub use batch::{BatchSplitProgress, BatchSplitSummary, run_split_batch};
+pub use batch::{BatchSplitProgress, run_split_batch};
 pub use export::export_parts;
 pub use naming::{part_file_name, sanitize_file_name};
 pub use split::{BookPart, split_book, validate_config};
@@ -27,7 +27,7 @@ pub use export::export_parts_into;
 #[cfg(test)]
 use crate::domain::{BookHeading, SplitConfig};
 #[cfg(test)]
-use crate::services::batch::BatchInput;
+use crate::services::batch::{BatchCounts, BatchInput, BatchOutcome};
 #[cfg(test)]
 use std::collections::HashSet;
 #[cfg(test)]
@@ -639,7 +639,7 @@ mod tests {
         let out = root.join("out");
 
         let (tx, rx) = mpsc::channel();
-        let summary = run_split_batch(
+        let outcome = run_split_batch(
             &flat(&[book1, book2]),
             &CompositeBookReader::new(),
             &split_batch_options(out.clone()),
@@ -649,12 +649,11 @@ mod tests {
         drop(tx);
 
         assert_eq!(
-            summary,
-            BatchSplitSummary {
+            outcome,
+            BatchOutcome::Completed(BatchCounts {
                 succeeded: 2,
                 failed: 0,
-                cancelled: false
-            }
+            })
         );
         assert_eq!(
             std::fs::read_to_string(out.join("book1").join("Глава 1.txt")).unwrap(),
@@ -680,11 +679,7 @@ mod tests {
         );
         assert!(matches!(
             messages.last(),
-            Some(BatchSplitProgress::Completed {
-                succeeded: 2,
-                failed: 0,
-                cancelled: false
-            })
+            Some(BatchSplitProgress::Finished(finished)) if *finished == outcome
         ));
 
         let _ = std::fs::remove_dir_all(&root);
@@ -702,7 +697,7 @@ mod tests {
         let cancel = AtomicBool::new(true);
 
         let (tx, rx) = mpsc::channel();
-        let summary = run_split_batch(
+        let outcome = run_split_batch(
             &flat(&[book]),
             &CompositeBookReader::new(),
             &split_batch_options(out.clone()),
@@ -712,12 +707,11 @@ mod tests {
         drop(tx);
 
         assert_eq!(
-            summary,
-            BatchSplitSummary {
+            outcome,
+            BatchOutcome::Cancelled(BatchCounts {
                 succeeded: 0,
                 failed: 0,
-                cancelled: true
-            }
+            })
         );
 
         let messages: Vec<BatchSplitProgress> = rx.iter().collect();
@@ -728,11 +722,7 @@ mod tests {
         );
         assert!(matches!(
             messages.last(),
-            Some(BatchSplitProgress::Completed {
-                succeeded: 0,
-                failed: 0,
-                cancelled: true
-            })
+            Some(BatchSplitProgress::Finished(finished)) if *finished == outcome
         ));
 
         let output_is_empty = match std::fs::read_dir(&out) {
@@ -741,6 +731,176 @@ mod tests {
             Err(error) => panic!("failed to inspect output directory: {error}"),
         };
         assert!(output_is_empty, "pre-cancelled batch created output");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn run_split_batch_mid_run_cancellation_preserves_partial_counts() {
+        use crate::domain::{AppResult, BookDocument};
+        use crate::io::book_reader::CompositeBookReader;
+        use crate::ports::DocumentReader;
+        use std::path::Path;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::{Arc, mpsc};
+
+        struct CancelAfterFirstRead {
+            inner: CompositeBookReader,
+            cancel: Arc<AtomicBool>,
+            reads: AtomicUsize,
+        }
+
+        impl DocumentReader for CancelAfterFirstRead {
+            fn can_read(&self, path: &Path) -> bool {
+                self.inner.can_read(path)
+            }
+
+            fn read_document_with_cancel(
+                &self,
+                path: &Path,
+                cancel: Option<&AtomicBool>,
+            ) -> AppResult<BookDocument> {
+                let document = self.inner.read_document_with_cancel(path, cancel)?;
+                if self.reads.fetch_add(1, Ordering::Relaxed) == 0 {
+                    self.cancel.store(true, Ordering::Relaxed);
+                }
+                Ok(document)
+            }
+        }
+
+        let root = temp_dir("splitmidcancel");
+        let input = root.join("in");
+        std::fs::create_dir_all(&input).expect("create input dir");
+        let book1 = write_book(&input, "book1.txt", "Глава 1\n\nТекст первый.");
+        let book2 = write_book(&input, "book2.txt", "Глава 2\n\nТекст второй.");
+        let out = root.join("out");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let reader = CancelAfterFirstRead {
+            inner: CompositeBookReader::new(),
+            cancel: cancel.clone(),
+            reads: AtomicUsize::new(0),
+        };
+
+        let (tx, rx) = mpsc::channel();
+        let outcome = run_split_batch(
+            &flat(&[book1, book2]),
+            &reader,
+            &split_batch_options(out.clone()),
+            Some(cancel.as_ref()),
+            Some(&tx),
+        );
+        drop(tx);
+
+        assert_eq!(
+            outcome,
+            BatchOutcome::Cancelled(BatchCounts {
+                succeeded: 1,
+                failed: 0,
+            })
+        );
+        assert!(out.join("book1").join("Глава 1.txt").exists());
+        assert!(!out.join("book2").join("Глава 2.txt").exists());
+
+        let messages: Vec<BatchSplitProgress> = rx.iter().collect();
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| matches!(message, BatchSplitProgress::FileStarted { .. }))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            messages.last(),
+            Some(BatchSplitProgress::Finished(finished)) if *finished == outcome
+        ));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn run_split_batch_preserves_typed_reader_cancellation() {
+        use crate::domain::{AppError, AppResult, BookDocument};
+        use crate::io::book_reader::CompositeBookReader;
+        use crate::ports::DocumentReader;
+        use std::path::Path;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+
+        struct CancelSpecificReader {
+            inner: CompositeBookReader,
+            path: PathBuf,
+        }
+
+        impl DocumentReader for CancelSpecificReader {
+            fn can_read(&self, path: &Path) -> bool {
+                self.inner.can_read(path)
+            }
+
+            fn read_document_with_cancel(
+                &self,
+                path: &Path,
+                cancel: Option<&AtomicBool>,
+            ) -> AppResult<BookDocument> {
+                if path == self.path.as_path() {
+                    return Err(AppError::cancelled("Чтение книги отменено"));
+                }
+                self.inner.read_document_with_cancel(path, cancel)
+            }
+        }
+
+        let root = temp_dir("splittypedcancel");
+        let input = root.join("in");
+        std::fs::create_dir_all(&input).expect("create input dir");
+        let book1 = write_book(&input, "book1.txt", "Глава 1\n\nТекст первый.");
+        let book2 = write_book(&input, "book2.txt", "Глава 2\n\nТекст второй.");
+        let book3 = write_book(&input, "book3.txt", "Глава 3\n\nТекст третий.");
+        let out = root.join("out");
+        let cancel = AtomicBool::new(false);
+        let reader = CancelSpecificReader {
+            inner: CompositeBookReader::new(),
+            path: book2.clone(),
+        };
+
+        let (tx, rx) = mpsc::channel();
+        let outcome = run_split_batch(
+            &flat(&[book1, book2, book3]),
+            &reader,
+            &split_batch_options(out.clone()),
+            Some(&cancel),
+            Some(&tx),
+        );
+        drop(tx);
+
+        assert_eq!(
+            outcome,
+            BatchOutcome::Cancelled(BatchCounts {
+                succeeded: 1,
+                failed: 0,
+            })
+        );
+        assert!(!cancel.load(Ordering::Relaxed));
+        assert!(out.join("book1").join("Глава 1.txt").exists());
+        assert!(!out.join("book2").join("Глава 2.txt").exists());
+        assert!(!out.join("book3").join("Глава 3.txt").exists());
+
+        let messages: Vec<BatchSplitProgress> = rx.iter().collect();
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            BatchSplitProgress::FileFinished {
+                index: 0,
+                outcome: Ok(1)
+            }
+        )));
+        assert!(
+            !messages.iter().any(|message| matches!(
+                message,
+                BatchSplitProgress::FileFinished { index: 1.., .. }
+            ))
+        );
+        assert!(matches!(
+            messages.last(),
+            Some(BatchSplitProgress::Finished(finished)) if *finished == outcome
+        ));
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -757,7 +917,7 @@ mod tests {
         let beta = write_book(&input, "beta.txt", "Глава 2\n\nТекст второй.");
         let out = root.join("out");
 
-        let summary = run_split_batch(
+        let outcome = run_split_batch(
             &flat(&[alpha, missing, beta]),
             &CompositeBookReader::new(),
             &split_batch_options(out.clone()),
@@ -766,12 +926,11 @@ mod tests {
         );
 
         assert_eq!(
-            summary,
-            BatchSplitSummary {
+            outcome,
+            BatchOutcome::Completed(BatchCounts {
                 succeeded: 2,
                 failed: 1,
-                cancelled: false
-            }
+            })
         );
         assert!(out.join("alpha").join("Глава 1.txt").exists());
         assert!(out.join("beta").join("Глава 2.txt").exists());
@@ -792,7 +951,7 @@ mod tests {
         std::fs::create_dir_all(existing.parent().unwrap()).unwrap();
         std::fs::write(&existing, "старое").unwrap();
 
-        let summary = run_split_batch(
+        let outcome = run_split_batch(
             &flat(&[book]),
             &CompositeBookReader::new(),
             &split_batch_options(out.clone()),
@@ -801,12 +960,11 @@ mod tests {
         );
 
         assert_eq!(
-            summary,
-            BatchSplitSummary {
+            outcome,
+            BatchOutcome::Completed(BatchCounts {
                 succeeded: 0,
                 failed: 1,
-                cancelled: false
-            }
+            })
         );
         assert_eq!(std::fs::read_to_string(&existing).unwrap(), "старое");
 

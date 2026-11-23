@@ -1,7 +1,7 @@
 use super::*;
 use crate::io::book_reader::can_read_book;
-use crate::services::batch::BatchInput;
-use crate::services::book_splitter::{self, BatchSplitSummary, BookPart, validate_config};
+use crate::services::batch::{BatchInput, BatchOutcome};
+use crate::services::book_splitter::{self, BookPart, validate_config};
 
 #[derive(Debug, Clone)]
 pub(super) enum BatchSplitStatus {
@@ -16,7 +16,7 @@ pub(super) struct BatchQueueState {
     pub files: Vec<BatchInput>,
     pub statuses: Vec<BatchSplitStatus>,
     pub running: bool,
-    pub summary: Option<BatchSplitSummary>,
+    pub summary: Option<BatchOutcome>,
     pub error: Option<String>,
     pub warning: Option<String>,
 }

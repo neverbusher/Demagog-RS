@@ -89,14 +89,15 @@ impl DemagogApp {
             {
                 self.start_batch_split(ui.ctx().clone());
             }
-            if let Some(summary) = self.splitter.batch_queue.summary {
-                let text = if summary.cancelled {
+            if let Some(outcome) = self.splitter.batch_queue.summary {
+                let counts = outcome.counts();
+                let text = if outcome.is_cancelled() {
                     format!(
                         "Отменено: нарезано {}, ошибок {}",
-                        summary.succeeded, summary.failed
+                        counts.succeeded, counts.failed
                     )
                 } else {
-                    format!("Готово: {}, ошибок: {}", summary.succeeded, summary.failed)
+                    format!("Готово: {}, ошибок: {}", counts.succeeded, counts.failed)
                 };
                 ui.label(RichText::new(text).strong());
             }

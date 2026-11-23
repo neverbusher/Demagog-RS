@@ -18,7 +18,7 @@ use crate::io::book_reader::{CompositeBookReader, SUPPORTED_BOOK_FORMATS, can_re
 use crate::io::settings_store;
 use crate::ports::{DocumentReader, StressFormatter, TextChunker, TextProcessor, is_cancelled};
 use crate::services::batch::BatchProgress;
-use crate::services::book_splitter::{BatchSplitProgress, BatchSplitSummary};
+use crate::services::book_splitter::BatchSplitProgress;
 use crate::services::chunker::SentenceAwareChunker;
 use crate::services::dictionary_check::{self, CheckReport};
 use crate::services::pipeline::{PipelineOptions, ProcessingPipeline};
@@ -1095,35 +1095,32 @@ impl DemagogApp {
                                     let total = self.splitter.batch_queue.statuses.len().max(1);
                                     self.progress_ratio = (index + 1) as f32 / total as f32;
                                 }
-                                BatchSplitProgress::Completed {
-                                    succeeded,
-                                    failed,
-                                    cancelled,
-                                } => {
+                                BatchSplitProgress::Finished(outcome) => {
                                     self.splitter.batch_queue.running = false;
                                     for status in &mut self.splitter.batch_queue.statuses {
                                         if matches!(status, BatchSplitStatus::Running) {
                                             *status = BatchSplitStatus::Queued;
                                         }
                                     }
-                                    self.splitter.batch_queue.summary = Some(BatchSplitSummary {
-                                        succeeded,
-                                        failed,
-                                        cancelled,
-                                    });
+                                    self.splitter.batch_queue.summary = Some(outcome);
                                     self.cancel_flag = None;
                                     self.is_busy = false;
                                     self.progress_ratio = 1.0;
-                                    let level = if failed > 0 {
+                                    let counts = outcome.counts();
+                                    let level = if counts.failed > 0 {
                                         StatusLevel::Warning
                                     } else {
                                         StatusLevel::Success
                                     };
-                                    let text = if cancelled {
-                                        format!("Отменено: нарезано {succeeded}, ошибок {failed}")
+                                    let text = if outcome.is_cancelled() {
+                                        format!(
+                                            "Отменено: нарезано {}, ошибок {}",
+                                            counts.succeeded, counts.failed
+                                        )
                                     } else {
                                         format!(
-                                            "Пакетный книгорез: {succeeded} частей, ошибок {failed}"
+                                            "Пакетный книгорез: {} частей, ошибок {}",
+                                            counts.succeeded, counts.failed
                                         )
                                     };
                                     pending_status = Some((level, text));

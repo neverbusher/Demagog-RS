@@ -4,9 +4,9 @@ use std::collections::HashSet;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
 
-use crate::domain::SplitConfig;
+use crate::domain::{AppResult, SplitConfig};
 use crate::ports::{DocumentReader, is_cancelled};
-use crate::services::batch::{BatchInput, output_stem};
+use crate::services::batch::{BatchCounts, BatchInput, BatchOutcome, output_stem};
 
 use super::export::export_parts_to;
 use super::naming::{part_target, sanitize_file_name};
@@ -23,18 +23,7 @@ pub enum BatchSplitProgress {
         index: usize,
         outcome: Result<usize, String>,
     },
-    Completed {
-        succeeded: usize,
-        failed: usize,
-        cancelled: bool,
-    },
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct BatchSplitSummary {
-    pub succeeded: usize,
-    pub failed: usize,
-    pub cancelled: bool,
+    Finished(BatchOutcome),
 }
 
 /// Нарезка пачки книг: для каждого входного файла читает книгу,
@@ -46,22 +35,15 @@ pub fn run_split_batch(
     config: &SplitConfig,
     cancel: Option<&AtomicBool>,
     progress_tx: Option<&Sender<BatchSplitProgress>>,
-) -> BatchSplitSummary {
-    let mut summary = BatchSplitSummary::default();
+) -> BatchOutcome {
+    let mut counts = BatchCounts::default();
     let mut used: HashSet<String> = HashSet::new();
     let total = inputs.len();
     for (index, input) in inputs.iter().enumerate() {
         if is_cancelled(cancel) {
-            summary.cancelled = true;
-            send(
-                progress_tx,
-                BatchSplitProgress::Completed {
-                    succeeded: summary.succeeded,
-                    failed: summary.failed,
-                    cancelled: true,
-                },
-            );
-            return summary;
+            let outcome = BatchOutcome::Cancelled(counts);
+            send(progress_tx, BatchSplitProgress::Finished(outcome));
+            return outcome;
         }
         send(
             progress_tx,
@@ -77,7 +59,7 @@ pub fn run_split_batch(
         );
         match split_one_book(input, reader, config, cancel, &mut used) {
             Ok(parts_written) => {
-                summary.succeeded += 1;
+                counts.succeeded += 1;
                 send(
                     progress_tx,
                     BatchSplitProgress::FileFinished {
@@ -87,38 +69,25 @@ pub fn run_split_batch(
                 );
             }
             Err(err) => {
-                if is_cancelled(cancel) {
-                    summary.cancelled = true;
-                    send(
-                        progress_tx,
-                        BatchSplitProgress::Completed {
-                            succeeded: summary.succeeded,
-                            failed: summary.failed,
-                            cancelled: true,
-                        },
-                    );
-                    return summary;
+                if is_cancelled(cancel) || err.is_cancelled() {
+                    let outcome = BatchOutcome::Cancelled(counts);
+                    send(progress_tx, BatchSplitProgress::Finished(outcome));
+                    return outcome;
                 }
-                summary.failed += 1;
+                counts.failed += 1;
                 send(
                     progress_tx,
                     BatchSplitProgress::FileFinished {
                         index,
-                        outcome: Err(err),
+                        outcome: Err(err.to_string()),
                     },
                 );
             }
         }
     }
-    send(
-        progress_tx,
-        BatchSplitProgress::Completed {
-            succeeded: summary.succeeded,
-            failed: summary.failed,
-            cancelled: false,
-        },
-    );
-    summary
+    let outcome = BatchOutcome::Completed(counts);
+    send(progress_tx, BatchSplitProgress::Finished(outcome));
+    outcome
 }
 
 fn split_one_book(
@@ -127,13 +96,11 @@ fn split_one_book(
     config: &SplitConfig,
     cancel: Option<&AtomicBool>,
     used: &mut HashSet<String>,
-) -> Result<usize, String> {
-    let doc = reader
-        .read_document_with_cancel(&input.path, cancel)
-        .map_err(|error| error.to_string())?;
+) -> AppResult<usize> {
+    let doc = reader.read_document_with_cancel(&input.path, cancel)?;
     let parts = split_book(&doc.raw_text, &doc.headings, config);
     if parts.is_empty() {
-        return Err("Книга пуста".to_string());
+        return Err("Книга пуста".into());
     }
     let source_name = output_stem(&input.path);
     let base = config
@@ -155,12 +122,13 @@ fn split_one_book(
             return Err(format!(
                 "Файлы уже существуют и будут затёрты: {}",
                 existing.join(", ")
-            ));
+            )
+            .into());
         }
     }
     let summary = export_parts_to(&parts, config, &source_name, &dir, used)?;
     if !summary.errors.is_empty() {
-        return Err(summary.errors.join("; "));
+        return Err(summary.errors.join("; ").into());
     }
     Ok(summary.saved)
 }
