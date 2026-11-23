@@ -410,7 +410,7 @@ fn reset_settings_keeps_folder_and_restores_defaults() {
 fn ui_test_app(raw_text: &str, processed_text: &str, chunks: Vec<String>) -> DemagogApp {
     let document = BookDocument {
         title: "Тестовая книга".to_string(),
-        source_path: None,
+        source_path: Some(PathBuf::from("test.fb2")),
         raw_text: raw_text.to_string(),
         processed_text: processed_text.to_string(),
         chunks,
@@ -1283,7 +1283,7 @@ fn batch_window_opens_from_toolbar_with_disabled_start_for_empty_queue() {
         .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
     harness.run();
 
-    harness.get_by_label_contains("Пакет").click();
+    harness.get_by_label_contains("📚 Пакет").click();
     harness.run();
 
     assert!(harness.state().batch.open);
@@ -1565,6 +1565,62 @@ fn knigorez_empty_keywords_show_validation_error() {
     harness.run();
 
     assert!(harness.get_all_by_label_contains("ключевых слов").count() >= 1);
+}
+
+#[test]
+fn knigorez_tab_has_batch_queue_section() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::{NodeT, Queryable};
+
+    let mut app = ui_test_app("Глава 1\nТекст.", "", Vec::new());
+    app.document.source_path = None;
+    app.active_tab = ActiveTab::BookCutter;
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1100.0, 800.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+    harness.run();
+
+    assert_eq!(
+        harness
+            .get_all_by_label_contains("Пакетная нарезка")
+            .count(),
+        1
+    );
+    assert_eq!(
+        harness.get_all_by_label_contains("Добавить файлы").count(),
+        1
+    );
+    assert!(
+        harness
+            .get_by_label("▶ Нарезать пакет")
+            .accesskit_node()
+            .is_disabled(),
+        "start must be disabled with no files"
+    );
+}
+
+#[test]
+fn reset_button_returns_app_to_launch_state() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = ui_test_app("Текст", "Результат", Vec::new());
+    app.splitter
+        .batch_queue
+        .add_files([std::env::temp_dir().join("demagog-reset-test.txt")]);
+    app.active_tab = ActiveTab::DiffAndStats;
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1280.0, 900.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+    harness.run();
+    harness.get_by_label("🔄 Сброс").click();
+    harness.run_steps(2);
+    let state = harness.state();
+    assert_eq!(state.document.title, "Пример текста");
+    assert!(state.document.source_path.is_none());
+    assert!(state.document.raw_text.contains("В 1995 году"));
+    assert_eq!(state.active_tab, ActiveTab::RawText);
+    assert!(state.splitter.batch_queue.files.is_empty());
 }
 
 #[test]

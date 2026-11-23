@@ -36,6 +36,14 @@ impl DemagogApp {
                     }
 
                     if ui
+                        .add_enabled(!self.is_busy, egui::Button::new("🔄 Сброс"))
+                        .on_hover_text("Сбросить состояние?")
+                        .clicked()
+                    {
+                        self.reset_app(ctx.clone());
+                    }
+
+                    if ui
                         .button("📚 Пакет")
                         .on_hover_text("Пакетная обработка нескольких файлов")
                         .clicked()
@@ -183,6 +191,13 @@ impl DemagogApp {
                     });
                     if open_response.clicked() {
                         self.open_book_dialog(ctx.clone());
+                    }
+                    if ui
+                        .add_enabled(!self.is_busy, egui::Button::new("🔄 Сброс"))
+                        .on_hover_text("Сбросить приложение в состояние свежего запуска")
+                        .clicked()
+                    {
+                        self.reset_app(ctx.clone());
                     }
                     let enabled_dictionaries =
                         self.dictionaries.iter().filter(|d| d.meta.enabled).count();

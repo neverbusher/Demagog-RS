@@ -1,5 +1,73 @@
 use super::*;
-use crate::services::book_splitter::{self, BookPart};
+use crate::io::book_reader::can_read_book;
+use crate::services::batch::BatchInput;
+use crate::services::book_splitter::{self, BatchSplitSummary, BookPart, validate_config};
+
+#[derive(Debug, Clone)]
+pub(super) enum BatchSplitStatus {
+    Queued,
+    Running,
+    Done(usize),
+    Failed(String),
+}
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct BatchQueueState {
+    pub files: Vec<BatchInput>,
+    pub statuses: Vec<BatchSplitStatus>,
+    pub running: bool,
+    pub summary: Option<BatchSplitSummary>,
+    pub error: Option<String>,
+    pub warning: Option<String>,
+}
+
+impl BatchQueueState {
+    pub(super) fn add_files(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
+        for path in paths {
+            if !can_read_book(&path) || self.files.iter().any(|file| file.path == path) {
+                continue;
+            }
+            let base_dir = path.parent().unwrap_or(Path::new("")).to_path_buf();
+            self.files.push(BatchInput { path, base_dir });
+            self.statuses.push(BatchSplitStatus::Queued);
+        }
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.files.clear();
+        self.statuses.clear();
+        self.running = false;
+        self.summary = None;
+        self.error = None;
+        self.warning = None;
+    }
+
+    pub(super) fn can_start(&self, is_busy: bool, output_dir_set: bool) -> bool {
+        !is_busy && !self.files.is_empty() && output_dir_set
+    }
+
+    pub(super) fn display_name(&self, index: usize) -> String {
+        self.files[index]
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
+    pub(super) fn done_count(&self) -> usize {
+        self.statuses
+            .iter()
+            .filter(|status| matches!(status, BatchSplitStatus::Done(_)))
+            .count()
+    }
+
+    pub(super) fn failed_count(&self) -> usize {
+        self.statuses
+            .iter()
+            .filter(|status| matches!(status, BatchSplitStatus::Failed(_)))
+            .count()
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct SplitterState {
@@ -8,10 +76,21 @@ pub(super) struct SplitterState {
     pub has_preview: bool,
     pub stale: bool,
     pub save_pending: bool,
+    pub batch_queue: BatchQueueState,
 }
 
 impl DemagogApp {
     pub(super) fn show_splitter_tab(&mut self, ui: &mut egui::Ui, theme: ThemeMode) {
+        // Одиночный режим — когда выбрана одна книга через Открыть книгу
+        // и пакетная очередь пуста; пакетное меню в остальных случаях.
+        if self.document.source_path.is_some() && self.splitter.batch_queue.files.is_empty() {
+            self.show_splitter_single(ui, theme);
+        } else {
+            self.show_splitter_batch_menu(ui, theme);
+        }
+    }
+
+    fn show_splitter_single(&mut self, ui: &mut egui::Ui, theme: ThemeMode) {
         if self.document.raw_text.trim().is_empty() {
             ui.label("Откройте книгу (Ctrl+O), чтобы нарезать её на части.");
             return;
@@ -20,6 +99,89 @@ impl DemagogApp {
             self.run_split_preview();
         }
 
+        let changed = self.show_splitter_settings(ui);
+        self.persist_split_change(ui, changed);
+
+        let example_part = self.splitter.preview.first().cloned().unwrap_or(BookPart {
+            title: None,
+            text: "Глава первая\nТекст части…".to_string(),
+        });
+        let example = book_splitter::part_file_name(
+            &self.settings.split,
+            &example_part,
+            0,
+            self.splitter.preview.len().max(1),
+            &self.split_source_name(),
+        );
+        ui.label(RichText::new(format!("Пример имени: {example}.txt")).weak());
+        ui.add_space(4.0);
+
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!self.is_busy, egui::Button::new("🔍 Тест"))
+                .clicked()
+            {
+                self.run_split_preview();
+            }
+            let can_export = !self.is_busy
+                && self.settings.split.output_dir.is_some()
+                && book_splitter::validate_config(&self.settings.split).is_ok();
+            if ui
+                .add_enabled(can_export, egui::Button::new("💾 Нарезать"))
+                .clicked()
+            {
+                self.export_split_parts();
+            }
+        });
+        ui.separator();
+
+        if self.splitter.stale && self.splitter.has_preview {
+            ui.label(
+                RichText::new(
+                    "⚠ Настройки или текст изменены — нажмите «Тест», чтобы обновить превью.",
+                )
+                .color(palette::warning_text(theme))
+                .strong(),
+            );
+        }
+        if self.splitter.has_preview {
+            let total = self.splitter.preview.len();
+            ui.label(RichText::new(format!("Частей: {total}")).strong());
+            if total <= 1 {
+                ui.label(
+                    RichText::new(
+                        "Текст не разделился — проверьте способы деления и ключевые слова.",
+                    )
+                    .color(palette::warning_text(theme)),
+                );
+            }
+            let editor_font = FontId::new(self.settings.editor_font_size, FontFamily::Monospace);
+            ScrollArea::vertical()
+                .id_salt("splitter_preview")
+                .show(ui, |ui| {
+                    for (idx, part) in self.splitter.preview.iter().enumerate() {
+                        let header = format!(
+                            "{} — {} симв.",
+                            self.splitter.names[idx],
+                            format_num(part.text.chars().count())
+                        );
+                        egui::CollapsingHeader::new(RichText::new(header).strong())
+                            .id_salt(idx)
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&part.text).font(editor_font.clone()),
+                                    )
+                                    .selectable(true),
+                                );
+                            });
+                    }
+                });
+        }
+    }
+
+    pub(super) fn show_splitter_settings(&mut self, ui: &mut egui::Ui) -> bool {
         let mut changed = false;
         ui.add_enabled_ui(!self.is_busy, |ui| {
             egui::Grid::new("splitter_settings")
@@ -177,88 +339,10 @@ impl DemagogApp {
                     ui.end_row();
                 });
         });
-        self.persist_split_change(ui, changed);
-
-        let example_part = self.splitter.preview.first().cloned().unwrap_or(BookPart {
-            title: None,
-            text: "Глава первая\nТекст части…".to_string(),
-        });
-        let example = book_splitter::part_file_name(
-            &self.settings.split,
-            &example_part,
-            0,
-            self.splitter.preview.len().max(1),
-            &self.split_source_name(),
-        );
-        ui.label(RichText::new(format!("Пример имени: {example}.txt")).weak());
-        ui.add_space(4.0);
-
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(!self.is_busy, egui::Button::new("🔍 Тест"))
-                .clicked()
-            {
-                self.run_split_preview();
-            }
-            let can_export = !self.is_busy
-                && self.settings.split.output_dir.is_some()
-                && book_splitter::validate_config(&self.settings.split).is_ok();
-            if ui
-                .add_enabled(can_export, egui::Button::new("💾 Нарезать"))
-                .clicked()
-            {
-                self.export_split_parts();
-            }
-        });
-        ui.separator();
-
-        if self.splitter.stale && self.splitter.has_preview {
-            ui.label(
-                RichText::new(
-                    "⚠ Настройки или текст изменены — нажмите «Тест», чтобы обновить превью.",
-                )
-                .color(palette::warning_text(theme))
-                .strong(),
-            );
-        }
-        if self.splitter.has_preview {
-            let total = self.splitter.preview.len();
-            ui.label(RichText::new(format!("Частей: {total}")).strong());
-            if total <= 1 {
-                ui.label(
-                    RichText::new(
-                        "Текст не разделился — проверьте способы деления и ключевые слова.",
-                    )
-                    .color(palette::warning_text(theme)),
-                );
-            }
-            let editor_font = FontId::new(self.settings.editor_font_size, FontFamily::Monospace);
-            ScrollArea::vertical()
-                .id_salt("splitter_preview")
-                .show(ui, |ui| {
-                    for (idx, part) in self.splitter.preview.iter().enumerate() {
-                        let header = format!(
-                            "{} — {} симв.",
-                            self.splitter.names[idx],
-                            format_num(part.text.chars().count())
-                        );
-                        egui::CollapsingHeader::new(RichText::new(header).strong())
-                            .id_salt(idx)
-                            .default_open(false)
-                            .show(ui, |ui| {
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(&part.text).font(editor_font.clone()),
-                                    )
-                                    .selectable(true),
-                                );
-                            });
-                    }
-                });
-        }
+        changed
     }
 
-    fn persist_split_change(&mut self, ui: &egui::Ui, changed: bool) {
+    pub(super) fn persist_split_change(&mut self, ui: &egui::Ui, changed: bool) {
         if changed {
             self.splitter.stale = true;
             self.splitter.save_pending = true;
@@ -277,7 +361,7 @@ impl DemagogApp {
     }
 
     fn run_split_preview(&mut self) {
-        if let Err(err) = book_splitter::validate_config(&self.settings.split) {
+        if let Err(err) = validate_config(&self.settings.split) {
             self.set_status(StatusLevel::Warning, err);
             self.splitter.stale = true;
             return;
@@ -311,7 +395,7 @@ impl DemagogApp {
     }
 
     fn export_split_parts(&mut self) {
-        if let Err(err) = book_splitter::validate_config(&self.settings.split) {
+        if let Err(err) = validate_config(&self.settings.split) {
             self.set_status(StatusLevel::Error, err);
             return;
         }

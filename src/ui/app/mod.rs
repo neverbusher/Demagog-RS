@@ -17,14 +17,17 @@ use crate::engine::loader::{
 use crate::io::book_reader::{CompositeBookReader, SUPPORTED_BOOK_FORMATS, can_read_book};
 use crate::ports::{DocumentReader, StressFormatter, TextChunker, TextProcessor};
 use crate::services::batch::{BatchProgress, BatchSummary};
+use crate::services::book_splitter::{BatchSplitProgress, BatchSplitSummary};
 use crate::services::chunker::SentenceAwareChunker;
 use crate::services::dictionary_check::{self, CheckReport};
 use crate::services::pipeline::{PipelineOptions, ProcessingPipeline};
 use crate::services::stress::RussianStressFormatter;
 use crate::ui::palette;
+use splitter::BatchSplitStatus;
 
 mod batch;
 mod splitter;
+mod splitter_batch;
 mod views;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,6 +233,7 @@ enum WorkerMessage {
     Pipeline(PipelineProgress),
     DictionaryCheckFinished(Result<CheckReport, String>),
     Batch(BatchProgress),
+    BookSplit(BatchSplitProgress),
     BatchSetupError(String),
 }
 
@@ -240,11 +244,7 @@ impl DemagogApp {
         Self::init(cc.egui_ctx.clone(), initial_dic_folder)
     }
 
-    pub fn init(egui_ctx: egui::Context, initial_dic_folder: PathBuf) -> Self {
-        configure_cyrillic_fonts(&egui_ctx);
-        let (settings, settings_warning) = AppSettings::load(initial_dic_folder);
-        apply_style_settings(&egui_ctx, &settings);
-
+    fn sample_book_document() -> BookDocument {
         let sample_text = concat!(
             "В 1995 году в замке у ворот города стояли все свои. ",
             "Они завоевывать земли не собирались, но руки на груди скрестили все.\n\n",
@@ -252,14 +252,21 @@ impl DemagogApp {
             "Веселые места и весеннего ветра шум напоминали о том, что все уже в прошлом."
         )
         .to_string();
-        let document = BookDocument {
+        BookDocument {
             title: "Пример текста".to_string(),
             source_path: None,
             raw_text: sample_text,
             processed_text: String::new(),
             chunks: Vec::new(),
             headings: Vec::new(),
-        };
+        }
+    }
+    pub fn init(egui_ctx: egui::Context, initial_dic_folder: PathBuf) -> Self {
+        configure_cyrillic_fonts(&egui_ctx);
+        let (settings, settings_warning) = AppSettings::load(initial_dic_folder);
+        apply_style_settings(&egui_ctx, &settings);
+
+        let document = Self::sample_book_document();
 
         let mut app = Self::from_parts(settings, document);
         app.set_status(
@@ -349,6 +356,55 @@ impl DemagogApp {
             batch: batch_state,
             splitter: splitter::SplitterState::default(),
         }
+    }
+
+    /// Сброс приложения в состояние свежего запуска: пример текста, пустая очередь,
+    /// все состояния на начальные значения.
+    pub(crate) fn reset_app(&mut self, ctx: egui::Context) {
+        self.document = Self::sample_book_document();
+        self.raw_char_count = self.document.raw_text.chars().count();
+        self.processed_char_count = 0;
+        self.active_tab = ActiveTab::RawText;
+        self.report = PipelineReport::default();
+        self.raw_pipeline_output.clear();
+        self.result_state.reset();
+        self.capture_diff_on_run = false;
+        self.last_copied_chunk = None;
+        self.chunk_apply_pending = false;
+        self.is_busy = false;
+        self.progress_ratio = 0.0;
+        self.cancel_flag = None;
+        self.rx = None;
+        self.status_line.clear();
+        self.status_level = StatusLevel::Info;
+        self.last_error = None;
+        self.source_dirty = false;
+        self.diff_filter.clear();
+        self.diff_filter_cache.clear();
+        self.diff_visible.clear();
+        self.diff_cache_valid = false;
+        self.find_open = false;
+        self.find_query.clear();
+        self.find_matches = FindMatches::default();
+        self.find_for_tab = None;
+        self.find_dirty = true;
+        self.find_last_edit = Instant::now();
+        self.find_current = 0;
+        self.find_go_to = None;
+        self.focus_find = false;
+        self.dic_search_filter.clear();
+        self.splitter = splitter::SplitterState::default();
+        self.batch = batch::BatchState::default();
+        self.dictionaries.clear();
+        self.dic_load_errors.clear();
+        self.check_report = None;
+        self.show_check_window = false;
+        self.processing_snapshot = None;
+        self.set_status(
+            StatusLevel::Info,
+            "Загрузка и компиляция словарей на всех ядрах CPU...",
+        );
+        self.reload_dictionaries_async(ctx);
     }
 
     fn reload_dictionaries_async(&mut self, ctx: egui::Context) {
@@ -994,6 +1050,66 @@ impl DemagogApp {
                                         StatusLevel::Warning,
                                         "Пакетная обработка отменена".to_string(),
                                     ));
+                                    finished = true;
+                                }
+                            },
+                            WorkerMessage::BookSplit(progress) => match progress {
+                                BatchSplitProgress::FileStarted { index, total, name } => {
+                                    if let Some(status) =
+                                        self.splitter.batch_queue.statuses.get_mut(index)
+                                    {
+                                        *status = BatchSplitStatus::Running;
+                                    }
+                                    self.progress_ratio = index as f32 / total.max(1) as f32;
+                                    pending_status = Some((
+                                        StatusLevel::Info,
+                                        format!("Нарезка [{}/{}]: {}...", index + 1, total, name),
+                                    ));
+                                }
+                                BatchSplitProgress::FileFinished { index, outcome } => {
+                                    if let Some(status) =
+                                        self.splitter.batch_queue.statuses.get_mut(index)
+                                    {
+                                        *status = match outcome {
+                                            Ok(parts) => BatchSplitStatus::Done(parts),
+                                            Err(error) => BatchSplitStatus::Failed(error),
+                                        };
+                                    }
+                                    let total = self.splitter.batch_queue.statuses.len().max(1);
+                                    self.progress_ratio = (index + 1) as f32 / total as f32;
+                                }
+                                BatchSplitProgress::Completed {
+                                    succeeded,
+                                    failed,
+                                    cancelled,
+                                } => {
+                                    self.splitter.batch_queue.running = false;
+                                    for status in &mut self.splitter.batch_queue.statuses {
+                                        if matches!(status, BatchSplitStatus::Running) {
+                                            *status = BatchSplitStatus::Queued;
+                                        }
+                                    }
+                                    self.splitter.batch_queue.summary = Some(BatchSplitSummary {
+                                        succeeded,
+                                        failed,
+                                        cancelled,
+                                    });
+                                    self.cancel_flag = None;
+                                    self.is_busy = false;
+                                    self.progress_ratio = 1.0;
+                                    let level = if failed > 0 {
+                                        StatusLevel::Warning
+                                    } else {
+                                        StatusLevel::Success
+                                    };
+                                    let text = if cancelled {
+                                        format!("Отменено: нарезано {succeeded}, ошибок {failed}")
+                                    } else {
+                                        format!(
+                                            "Пакетный книгорез: {succeeded} частей, ошибок {failed}"
+                                        )
+                                    };
+                                    pending_status = Some((level, text));
                                     finished = true;
                                 }
                             },

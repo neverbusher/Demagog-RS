@@ -1,355 +1,37 @@
-use std::collections::HashSet;
-use std::path::PathBuf;
+//! Книгорез: нарезка книги на TXT-части.
+//!
+//! Модуль разделён по ответственности:
+//! * [`split`] — чистая нарезка текста (без ввода-вывода);
+//! * [`naming`] — именование и санитизация файлов частей;
+//! * [`export`] — запись частей на диск;
+//! * [`batch`] — оркестрация пакетной нарезки и прогресс.
+//!
+//! Публичный API ре-экспортируется здесь, чтобы вызывающий код
+//! обращался к `book_splitter::…` независимо от внутренней раскладки.
 
+mod batch;
+mod export;
+mod naming;
+mod split;
+
+pub use batch::{BatchSplitProgress, BatchSplitSummary, run_split_batch};
+pub use export::export_parts;
+pub use naming::{part_file_name, sanitize_file_name};
+pub use split::{BookPart, split_book, validate_config};
+
+// Вариант экспорта с общим `used`, используемый тестами.
+#[cfg(test)]
+pub use export::export_parts_into;
+
+// Импорты ниже нужны только тестам (они делают `use super::*`).
+#[cfg(test)]
 use crate::domain::{BookHeading, SplitConfig};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BookPart {
-    pub title: Option<String>,
-    pub text: String,
-}
-
-struct Boundary {
-    offset: usize,
-    title: Option<String>,
-    rank: u8,
-}
-
-pub fn validate_config(config: &SplitConfig) -> Result<(), String> {
-    if !(config.by_size
-        || config.by_keywords
-        || config.by_blank_lines
-        || config.by_all_caps
-        || config.by_toc)
-    {
-        return Err("Включите хотя бы один способ деления".to_string());
-    }
-    if config.by_keywords && parse_keywords(&config.keywords).is_empty() {
-        return Err("Введите одно или несколько ключевых слов для поиска".to_string());
-    }
-    Ok(())
-}
-
-pub fn split_book(text: &str, headings: &[BookHeading], config: &SplitConfig) -> Vec<BookPart> {
-    if text.trim().is_empty() {
-        return Vec::new();
-    }
-    let boundaries = collect_boundaries(text, headings, config);
-    let parts = form_parts(text, &boundaries, config);
-    if config.by_size {
-        apply_size_cap(parts, config.max_chars)
-    } else {
-        parts
-    }
-}
-
-pub fn part_file_name(
-    config: &SplitConfig,
-    part: &BookPart,
-    index: usize,
-    total: usize,
-    source_name: &str,
-) -> String {
-    let number = config.start_number + index;
-    let width = (config.start_number + total.saturating_sub(1))
-        .to_string()
-        .len()
-        .max(2);
-    let padded = format!("{number:0width$}");
-    let first_line: String = part
-        .text
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("")
-        .chars()
-        .take(60)
-        .collect();
-    let header = part.title.as_deref().unwrap_or(&first_line);
-    let template = if config.template.trim().is_empty() {
-        SplitConfig::default().template
-    } else {
-        config.template.clone()
-    };
-    let mut name = template
-        .replace("%Number%", &padded)
-        .replace("%FileName%", source_name)
-        .replace("%FirstLine%", &first_line)
-        .replace("%Header%", header);
-    if config.add_number && !template.contains("%Number%") {
-        name.push_str(&format!(" {padded}"));
-    }
-    sanitize_file_name(&name)
-}
-
-pub fn sanitize_file_name(name: &str) -> String {
-    let mut out = String::new();
-    let mut last_space = false;
-    for c in name.chars() {
-        let c = if matches!(c, '/' | '\\' | '?' | '*' | ':' | '"' | '<' | '>' | '|')
-            || c.is_control()
-        {
-            '_'
-        } else {
-            c
-        };
-        if c.is_whitespace() {
-            if !last_space && !out.is_empty() {
-                out.push(' ');
-            }
-            last_space = true;
-        } else {
-            out.push(c);
-            last_space = false;
-        }
-    }
-    let trimmed = out.trim().trim_end_matches(['.', ' ']);
-    let capped: String = trimmed.chars().take(120).collect();
-    let capped = capped.trim_end_matches(['.', ' ']).to_string();
-    if capped.is_empty() {
-        "часть".to_string()
-    } else {
-        capped
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct ExportSummary {
-    pub saved: usize,
-    pub dir: PathBuf,
-    pub errors: Vec<String>,
-}
-
-pub fn export_parts(
-    parts: &[BookPart],
-    config: &SplitConfig,
-    source_name: &str,
-) -> Result<ExportSummary, String> {
-    let base = config
-        .output_dir
-        .as_ref()
-        .ok_or("Не выбрана папка назначения")?;
-    let dir = if config.subfolder {
-        base.join(sanitize_file_name(source_name))
-    } else {
-        base.clone()
-    };
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("Не удалось создать папку {}: {e}", dir.display()))?;
-    let mut used: HashSet<String> = HashSet::new();
-    let mut summary = ExportSummary {
-        dir: dir.clone(),
-        ..Default::default()
-    };
-    for (index, part) in parts.iter().enumerate() {
-        let name = part_file_name(config, part, index, parts.len(), source_name);
-        let target = crate::services::batch::unique_target(
-            &dir,
-            &format!("{name}.txt"),
-            config.overwrite,
-            &used,
-        );
-        used.insert(crate::services::batch::target_key(&target));
-        match std::fs::write(&target, &part.text) {
-            Ok(()) => summary.saved += 1,
-            Err(e) => summary.errors.push(format!("{}: {e}", target.display())),
-        }
-    }
-    Ok(summary)
-}
-
-fn parse_keywords(raw: &str) -> Vec<String> {
-    raw.split(',')
-        .map(|k| k.trim().to_lowercase())
-        .filter(|k| !k.is_empty())
-        .collect()
-}
-
-fn is_all_caps(line: &str) -> bool {
-    let mut has_cased = false;
-    for c in line.chars() {
-        if c.is_lowercase() {
-            return false;
-        }
-        if c.is_uppercase() {
-            has_cased = true;
-        }
-    }
-    has_cased
-}
-
-fn collect_boundaries(text: &str, headings: &[BookHeading], config: &SplitConfig) -> Vec<Boundary> {
-    let mut boundaries: Vec<Boundary> = Vec::new();
-    let keywords = parse_keywords(&config.keywords);
-    let mut blank_run = 0usize;
-    let mut offset = 0usize;
-    for line in text.split_inclusive('\n') {
-        let line_body = line.trim_end_matches(['\n', '\r']);
-        let trimmed = line_body.trim();
-        if trimmed.is_empty() {
-            blank_run += 1;
-        } else {
-            let line_start = offset + (line_body.len() - line_body.trim_start().len());
-            if config.by_blank_lines && blank_run >= 2 {
-                boundaries.push(Boundary {
-                    offset: line_start,
-                    title: None,
-                    rank: 0,
-                });
-            }
-            let lower = trimmed.to_lowercase();
-            if config.by_keywords && keywords.iter().any(|k| lower.starts_with(k.as_str())) {
-                boundaries.push(Boundary {
-                    offset: line_start,
-                    title: Some(trimmed.to_string()),
-                    rank: 1,
-                });
-            }
-            if config.by_all_caps && is_all_caps(trimmed) {
-                boundaries.push(Boundary {
-                    offset: line_start,
-                    title: Some(trimmed.to_string()),
-                    rank: 1,
-                });
-            }
-            blank_run = 0;
-        }
-        offset += line.len();
-    }
-    if config.by_toc {
-        for heading in headings {
-            if heading.offset <= text.len() && text.is_char_boundary(heading.offset) {
-                boundaries.push(Boundary {
-                    offset: heading.offset,
-                    title: Some(heading.title.clone()),
-                    rank: 2,
-                });
-            }
-        }
-    }
-    boundaries.sort_by(|a, b| a.offset.cmp(&b.offset).then(b.rank.cmp(&a.rank)));
-    boundaries.dedup_by_key(|b| b.offset);
-    boundaries
-}
-
-fn part_text(piece: &str, strip_heading: bool) -> &str {
-    let trimmed = piece.trim();
-    if strip_heading {
-        trimmed
-            .split_once('\n')
-            .map(|(_, rest)| rest.trim())
-            .unwrap_or("")
-    } else {
-        trimmed
-    }
-}
-
-fn form_parts(text: &str, boundaries: &[Boundary], config: &SplitConfig) -> Vec<BookPart> {
-    let mut parts: Vec<BookPart> = Vec::new();
-    let mut start = 0usize;
-    let mut current_title: Option<String> = None;
-    let mut strip_heading = false;
-    for boundary in boundaries {
-        if boundary.offset == 0 {
-            current_title = boundary.title.clone();
-            strip_heading = boundary.title.is_some();
-            continue;
-        }
-        if boundary.offset <= start {
-            continue;
-        }
-        let candidate = part_text(
-            &text[start..boundary.offset],
-            strip_heading && config.remove_heading,
-        );
-        if config.min_chars > 0 && candidate.chars().count() < config.min_chars {
-            continue;
-        }
-        if !candidate.is_empty() {
-            parts.push(BookPart {
-                title: current_title.take(),
-                text: candidate.to_string(),
-            });
-        }
-        start = boundary.offset;
-        current_title = boundary.title.clone();
-        strip_heading = boundary.title.is_some();
-    }
-    let tail = part_text(&text[start..], strip_heading && config.remove_heading);
-    if !tail.is_empty() {
-        parts.push(BookPart {
-            title: current_title,
-            text: tail.to_string(),
-        });
-    }
-    parts
-}
-
-fn apply_size_cap(parts: Vec<BookPart>, max_chars: usize) -> Vec<BookPart> {
-    let max_chars = max_chars.max(1);
-    let mut out = Vec::new();
-    for part in parts {
-        if part.text.chars().count() <= max_chars {
-            out.push(part);
-            continue;
-        }
-        for (index, sub) in split_text_by_size(&part.text, max_chars)
-            .into_iter()
-            .enumerate()
-        {
-            out.push(BookPart {
-                title: if index == 0 { part.title.clone() } else { None },
-                text: sub,
-            });
-        }
-    }
-    out
-}
-
-fn split_text_by_size(text: &str, max_chars: usize) -> Vec<String> {
-    use crate::services::chunker::{split_into_sentences, split_long_sentence};
-    let mut chunks: Vec<String> = Vec::new();
-    let mut current = String::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line.chars().count() > max_chars {
-            if !current.is_empty() {
-                chunks.push(std::mem::take(&mut current));
-            }
-            for sentence in split_into_sentences(line) {
-                if sentence.chars().count() > max_chars {
-                    if !current.is_empty() {
-                        chunks.push(std::mem::take(&mut current));
-                    }
-                    chunks.extend(split_long_sentence(&sentence, max_chars));
-                } else {
-                    push_line(&mut chunks, &mut current, &sentence, max_chars);
-                }
-            }
-            continue;
-        }
-        push_line(&mut chunks, &mut current, line, max_chars);
-    }
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-    chunks
-}
-
-fn push_line(chunks: &mut Vec<String>, current: &mut String, line: &str, max_chars: usize) {
-    let sep = if current.is_empty() { 0 } else { 1 };
-    if !current.is_empty() && current.chars().count() + sep + line.chars().count() > max_chars {
-        chunks.push(std::mem::take(current));
-    }
-    if !current.is_empty() {
-        current.push('\n');
-    }
-    current.push_str(line);
-}
-
+#[cfg(test)]
+use crate::services::batch::BatchInput;
+#[cfg(test)]
+use std::collections::HashSet;
+#[cfg(test)]
+use std::path::PathBuf;
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -551,6 +233,18 @@ mod tests {
         for part in &parts {
             assert!(part.text.chars().count() <= 1_000);
         }
+    }
+
+    #[test]
+    fn size_cap_preserves_blank_lines() {
+        let config = SplitConfig {
+            by_size: true,
+            max_chars: 30,
+            ..cfg()
+        };
+        let text = "Абзац один.\n\nАбзац два.\n\nАбзац три.";
+        let parts = split_book(&text, &[], &config);
+        assert!(parts[0].text.contains("\n\n"));
     }
 
     #[test]
@@ -876,5 +570,190 @@ mod tests {
         }];
         assert!(export_parts(&parts, &config, "book").is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn split_batch_options(output_dir: PathBuf) -> SplitConfig {
+        SplitConfig {
+            by_keywords: true,
+            keywords: "Глава".to_string(),
+            template: "%FirstLine%".to_string(),
+            add_number: false,
+            output_dir: Some(output_dir),
+            ..Default::default()
+        }
+    }
+
+    fn write_book(dir: &std::path::Path, name: &str, text: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, text).expect("write book");
+        path
+    }
+
+    fn flat(paths: &[PathBuf]) -> Vec<BatchInput> {
+        paths
+            .iter()
+            .map(|path| BatchInput {
+                path: path.clone(),
+                base_dir: path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new(""))
+                    .to_path_buf(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn export_parts_into_shares_used_across_calls() {
+        let dir = temp_dir("sharedused");
+        let config = SplitConfig {
+            output_dir: Some(dir.clone()),
+            template: "%FirstLine%".to_string(),
+            add_number: false,
+            ..cfg()
+        };
+        let part = BookPart {
+            title: None,
+            text: "Одинаково.".to_string(),
+        };
+        let mut used = HashSet::new();
+        export_parts_into(&[part.clone()], &config, "book", &mut used).expect("first export");
+        let summary =
+            export_parts_into(&[part], &config, "book", &mut used).expect("second export");
+        assert_eq!(summary.saved, 1);
+        assert!(dir.join("Одинаково.txt").exists());
+        assert!(dir.join("Одинаково (2).txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_split_batch_exports_parts_per_book() {
+        use crate::io::book_reader::CompositeBookReader;
+        use std::sync::mpsc;
+
+        let root = temp_dir("splitbatch");
+        let input = root.join("in");
+        std::fs::create_dir_all(&input).expect("create input dir");
+        let book1 = write_book(&input, "book1.txt", "Глава 1\n\nТекст первый.");
+        let book2 = write_book(&input, "book2.txt", "Глава 2\n\nТекст второй.");
+        let out = root.join("out");
+
+        let (tx, rx) = mpsc::channel();
+        let summary = run_split_batch(
+            &flat(&[book1, book2]),
+            &CompositeBookReader::new(),
+            &split_batch_options(out.clone()),
+            None,
+            Some(&tx),
+        );
+        drop(tx);
+
+        assert_eq!(
+            summary,
+            BatchSplitSummary {
+                succeeded: 2,
+                failed: 0,
+                cancelled: false
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(out.join("book1").join("Глава 1.txt")).unwrap(),
+            "Глава 1\n\nТекст первый."
+        );
+        assert_eq!(
+            std::fs::read_to_string(out.join("book2").join("Глава 2.txt")).unwrap(),
+            "Глава 2\n\nТекст второй."
+        );
+
+        let messages: Vec<BatchSplitProgress> = rx.iter().collect();
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| matches!(m, BatchSplitProgress::FileStarted { .. }))
+                .count(),
+            2
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| matches!(m, BatchSplitProgress::FileFinished { outcome: Ok(1), .. }))
+        );
+        assert!(matches!(
+            messages.last(),
+            Some(BatchSplitProgress::Completed {
+                succeeded: 2,
+                failed: 0,
+                cancelled: false
+            })
+        ));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn run_split_batch_continues_after_error() {
+        use crate::io::book_reader::CompositeBookReader;
+
+        let root = temp_dir("splitcontinue");
+        let input = root.join("in");
+        std::fs::create_dir_all(&input).expect("create input dir");
+        let alpha = write_book(&input, "alpha.txt", "Глава 1\n\nТекст первый.");
+        let missing = input.join("missing.txt");
+        let beta = write_book(&input, "beta.txt", "Глава 2\n\nТекст второй.");
+        let out = root.join("out");
+
+        let summary = run_split_batch(
+            &flat(&[alpha, missing, beta]),
+            &CompositeBookReader::new(),
+            &split_batch_options(out.clone()),
+            None,
+            None,
+        );
+
+        assert_eq!(
+            summary,
+            BatchSplitSummary {
+                succeeded: 2,
+                failed: 1,
+                cancelled: false
+            }
+        );
+        assert!(out.join("alpha").join("Глава 1.txt").exists());
+        assert!(out.join("beta").join("Глава 2.txt").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn run_split_batch_fails_when_target_files_exist_with_overwrite_on() {
+        use crate::io::book_reader::CompositeBookReader;
+
+        let root = temp_dir("splitblock");
+        let input = root.join("in");
+        std::fs::create_dir_all(&input).expect("create input dir");
+        let book = write_book(&input, "book.txt", "Глава 1\n\nТекст.");
+        let out = root.join("out");
+        let existing = out.join("book").join("Глава 1.txt");
+        std::fs::create_dir_all(existing.parent().unwrap()).unwrap();
+        std::fs::write(&existing, "старое").unwrap();
+
+        let summary = run_split_batch(
+            &flat(&[book]),
+            &CompositeBookReader::new(),
+            &split_batch_options(out.clone()),
+            None,
+            None,
+        );
+
+        assert_eq!(
+            summary,
+            BatchSplitSummary {
+                succeeded: 0,
+                failed: 1,
+                cancelled: false
+            }
+        );
+        assert_eq!(std::fs::read_to_string(&existing).unwrap(), "старое");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
