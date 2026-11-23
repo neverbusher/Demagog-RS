@@ -71,7 +71,7 @@ impl DemagogApp {
                         .on_hover_text("Обработать исходный текст (Ctrl+Enter)")
                         .on_disabled_hover_text(run_disabled_hint);
                     if run_response.clicked() {
-                        self.capture_diff_on_run = false;
+                        self.processing.capture_diff_on_run = false;
                         self.start_processing(ctx.clone(), false);
                     }
 
@@ -81,7 +81,7 @@ impl DemagogApp {
                         .on_disabled_hover_text(run_disabled_hint)
                         .clicked()
                     {
-                        self.capture_diff_on_run = true;
+                        self.processing.capture_diff_on_run = true;
                         self.start_processing(ctx.clone(), true);
                     }
 
@@ -121,7 +121,7 @@ impl DemagogApp {
                     ui.separator();
                     if ui
                         .add_enabled(
-                            !self.document.processed_text.is_empty() && !self.worker.is_busy,
+                            !self.editor.document.processed_text.is_empty() && !self.worker.is_busy,
                             egui::Button::new("💾 Сохранить результат"),
                         )
                         .on_hover_text("Сохранить результат в TXT (Ctrl+S)")
@@ -130,8 +130,8 @@ impl DemagogApp {
                     {
                         self.save_processed_txt();
                     }
-                    let can_export =
-                        !self.document.processed_text.trim().is_empty() && !self.worker.is_busy;
+                    let can_export = !self.editor.document.processed_text.trim().is_empty()
+                        && !self.worker.is_busy;
                     if ui
                         .add_enabled(can_export, egui::Button::new("📦 Экспорт чанков"))
                         .on_hover_text("Экспортировать чанки в JSON (Ctrl+E)")
@@ -216,7 +216,7 @@ impl DemagogApp {
                         .on_hover_text("Обработать исходный текст (Ctrl+Enter)")
                         .on_disabled_hover_text(run_disabled_hint);
                     if run_response.clicked() {
-                        self.capture_diff_on_run = false;
+                        self.processing.capture_diff_on_run = false;
                         self.start_processing(ctx.clone(), false);
                     }
 
@@ -235,7 +235,7 @@ impl DemagogApp {
                             .on_disabled_hover_text(run_disabled_hint)
                             .clicked()
                         {
-                            self.capture_diff_on_run = true;
+                            self.processing.capture_diff_on_run = true;
                             self.start_processing(ctx.clone(), true);
                             ui.close();
                         }
@@ -261,7 +261,8 @@ impl DemagogApp {
                         ui.separator();
                         if ui
                             .add_enabled(
-                                !self.document.processed_text.is_empty() && !self.worker.is_busy,
+                                !self.editor.document.processed_text.is_empty()
+                                    && !self.worker.is_busy,
                                 egui::Button::new("Сохранить результат"),
                             )
                             .on_disabled_hover_text("Сначала обработайте текст")
@@ -272,7 +273,7 @@ impl DemagogApp {
                         }
                         if ui
                             .add_enabled(
-                                !self.document.processed_text.trim().is_empty()
+                                !self.editor.document.processed_text.trim().is_empty()
                                     && !self.worker.is_busy,
                                 egui::Button::new("Экспорт чанков"),
                             )
@@ -639,17 +640,23 @@ impl DemagogApp {
                 ui.selectable_value(
                     &mut self.view.active_tab,
                     ActiveTab::RawText,
-                    format!("📝 Исходный текст ({})", format_num(self.raw_char_count)),
+                    format!(
+                        "📝 Исходный текст ({})",
+                        format_num(self.editor.raw_char_count)
+                    ),
                 );
                 ui.selectable_value(
                     &mut self.view.active_tab,
                     ActiveTab::ProcessedText,
-                    format!("✅ Результат ({})", format_num(self.processed_char_count)),
+                    format!(
+                        "✅ Результат ({})",
+                        format_num(self.editor.processed_char_count)
+                    ),
                 );
                 ui.selectable_value(
                     &mut self.view.active_tab,
                     ActiveTab::Chunks,
-                    format!("✂ Чанки ({})", self.document.chunks.len()),
+                    format!("✂ Чанки ({})", self.editor.document.chunks.len()),
                 );
                 ui.selectable_value(
                     &mut self.view.active_tab,
@@ -661,7 +668,7 @@ impl DemagogApp {
                     ActiveTab::DiffAndStats,
                     format!(
                         "🔬 Журнал замен ({})",
-                        format_num(self.report.total_replacements)
+                        format_num(self.processing.report.total_replacements)
                     ),
                 );
                 ui.selectable_value(
@@ -693,7 +700,7 @@ impl DemagogApp {
     fn show_raw_text_tab(&mut self, ui: &mut egui::Ui) {
         let editor_font = FontId::new(self.settings.editor_font_size, FontFamily::Monospace);
         let line_height = editor_line_height(self.settings.editor_font_size);
-        ui.add(egui::Label::new(RichText::new(&self.document.title).strong()).truncate());
+        ui.add(egui::Label::new(RichText::new(&self.editor.document.title).strong()).truncate());
         ui.horizontal_wrapped(|ui| {
                         let can_mutate = text_mutations_enabled(self.worker.is_busy);
                         let save_source = ui
@@ -720,12 +727,12 @@ impl DemagogApp {
                                             "Заменить исходный текст содержимым буфера?\nНесохранённые изменения будут потеряны.",
                                         )
                                     {
-                                        self.document.raw_text = txt;
-                                        self.document.headings.clear();
-                                        self.document.title = "Из буфера обмена".to_string();
-                                        self.document.source_path = None;
+                                        self.editor.document.raw_text = txt;
+                                        self.editor.document.headings.clear();
+                                        self.editor.document.title = "Из буфера обмена".to_string();
+                                        self.editor.document.source_path = None;
                                         self.refresh_raw_char_count();
-                                        self.source_dirty = true;
+                                        self.editor.source_dirty = true;
                                         self.splitter.stale = true;
                                         self.mark_result_stale();
                                         self.search.find_dirty = true;
@@ -747,20 +754,20 @@ impl DemagogApp {
                             .add_enabled(can_mutate, egui::Button::new("🗑 Очистить"))
                             .on_disabled_hover_text("Дождитесь завершения обработки");
                         if clear.clicked() {
-                            let had_text = text_would_be_lost(&self.document.raw_text);
+                            let had_text = text_would_be_lost(&self.editor.document.raw_text);
                             let needs_confirm =
-                                self.source_dirty || self.document.source_path.is_some();
+                                self.editor.source_dirty || self.editor.document.source_path.is_some();
                             if !had_text
                                 || !needs_confirm
                                 || confirm_destructive(
                                     "Очистить исходный текст?\nНесохранённые изменения будут потеряны.",
                                 )
                             {
-                                self.document.raw_text.clear();
-                                self.document.headings.clear();
-                                self.raw_char_count = 0;
-                                self.document.source_path = None;
-                                self.source_dirty = false;
+                                self.editor.document.raw_text.clear();
+                                self.editor.document.headings.clear();
+                                self.editor.raw_char_count = 0;
+                                self.editor.document.source_path = None;
+                                self.editor.source_dirty = false;
                                 self.mark_result_stale();
                                 self.search.find_dirty = true;
                                 self.search.find_last_edit = Instant::now();
@@ -791,7 +798,7 @@ impl DemagogApp {
         ScrollArea::vertical().show(ui, |ui| {
             let output = ui
                 .add_enabled_ui(text_mutations_enabled(self.worker.is_busy), |ui| {
-                    egui::TextEdit::multiline(&mut self.document.raw_text)
+                    egui::TextEdit::multiline(&mut self.editor.document.raw_text)
                         .desired_width(f32::INFINITY)
                         .desired_rows(28)
                         .margin(egui::Margin::symmetric(14, 12))
@@ -800,8 +807,8 @@ impl DemagogApp {
                 })
                 .inner;
             if output.response.changed() {
-                self.document.headings.clear();
-                self.source_dirty = true;
+                self.editor.document.headings.clear();
+                self.editor.source_dirty = true;
                 self.splitter.stale = true;
                 self.refresh_raw_char_count();
                 self.mark_result_stale();
@@ -816,7 +823,7 @@ impl DemagogApp {
         let editor_font = FontId::new(self.settings.editor_font_size, FontFamily::Monospace);
         let line_height = editor_line_height(self.settings.editor_font_size);
         ui.horizontal_wrapped(|ui| {
-                        let has_result = !self.document.processed_text.is_empty();
+                        let has_result = !self.editor.document.processed_text.is_empty();
                         if ui
                             .add_enabled(
                                 has_result,
@@ -824,7 +831,7 @@ impl DemagogApp {
                             )
                             .clicked()
                         {
-                            let text = self.document.processed_text.clone();
+                            let text = self.editor.document.processed_text.clone();
                             self.copy_to_clipboard(
                                 &text,
                                 "Весь обработанный текст скопирован в буфер обмена!".to_string(),
@@ -842,17 +849,17 @@ impl DemagogApp {
                             .on_disabled_hover_text("Дождитесь завершения обработки")
                             .clicked()
                         {
-                            let had_text = text_would_be_lost(&self.document.raw_text);
+                            let had_text = text_would_be_lost(&self.editor.document.raw_text);
                             if !had_text
                                 || confirm_destructive(
                                     "Заменить исходный текст результатом?\nТекущий исходный текст будет потерян.",
                                 )
                             {
-                                self.document.raw_text = self.document.processed_text.clone();
-                                self.document.headings.clear();
-                                self.raw_char_count = self.processed_char_count;
-                                self.raw_pipeline_output.clear();
-                                self.source_dirty = true;
+                                self.editor.document.raw_text = self.editor.document.processed_text.clone();
+                                self.editor.document.headings.clear();
+                                self.editor.raw_char_count = self.editor.processed_char_count;
+                                self.editor.raw_pipeline_output.clear();
+                                self.editor.source_dirty = true;
                                 self.splitter.stale = true;
                                 self.mark_result_stale();
                                 self.search.find_dirty = true;
@@ -861,7 +868,7 @@ impl DemagogApp {
                         }
                     });
         self.show_stale_banner(ui, theme);
-        if self.document.processed_text.is_empty() {
+        if self.editor.document.processed_text.is_empty() {
             ui.label(
                             RichText::new(
                                 "Результат появится после обработки. Если не знаете, что выбрать, начните с пресета «Все (полный +)» в меню «Пресеты».",
@@ -894,7 +901,7 @@ impl DemagogApp {
         ScrollArea::vertical().show(ui, |ui| {
             let output = ui
                 .add_enabled_ui(text_mutations_enabled(self.worker.is_busy), |ui| {
-                    egui::TextEdit::multiline(&mut self.document.processed_text)
+                    egui::TextEdit::multiline(&mut self.editor.document.processed_text)
                         .desired_width(f32::INFINITY)
                         .desired_rows(28)
                         .margin(egui::Margin::symmetric(14, 12))
@@ -903,8 +910,8 @@ impl DemagogApp {
                 })
                 .inner;
             if output.response.changed() {
-                self.result_state.mark_edited();
-                if self.document.processed_text.trim().is_empty() {
+                self.editor.result_state.mark_edited();
+                if self.editor.document.processed_text.trim().is_empty() {
                     self.rechunk_result();
                 }
                 self.refresh_processed_char_count();
@@ -943,7 +950,7 @@ impl DemagogApp {
             }
         });
         self.show_stale_banner(ui, theme);
-        if self.result_state.is_chunks_stale() {
+        if self.editor.result_state.is_chunks_stale() {
             ui.horizontal_wrapped(|ui| {
                             ui.label(
                                 RichText::new(
@@ -960,11 +967,11 @@ impl DemagogApp {
         }
         ui.separator();
 
-        let chunk_total = self.document.chunks.len();
+        let chunk_total = self.editor.document.chunks.len();
         let text_width = (ui.available_width() - 44.0).max(120.0);
         let chars_per_line = (text_width / (editor_font.size * 0.65)).max(8.0);
         let estimated_lines = estimated_chunk_lines(
-            &self.document.chunks,
+            &self.editor.document.chunks,
             self.settings.chunk_config.max_chars,
             chars_per_line,
         );
@@ -983,7 +990,7 @@ impl DemagogApp {
                 chunk_total,
                 |ui, rows| {
                     for idx in rows {
-                        let chunk = &self.document.chunks[idx];
+                        let chunk = &self.editor.document.chunks[idx];
                         let is_copied = self.view.last_copied_chunk == Some(idx);
                         let mut frame = egui::Frame::group(ui.style());
                         if is_copied {
@@ -1058,17 +1065,19 @@ impl DemagogApp {
             ui.label(
                 RichText::new(format!(
                     "Общее время: {} мс | Всего срабатываний: {}",
-                    self.report.total_ms,
-                    format_num(self.report.total_replacements)
+                    self.processing.report.total_ms,
+                    format_num(self.processing.report.total_replacements)
                 ))
                 .strong(),
             );
-            if self.report.cleanup.removed_empty_lines > 0 || self.report.cleanup.added_periods > 0
+            if self.processing.report.cleanup.removed_empty_lines > 0
+                || self.processing.report.cleanup.added_periods > 0
             {
                 ui.label(
                     RichText::new(format!(
                         "🧹 Нормализация: -{} строк, +{} точек",
-                        self.report.cleanup.removed_empty_lines, self.report.cleanup.added_periods
+                        self.processing.report.cleanup.removed_empty_lines,
+                        self.processing.report.cleanup.added_periods
                     ))
                     .strong(),
                 );
@@ -1105,7 +1114,7 @@ impl DemagogApp {
                                 ui.label(RichText::new("Замен").strong());
                                 ui.end_row();
 
-                                for s in &self.report.steps {
+                                for s in &self.processing.report.steps {
                                     ui.label(&s.dictionary_name);
                                     ui.label(s.kind.badge());
                                     ui.label(format_num(s.rule_count));
@@ -1119,14 +1128,14 @@ impl DemagogApp {
 
         ui.add_space(14.0);
         ui.heading("🔍 Журнал сработавших правил");
-        if self.report.events_truncated {
+        if self.processing.report.events_truncated {
             ui.label(
                 RichText::new("Журнал обрезан: показаны первые ~500 событий, полный счётчик замен — в таблице выше.")
                     .color(palette::warning_text(theme))
                     .small(),
             );
         }
-        if self.report.events.is_empty() {
+        if self.processing.report.events.is_empty() {
             ui.label("Для записи детальных примеров каждого сработавшего правила нажмите кнопку «🔬 С журналом замен» на верхней панели.");
         } else if self.diff.diff_visible.is_empty() {
             ui.label("Ничего не найдено по фильтру замен.");
@@ -1144,7 +1153,7 @@ impl DemagogApp {
                         .striped(true)
                         .show(ui, |ui| {
                             for &event_index in &self.diff.diff_visible[rows.clone()] {
-                                let ev = &self.report.events[event_index];
+                                let ev = &self.processing.report.events[event_index];
                                 ui.label(&ev.dictionary_name);
                                 ui.add(
                                     egui::Label::new(RichText::new(&ev.rule_summary).monospace())

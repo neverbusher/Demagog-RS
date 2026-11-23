@@ -190,6 +190,55 @@ fn reset_clears_flags_but_keeps_format() {
 }
 
 #[test]
+fn editor_state_reset_document_clears_transient_state() {
+    let document = BookDocument {
+        title: "Старая книга".to_string(),
+        source_path: Some(PathBuf::from("old.fb2")),
+        raw_text: "Старый".to_string(),
+        processed_text: "Результат".to_string(),
+        chunks: vec!["Старый чанк".to_string()],
+        headings: Vec::new(),
+    };
+    let mut state = EditorState::new(document, StressFormat::PlusBeforeVowel);
+    assert_eq!(state.raw_char_count, 6);
+    assert_eq!(state.processed_char_count, 9);
+    state.raw_pipeline_output = "Вывод конвейера".to_string();
+    state.source_dirty = true;
+    state.chunk_apply_pending = true;
+    state.result_state.mark_computed(StressFormat::CleanYoOnly);
+    state.result_state.mark_edited();
+    state.result_state.mark_stale();
+
+    let replacement = BookDocument {
+        title: "Новая книга".to_string(),
+        source_path: Some(PathBuf::from("new.fb2")),
+        raw_text: "Новый\nтекст".to_string(),
+        processed_text: String::new(),
+        chunks: Vec::new(),
+        headings: Vec::new(),
+    };
+    let raw_char_count = replacement.raw_text.chars().count();
+    state.reset_document(replacement);
+
+    assert_eq!(state.document.title, "Новая книга");
+    assert_eq!(state.document.source_path, Some(PathBuf::from("new.fb2")));
+    assert_eq!(state.document.raw_text, "Новый\nтекст");
+    assert!(state.document.processed_text.is_empty());
+    assert!(state.document.chunks.is_empty());
+    assert!(state.document.headings.is_empty());
+    assert_eq!(state.raw_char_count, raw_char_count);
+    assert_eq!(state.processed_char_count, 0);
+    assert!(state.raw_pipeline_output.is_empty());
+    assert!(!state.source_dirty);
+    assert!(!state.chunk_apply_pending);
+    assert!(!state.result_state.is_dirty());
+    assert!(!state.result_state.is_stale());
+    assert!(!state.result_state.is_edited());
+    assert!(!state.result_state.is_chunks_stale());
+    assert_eq!(state.result_state.format(), StressFormat::CleanYoOnly);
+}
+
+#[test]
 fn find_matches_is_case_insensitive_and_handles_yo() {
     let text = "Всё всё ВСЁ";
     let found = find_matches(text, "всё");
@@ -431,7 +480,7 @@ fn diff_events_render_only_the_visible_rows() {
 
     let mut app = ui_test_app("", "Результат", Vec::new());
     app.view.active_tab = ActiveTab::DiffAndStats;
-    app.report.events = (0..1000)
+    app.processing.report.events = (0..1000)
         .map(|index| ReplacementEvent {
             dictionary_name: format!("dict-{index}"),
             rule_summary: format!("rule-{index}"),
@@ -439,7 +488,7 @@ fn diff_events_render_only_the_visible_rows() {
             after_snippet: format!("after-{index}"),
         })
         .collect();
-    app.report.steps = vec![StepReport {
+    app.processing.report.steps = vec![StepReport {
         dictionary_name: "dict".to_string(),
         kind: DictionaryKind::DicStandard,
         rule_count: 1,
@@ -469,7 +518,8 @@ fn chunks_render_only_the_visible_rows() {
         .collect::<Vec<_>>();
     let mut app = ui_test_app("", "Результат", chunks);
     app.view.active_tab = ActiveTab::Chunks;
-    app.result_state
+    app.editor
+        .result_state
         .mark_computed(StressFormat::PlusBeforeVowel);
 
     let mut harness = Harness::builder()
@@ -721,8 +771,8 @@ fn journal_shows_truncation_notice() {
 
     let mut app = ui_test_app("", "Результат", Vec::new());
     app.view.active_tab = ActiveTab::DiffAndStats;
-    app.report.events_truncated = true;
-    app.report.events = (0..600)
+    app.processing.report.events_truncated = true;
+    app.processing.report.events = (0..600)
         .map(|i| ReplacementEvent {
             dictionary_name: format!("dict-{i}"),
             rule_summary: format!("rule-{i}"),
@@ -730,7 +780,7 @@ fn journal_shows_truncation_notice() {
             after_snippet: format!("after-{i}"),
         })
         .collect();
-    app.report.steps = vec![StepReport {
+    app.processing.report.steps = vec![StepReport {
         dictionary_name: "dict".to_string(),
         kind: DictionaryKind::DicStandard,
         rule_count: 1,
@@ -758,7 +808,7 @@ fn journal_heading_stays_visible_with_many_steps() {
 
     let mut app = ui_test_app("", "Результат", Vec::new());
     app.view.active_tab = ActiveTab::DiffAndStats;
-    app.report.steps = (0..40)
+    app.processing.report.steps = (0..40)
         .map(|i| StepReport {
             dictionary_name: format!("dict-{i}"),
             kind: DictionaryKind::DicStandard,
@@ -767,7 +817,7 @@ fn journal_heading_stays_visible_with_many_steps() {
             replacements_count: 1,
         })
         .collect();
-    app.report.events = (0..120)
+    app.processing.report.events = (0..120)
         .map(|i| ReplacementEvent {
             dictionary_name: format!("dict-{i}"),
             rule_summary: format!("rule-{i}"),
@@ -838,9 +888,10 @@ fn stale_chunk_banner_rebuilds_chunks_through_the_ui() {
 
     let mut app = ui_test_app("", "Первое предложение.", Vec::new());
     app.view.active_tab = ActiveTab::Chunks;
-    app.result_state
+    app.editor
+        .result_state
         .mark_computed(StressFormat::PlusBeforeVowel);
-    app.result_state.mark_edited();
+    app.editor.result_state.mark_edited();
 
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1280.0, 900.0))
@@ -849,8 +900,8 @@ fn stale_chunk_banner_rebuilds_chunks_through_the_ui() {
     harness.get_by_label_contains("Пересобрать чанки").click();
     harness.run();
 
-    assert!(!harness.state().document.chunks.is_empty());
-    assert!(!harness.state().result_state.is_chunks_stale());
+    assert!(!harness.state().editor.document.chunks.is_empty());
+    assert!(!harness.state().editor.result_state.is_chunks_stale());
 }
 
 #[test]
@@ -1165,7 +1216,8 @@ fn replacing_source_with_result_marks_result_stale() {
 
     let mut app = ui_test_app("", "новый результат", Vec::new());
     app.view.active_tab = ActiveTab::ProcessedText;
-    app.result_state
+    app.editor
+        .result_state
         .mark_computed(StressFormat::PlusBeforeVowel);
 
     let mut harness = Harness::builder()
@@ -1177,9 +1229,9 @@ fn replacing_source_with_result_marks_result_stale() {
         .click();
     harness.run_steps(1);
 
-    assert_eq!(harness.state().document.raw_text, "новый результат");
+    assert_eq!(harness.state().editor.document.raw_text, "новый результат");
     assert!(
-        harness.state().result_state.is_stale(),
+        harness.state().editor.result_state.is_stale(),
         "result derived from the old source must be marked stale after replace"
     );
 }
@@ -1191,7 +1243,8 @@ fn settings_cleanup_checkboxes_toggle_and_mark_result_stale() {
 
     let mut app = ui_test_app("Глава первая", "Глава первая", vec!["Глава первая".into()]);
     app.view.active_tab = ActiveTab::Settings;
-    app.result_state
+    app.editor
+        .result_state
         .mark_computed(StressFormat::PlusBeforeVowel);
 
     let mut harness = Harness::builder()
@@ -1204,7 +1257,7 @@ fn settings_cleanup_checkboxes_toggle_and_mark_result_stale() {
         .click();
     harness.run();
     assert!(harness.state().settings.cleanup.remove_empty_lines);
-    assert!(harness.state().result_state.is_stale());
+    assert!(harness.state().editor.result_state.is_stale());
 
     harness
         .get_by_label_contains("Ставить точку в конце строки")
@@ -1220,7 +1273,7 @@ fn diff_tab_shows_cleanup_stats_when_normalization_changed_text() {
 
     let mut app = ui_test_app("Глава", "Глава.", vec!["Глава.".into()]);
     app.view.active_tab = ActiveTab::DiffAndStats;
-    app.report.cleanup = crate::domain::NormalizationStats {
+    app.processing.report.cleanup = crate::domain::NormalizationStats {
         removed_empty_lines: 2,
         added_periods: 3,
     };
@@ -1621,7 +1674,7 @@ fn knigorez_tab_has_batch_queue_section() {
     use egui_kittest::kittest::{NodeT, Queryable};
 
     let mut app = ui_test_app("Глава 1\nТекст.", "", Vec::new());
-    app.document.source_path = None;
+    app.editor.document.source_path = None;
     app.view.active_tab = ActiveTab::BookCutter;
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1100.0, 800.0))
@@ -1654,7 +1707,7 @@ fn knigorez_batch_cancellation_resets_running_and_renders_service_counts() {
     use std::sync::mpsc;
 
     let mut app = ui_test_app("", "", Vec::new());
-    app.document.source_path = None;
+    app.editor.document.source_path = None;
     app.view.active_tab = ActiveTab::BookCutter;
     app.splitter.batch_queue.add_files([
         std::env::temp_dir().join("demagog-knigorez-cancel-a.txt"),
@@ -1731,7 +1784,7 @@ fn knigorez_batch_completion_uses_service_counts_and_renders_summary() {
     use std::sync::mpsc;
 
     let mut app = ui_test_app("", "", Vec::new());
-    app.document.source_path = None;
+    app.editor.document.source_path = None;
     app.view.active_tab = ActiveTab::BookCutter;
     app.splitter.batch_queue.add_files([
         std::env::temp_dir().join("demagog-knigorez-done-a.txt"),
@@ -1808,9 +1861,9 @@ fn reset_button_returns_app_to_launch_state() {
     harness.get_by_label("🔄 Сброс").click();
     harness.run_steps(2);
     let state = harness.state();
-    assert_eq!(state.document.title, "Пример текста");
-    assert!(state.document.source_path.is_none());
-    assert!(state.document.raw_text.contains("В 1995 году"));
+    assert_eq!(state.editor.document.title, "Пример текста");
+    assert!(state.editor.document.source_path.is_none());
+    assert!(state.editor.document.raw_text.contains("В 1995 году"));
     assert_eq!(state.view.active_tab, ActiveTab::RawText);
     assert!(state.splitter.batch_queue.files.is_empty());
 }
@@ -1835,7 +1888,7 @@ fn knigorez_headings_invalidated_when_source_text_cleared() {
     use egui_kittest::kittest::{NodeT, Queryable};
 
     let mut app = ui_test_app("Глава 1\nТекст главы.", "", Vec::new());
-    app.document.headings = vec![BookHeading {
+    app.editor.document.headings = vec![BookHeading {
         offset: 0,
         title: "Глава 1".to_string(),
     }];
@@ -1846,9 +1899,9 @@ fn knigorez_headings_invalidated_when_source_text_cleared() {
 
     harness.get_by_label("🗑 Очистить").click();
     harness.run_steps(1);
-    assert!(harness.state().document.raw_text.is_empty());
+    assert!(harness.state().editor.document.raw_text.is_empty());
     assert!(
-        harness.state().document.headings.is_empty(),
+        harness.state().editor.document.headings.is_empty(),
         "headings must be invalidated when the source text is cleared"
     );
 
@@ -1859,11 +1912,11 @@ fn knigorez_headings_invalidated_when_source_text_cleared() {
         .type_text("Новый текст без структуры глав");
     harness.run();
     assert_eq!(
-        harness.state().document.raw_text,
+        harness.state().editor.document.raw_text,
         "Новый текст без структуры глав"
     );
     assert!(
-        harness.state().document.headings.is_empty(),
+        harness.state().editor.document.headings.is_empty(),
         "headings must stay invalidated after editing the source text"
     );
 

@@ -1,6 +1,4 @@
 use egui::{self, Color32, FontFamily, FontId, RichText, ScrollArea, TextStyle};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,7 +26,9 @@ mod state;
 mod views;
 mod worker;
 
-use state::{DiffState, SearchState, ViewState};
+#[cfg(test)]
+use state::ResultState;
+use state::{DiffState, EditorState, ProcessingSnapshot, ProcessingState, SearchState, ViewState};
 use worker::{WorkerMessage, WorkerOutcome, classify_worker_result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -49,116 +49,6 @@ enum StatusLevel {
     Success,
     Warning,
     Error,
-}
-
-#[derive(Debug, Clone)]
-struct ResultState {
-    dirty: bool,
-    stale: bool,
-    edited: bool,
-    chunks_stale: bool,
-    format: StressFormat,
-}
-
-impl ResultState {
-    fn new(format: StressFormat) -> Self {
-        Self {
-            dirty: false,
-            stale: false,
-            edited: false,
-            chunks_stale: false,
-            format,
-        }
-    }
-
-    fn reset(&mut self) {
-        self.dirty = false;
-        self.stale = false;
-        self.edited = false;
-        self.chunks_stale = false;
-    }
-
-    fn mark_computed(&mut self, format: StressFormat) {
-        self.dirty = true;
-        self.stale = false;
-        self.edited = false;
-        self.chunks_stale = false;
-        self.format = format;
-    }
-
-    fn mark_reformatted(&mut self, format: StressFormat) {
-        self.dirty = true;
-        self.edited = false;
-        self.format = format;
-    }
-
-    fn mark_edited(&mut self) {
-        self.dirty = true;
-        self.edited = true;
-        self.chunks_stale = true;
-    }
-
-    fn mark_saved(&mut self) {
-        self.dirty = false;
-    }
-
-    fn mark_exported(&mut self) {
-        if !self.edited {
-            self.dirty = false;
-        }
-        self.chunks_stale = false;
-    }
-
-    fn mark_rechunked(&mut self) {
-        self.chunks_stale = false;
-    }
-
-    fn mark_stale(&mut self) {
-        self.stale = true;
-    }
-
-    fn is_dirty(&self) -> bool {
-        self.dirty
-    }
-
-    fn is_stale(&self) -> bool {
-        self.stale
-    }
-
-    fn is_edited(&self) -> bool {
-        self.edited
-    }
-
-    fn is_chunks_stale(&self) -> bool {
-        self.chunks_stale
-    }
-
-    fn format(&self) -> StressFormat {
-        self.format
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ProcessingSnapshot {
-    source_hash: u64,
-}
-
-impl ProcessingSnapshot {
-    fn capture(text: &str) -> Self {
-        Self {
-            source_hash: text_fingerprint(text),
-        }
-    }
-
-    fn source_changed(&self, text: &str) -> bool {
-        self.source_hash != text_fingerprint(text)
-    }
-}
-
-fn text_fingerprint(text: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    text.hash(&mut hasher);
-    hasher.finish()
 }
 
 fn text_mutations_enabled(is_busy: bool) -> bool {
@@ -184,19 +74,11 @@ fn can_export_chunks(text: &str, chunks: &[String]) -> bool {
 pub struct DemagogApp {
     settings: AppSettings,
     dictionaries: Vec<LoadedDictionary>,
-    document: BookDocument,
-    raw_pipeline_output: String,
+    editor: EditorState,
     view: ViewState,
-    report: PipelineReport,
+    processing: ProcessingState,
     worker: worker::WorkerState,
-    processing_snapshot: Option<ProcessingSnapshot>,
-    capture_diff_on_run: bool,
-    source_dirty: bool,
-    result_state: ResultState,
-    chunk_apply_pending: bool,
     search: SearchState,
-    raw_char_count: usize,
-    processed_char_count: usize,
     diff: DiffState,
     batch: batch::BatchState,
     splitter: splitter::SplitterState,
@@ -263,8 +145,7 @@ impl DemagogApp {
 
     fn from_parts(settings: AppSettings, document: BookDocument) -> Self {
         let result_format = settings.stress_format;
-        let raw_char_count = document.raw_text.chars().count();
-        let processed_char_count = document.processed_text.chars().count();
+        let editor = EditorState::new(document, result_format);
         let (restored_items, _) = batch::restore_queue(&settings.batch.queue);
         let batch_state = batch::BatchState {
             open: false,
@@ -280,19 +161,11 @@ impl DemagogApp {
         Self {
             settings,
             dictionaries: Vec::new(),
-            document,
-            raw_pipeline_output: String::new(),
+            editor,
             view: ViewState::default(),
-            report: PipelineReport::default(),
+            processing: ProcessingState::default(),
             worker: worker::WorkerState::default(),
-            processing_snapshot: None,
-            capture_diff_on_run: false,
-            source_dirty: false,
-            result_state: ResultState::new(result_format),
-            chunk_apply_pending: false,
             search: SearchState::default(),
-            raw_char_count,
-            processed_char_count,
             diff: DiffState::default(),
             batch: batch_state,
             splitter: splitter::SplitterState::default(),
@@ -302,23 +175,15 @@ impl DemagogApp {
     /// Сброс приложения в состояние свежего запуска: пример текста, пустая очередь,
     /// все состояния на начальные значения.
     pub(crate) fn reset_app(&mut self, ctx: egui::Context) {
-        self.document = Self::sample_book_document();
-        self.raw_char_count = self.document.raw_text.chars().count();
-        self.processed_char_count = 0;
+        self.editor.reset_document(Self::sample_book_document());
         self.view.reset_document_state();
-        self.report = PipelineReport::default();
-        self.raw_pipeline_output.clear();
-        self.result_state.reset();
-        self.capture_diff_on_run = false;
-        self.chunk_apply_pending = false;
+        self.processing = ProcessingState::default();
         self.worker = worker::WorkerState::default();
-        self.source_dirty = false;
         self.diff.reset();
         self.search.reset();
         self.splitter = splitter::SplitterState::default();
         self.batch = batch::BatchState::default();
         self.dictionaries.clear();
-        self.processing_snapshot = None;
         self.set_status(
             StatusLevel::Info,
             "Загрузка и компиляция словарей на всех ядрах CPU...",
@@ -605,7 +470,7 @@ impl DemagogApp {
             self.set_status(StatusLevel::Warning, "Не выбран ни один словарь!");
             return;
         }
-        if self.result_state.is_edited()
+        if self.editor.result_state.is_edited()
             && !confirm_destructive(
                 "Запустить обработку заново?\nРучные правки в результате будут потеряны.",
             )
@@ -618,15 +483,15 @@ impl DemagogApp {
 
         self.worker.is_busy = true;
         self.worker.progress_ratio = 0.0;
-        self.report = PipelineReport::default();
+        self.processing.report = PipelineReport::default();
         self.reset_long_list_state();
         for d in &mut self.dictionaries {
             d.meta.last_ms = None;
             d.meta.last_replacements = None;
         }
 
-        let input_text = self.document.raw_text.clone();
-        self.processing_snapshot = Some(ProcessingSnapshot::capture(&input_text));
+        let input_text = self.editor.document.raw_text.clone();
+        self.processing.processing_snapshot = Some(ProcessingSnapshot::capture(&input_text));
         let stress_format = self.settings.stress_format;
         let chunk_config = self.settings.chunk_config.clone();
         let cleanup = self.settings.cleanup;
@@ -753,11 +618,11 @@ impl DemagogApp {
             self.open_book_dialog(ctx.clone());
         }
         if !self.worker.is_busy && ctx.input_mut(|i| i.consume_shortcut(&process_diff)) {
-            self.capture_diff_on_run = true;
+            self.processing.capture_diff_on_run = true;
             self.start_processing(ctx.clone(), true);
         }
         if !self.worker.is_busy && ctx.input_mut(|i| i.consume_shortcut(&process)) {
-            self.capture_diff_on_run = false;
+            self.processing.capture_diff_on_run = false;
             self.start_processing(ctx.clone(), false);
         }
         if !self.worker.is_busy && ctx.input_mut(|i| i.consume_shortcut(&save_source)) {
@@ -775,7 +640,7 @@ impl DemagogApp {
             if self.view.active_tab != ActiveTab::RawText
                 && self.view.active_tab != ActiveTab::ProcessedText
             {
-                self.view.active_tab = if self.document.processed_text.is_empty() {
+                self.view.active_tab = if self.editor.document.processed_text.is_empty() {
                     ActiveTab::RawText
                 } else {
                     ActiveTab::ProcessedText
@@ -810,7 +675,10 @@ impl DemagogApp {
     }
 
     fn update_window_title(&mut self, ctx: &egui::Context) {
-        let title = window_title(&self.document.title, self.document.source_path.is_some());
+        let title = window_title(
+            &self.editor.document.title,
+            self.editor.document.source_path.is_some(),
+        );
         if title != self.view.last_window_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.view.last_window_title = title;
@@ -864,11 +732,11 @@ impl DemagogApp {
     }
 
     fn refresh_raw_char_count(&mut self) {
-        self.raw_char_count = self.document.raw_text.chars().count();
+        self.editor.raw_char_count = self.editor.document.raw_text.chars().count();
     }
 
     fn refresh_processed_char_count(&mut self) {
-        self.processed_char_count = self.document.processed_text.chars().count();
+        self.editor.processed_char_count = self.editor.document.processed_text.chars().count();
     }
 
     fn reset_long_list_state(&mut self) {
@@ -878,7 +746,7 @@ impl DemagogApp {
     fn refresh_diff_visible(&mut self) {
         let filter = self.diff.diff_filter.to_lowercase();
         self.diff.diff_visible.clear();
-        for (index, event) in self.report.events.iter().enumerate() {
+        for (index, event) in self.processing.report.events.iter().enumerate() {
             if filter.is_empty()
                 || event.dictionary_name.to_lowercase().contains(&filter)
                 || event.before_snippet.to_lowercase().contains(&filter)
@@ -895,8 +763,8 @@ impl DemagogApp {
     fn refresh_find_matches(&mut self) {
         let query = self.search.find_query.clone();
         let text = match self.view.active_tab {
-            ActiveTab::RawText => self.document.raw_text.as_str(),
-            ActiveTab::ProcessedText => self.document.processed_text.as_str(),
+            ActiveTab::RawText => self.editor.document.raw_text.as_str(),
+            ActiveTab::ProcessedText => self.editor.document.processed_text.as_str(),
             _ => "",
         };
         let matches = find_matches(text, &query);
@@ -935,8 +803,8 @@ impl DemagogApp {
         };
         let char_positions = {
             let text = match self.view.active_tab {
-                ActiveTab::RawText => &self.document.raw_text,
-                ActiveTab::ProcessedText => &self.document.processed_text,
+                ActiveTab::RawText => &self.editor.document.raw_text,
+                ActiveTab::ProcessedText => &self.editor.document.processed_text,
                 _ => "",
             };
             self.search
@@ -1070,22 +938,22 @@ impl DemagogApp {
     }
 
     fn save_processed_txt(&mut self) {
-        if self.document.processed_text.is_empty() {
+        if self.editor.document.processed_text.is_empty() {
             self.set_status(StatusLevel::Warning, "Сначала выполните обработку текста!");
             return;
         }
         if !self.confirm_stale_result("Сохранить его всё равно") {
             return;
         }
-        let default_name = format!("{}_processed.txt", self.document.title);
+        let default_name = format!("{}_processed.txt", self.editor.document.title);
         if let Some(path) = rfd::FileDialog::new()
             .set_file_name(&default_name)
             .add_filter("Текстовый файл UTF-8", &["txt"])
             .save_file()
         {
-            match std::fs::write(&path, &self.document.processed_text) {
+            match std::fs::write(&path, &self.editor.document.processed_text) {
                 Ok(_) => {
-                    self.result_state.mark_saved();
+                    self.editor.result_state.mark_saved();
                     self.set_status(
                         StatusLevel::Success,
                         format!("Сохранено в {}", path.display()),
@@ -1099,23 +967,23 @@ impl DemagogApp {
     }
 
     fn save_source_txt(&mut self) {
-        if self.document.raw_text.trim().is_empty() {
+        if self.editor.document.raw_text.trim().is_empty() {
             self.set_status(
                 StatusLevel::Warning,
                 "Исходный текст пуст — нечего сохранять",
             );
             return;
         }
-        let default_name = format!("{}_source.txt", self.document.title);
+        let default_name = format!("{}_source.txt", self.editor.document.title);
         if let Some(path) = rfd::FileDialog::new()
             .set_file_name(&default_name)
             .add_filter("Текстовый файл UTF-8", &["txt"])
             .save_file()
         {
-            match std::fs::write(&path, &self.document.raw_text) {
+            match std::fs::write(&path, &self.editor.document.raw_text) {
                 Ok(_) => {
-                    self.document.source_path = Some(path.clone());
-                    self.source_dirty = false;
+                    self.editor.document.source_path = Some(path.clone());
+                    self.editor.source_dirty = false;
                     self.set_status(
                         StatusLevel::Success,
                         format!("Исходный текст сохранён в {}", path.display()),
@@ -1127,7 +995,7 @@ impl DemagogApp {
     }
 
     fn export_chunks_json(&mut self) {
-        if self.document.processed_text.trim().is_empty() {
+        if self.editor.document.processed_text.trim().is_empty() {
             self.set_status(
                 StatusLevel::Warning,
                 "Результат пуст — экспортировать нечего",
@@ -1137,34 +1005,37 @@ impl DemagogApp {
         if !self.confirm_stale_result("Экспортировать его всё равно") {
             return;
         }
-        if self.result_state.is_chunks_stale() {
+        if self.editor.result_state.is_chunks_stale() {
             self.rechunk_result();
         }
-        if !can_export_chunks(&self.document.processed_text, &self.document.chunks) {
+        if !can_export_chunks(
+            &self.editor.document.processed_text,
+            &self.editor.document.chunks,
+        ) {
             self.set_status(
                 StatusLevel::Warning,
                 "Нет чанков для экспорта — запустите обработку!",
             );
             return;
         }
-        let default_name = format!("{}_chunks.json", self.document.title);
+        let default_name = format!("{}_chunks.json", self.editor.document.title);
         if let Some(path) = rfd::FileDialog::new()
             .set_file_name(&default_name)
             .add_filter("JSON для ComfyUI", &["json"])
             .save_file()
         {
             let payload = ChunksExportPayload {
-                title: &self.document.title,
-                stress_format: self.result_state.format().label(),
-                chunk_count: self.document.chunks.len(),
-                chunks: &self.document.chunks,
+                title: &self.editor.document.title,
+                stress_format: self.editor.result_state.format().label(),
+                chunk_count: self.editor.document.chunks.len(),
+                chunks: &self.editor.document.chunks,
             };
             if let Ok(json) = serde_json::to_string_pretty(&payload) {
                 match std::fs::write(&path, json) {
                     Ok(_) => {
                         // Chunks do not contain manual edits to processed_text,
                         // so an edited result stays dirty after exporting.
-                        self.result_state.mark_exported();
+                        self.editor.result_state.mark_exported();
                         self.set_status(
                             StatusLevel::Success,
                             format!("Чанки экспортированы в {}", path.display()),
@@ -1181,18 +1052,20 @@ impl DemagogApp {
     /// Rebuild the result from the pipeline output using the current stress format.
     /// Returns false when the user declined or the text can no longer be reformatted.
     fn reformat_result(&mut self) -> bool {
-        if self.document.processed_text.is_empty() && self.raw_pipeline_output.is_empty() {
+        if self.editor.document.processed_text.is_empty()
+            && self.editor.raw_pipeline_output.is_empty()
+        {
             return true;
         }
-        if self.raw_pipeline_output.is_empty() {
-            self.result_state.mark_stale();
+        if self.editor.raw_pipeline_output.is_empty() {
+            self.editor.result_state.mark_stale();
             self.set_status(
                 StatusLevel::Warning,
                 "Результат нельзя пересобрать: он уже снят с конвейера — обработайте книгу заново",
             );
             return false;
         }
-        if self.result_state.is_edited()
+        if self.editor.result_state.is_edited()
             && !confirm_destructive(
                 "Пересобрать результат по текущему формату?\nРучные правки в результате будут потеряны.",
             )
@@ -1200,10 +1073,13 @@ impl DemagogApp {
             return false;
         }
         let formatter = RussianStressFormatter;
-        self.document.processed_text =
-            formatter.format_stress(&self.raw_pipeline_output, self.settings.stress_format);
+        self.editor.document.processed_text = formatter.format_stress(
+            &self.editor.raw_pipeline_output,
+            self.settings.stress_format,
+        );
         self.refresh_processed_char_count();
-        self.result_state
+        self.editor
+            .result_state
             .mark_reformatted(self.settings.stress_format);
         self.rechunk_result();
         true
@@ -1211,25 +1087,27 @@ impl DemagogApp {
 
     /// Re-chunk the current result without touching its text.
     fn rechunk_result(&mut self) {
-        self.document.chunks =
-            chunks_for_text(&self.document.processed_text, &self.settings.chunk_config);
+        self.editor.document.chunks = chunks_for_text(
+            &self.editor.document.processed_text,
+            &self.settings.chunk_config,
+        );
         self.view.last_copied_chunk = None;
-        self.result_state.mark_rechunked();
+        self.editor.result_state.mark_rechunked();
         self.search.find_dirty = true;
     }
 
     /// Apply chunk settings when a drag ends instead of on every slider tick.
     fn apply_chunk_config_change(&mut self, ui: &egui::Ui, changed: bool) {
         if changed {
-            self.chunk_apply_pending = true;
+            self.editor.chunk_apply_pending = true;
         }
-        if !self.chunk_apply_pending {
+        if !self.editor.chunk_apply_pending {
             return;
         }
         if ui.ctx().input(|i| i.pointer.primary_down()) {
             return;
         }
-        self.chunk_apply_pending = false;
+        self.editor.chunk_apply_pending = false;
         self.rechunk_result();
         self.save_settings();
     }
@@ -1300,17 +1178,19 @@ impl DemagogApp {
     }
 
     fn has_unsaved_work(&self) -> bool {
-        self.source_dirty || self.result_state.is_dirty()
+        self.editor.source_dirty || self.editor.result_state.is_dirty()
     }
 
     fn mark_result_stale(&mut self) {
-        if !self.document.processed_text.is_empty() || !self.document.chunks.is_empty() {
-            self.result_state.mark_stale();
+        if !self.editor.document.processed_text.is_empty()
+            || !self.editor.document.chunks.is_empty()
+        {
+            self.editor.result_state.mark_stale();
         }
     }
 
     fn confirm_stale_result(&self, action: &str) -> bool {
-        if !self.result_state.is_stale() {
+        if !self.editor.result_state.is_stale() {
             return true;
         }
         confirm_destructive(&format!(
@@ -1447,7 +1327,7 @@ impl DemagogApp {
     }
 
     fn show_stale_banner(&self, ui: &mut egui::Ui, theme: ThemeMode) {
-        if !self.result_state.is_stale() {
+        if !self.editor.result_state.is_stale() {
             return;
         }
         ui.add(

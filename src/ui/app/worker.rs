@@ -90,7 +90,7 @@ impl DemagogApp {
         }
 
         if finished || disconnected {
-            self.processing_snapshot = None;
+            self.processing.processing_snapshot = None;
             if disconnected && !finished {
                 self.set_status(
                     StatusLevel::Error,
@@ -166,8 +166,10 @@ impl DemagogApp {
         };
         *pending_status = Some((level, status));
         self.worker.dic_load_errors = errors;
-        if !self.document.processed_text.is_empty() || !self.document.chunks.is_empty() {
-            self.result_state.mark_stale();
+        if !self.editor.document.processed_text.is_empty()
+            || !self.editor.document.chunks.is_empty()
+        {
+            self.editor.result_state.mark_stale();
         }
         self.worker.cancel_flag = None;
         self.worker.is_busy = false;
@@ -244,20 +246,20 @@ impl DemagogApp {
                         format_num(chars)
                     ),
                 ));
-                self.document = doc;
-                self.raw_char_count = chars;
-                self.processed_char_count = 0;
+                self.editor.document = doc;
+                self.editor.raw_char_count = chars;
+                self.editor.processed_char_count = 0;
                 self.diff.diff_cache_valid = false;
-                self.raw_pipeline_output.clear();
+                self.editor.raw_pipeline_output.clear();
                 self.view.active_tab = ActiveTab::RawText;
                 self.view.last_copied_chunk = None;
-                self.report = PipelineReport::default();
+                self.processing.report = PipelineReport::default();
                 for d in &mut self.dictionaries {
                     d.meta.last_ms = None;
                     d.meta.last_replacements = None;
                 }
-                self.source_dirty = false;
-                self.result_state.reset();
+                self.editor.source_dirty = false;
+                self.editor.result_state.reset();
                 self.splitter = splitter::SplitterState::default();
                 self.search.find_dirty = true;
             }
@@ -297,26 +299,32 @@ impl DemagogApp {
                 false
             }
             PipelineProgress::Completed(result) => {
-                let source_changed = self
-                    .processing_snapshot
-                    .take()
-                    .is_some_and(|snapshot| snapshot.source_changed(&self.document.raw_text));
+                let source_changed =
+                    self.processing
+                        .processing_snapshot
+                        .take()
+                        .is_some_and(|snapshot| {
+                            snapshot.source_changed(&self.editor.document.raw_text)
+                        });
                 let summary = format!(
                     "Обработано за {} мс | Замен: {} | Чанков: {}",
                     result.report.total_ms,
                     format_num(result.report.total_replacements),
                     result.chunks.len()
                 );
-                self.raw_pipeline_output = result.raw_text;
-                self.document.processed_text = result.processed_text;
-                self.document.chunks = result.chunks;
-                self.processed_char_count = self.document.processed_text.chars().count();
+                self.editor.raw_pipeline_output = result.raw_text;
+                self.editor.document.processed_text = result.processed_text;
+                self.editor.document.chunks = result.chunks;
+                self.editor.processed_char_count =
+                    self.editor.document.processed_text.chars().count();
                 self.diff.diff_cache_valid = false;
                 let had_events = !result.report.events.is_empty();
-                self.report = result.report;
-                self.result_state.mark_computed(self.settings.stress_format);
+                self.processing.report = result.report;
+                self.editor
+                    .result_state
+                    .mark_computed(self.settings.stress_format);
                 if source_changed {
-                    self.result_state.mark_stale();
+                    self.editor.result_state.mark_stale();
                     *pending_status = Some((
                         StatusLevel::Warning,
                         format!(
@@ -331,7 +339,7 @@ impl DemagogApp {
                 self.worker.cancel_flag = None;
                 self.worker.is_busy = false;
                 self.worker.progress_ratio = 1.0;
-                if had_events && self.capture_diff_on_run {
+                if had_events && self.processing.capture_diff_on_run {
                     self.view.active_tab = ActiveTab::DiffAndStats;
                 } else if self.view.active_tab == ActiveTab::RawText {
                     self.view.active_tab = ActiveTab::ProcessedText;

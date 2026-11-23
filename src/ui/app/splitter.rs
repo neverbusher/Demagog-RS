@@ -83,7 +83,8 @@ impl DemagogApp {
     pub(super) fn show_splitter_tab(&mut self, ui: &mut egui::Ui, theme: ThemeMode) {
         // Одиночный режим — когда выбрана одна книга через Открыть книгу
         // и пакетная очередь пуста; пакетное меню в остальных случаях.
-        if self.document.source_path.is_some() && self.splitter.batch_queue.files.is_empty() {
+        if self.editor.document.source_path.is_some() && self.splitter.batch_queue.files.is_empty()
+        {
             self.show_splitter_single(ui, theme);
         } else {
             self.show_splitter_batch_menu(ui, theme);
@@ -91,7 +92,7 @@ impl DemagogApp {
     }
 
     fn show_splitter_single(&mut self, ui: &mut egui::Ui, theme: ThemeMode) {
-        if self.document.raw_text.trim().is_empty() {
+        if self.editor.document.raw_text.trim().is_empty() {
             ui.label("Откройте книгу (Ctrl+O), чтобы нарезать её на части.");
             return;
         }
@@ -237,7 +238,7 @@ impl DemagogApp {
                     ui.label("");
                     ui.end_row();
 
-                    let toc_available = !self.document.headings.is_empty();
+                    let toc_available = !self.editor.document.headings.is_empty();
                     changed |= ui
                         .add_enabled_ui(toc_available, |ui| {
                             ui.checkbox(&mut self.settings.split.by_toc, "По оглавлению (FB2/EPUB)")
@@ -354,9 +355,9 @@ impl DemagogApp {
     }
 
     fn split_source_name(&self) -> String {
-        match &self.document.source_path {
+        match &self.editor.document.source_path {
             Some(path) => crate::services::batch::output_stem(path),
-            None => self.document.title.clone(),
+            None => self.editor.document.title.clone(),
         }
     }
 
@@ -367,8 +368,8 @@ impl DemagogApp {
             return;
         }
         let parts = book_splitter::split_book(
-            &self.document.raw_text,
-            &self.document.headings,
+            &self.editor.document.raw_text,
+            &self.editor.document.headings,
             &self.settings.split,
         );
         self.store_split_preview(parts);
@@ -400,8 +401,8 @@ impl DemagogApp {
             return;
         }
         let parts = book_splitter::split_book(
-            &self.document.raw_text,
-            &self.document.headings,
+            &self.editor.document.raw_text,
+            &self.editor.document.headings,
             &self.settings.split,
         );
         if parts.is_empty() {
