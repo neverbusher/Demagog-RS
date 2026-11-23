@@ -1,6 +1,11 @@
 use crate::domain::{BookDocument, ChunkConfig, DictionaryKind, ProcessOutput, StressFormat};
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Единая проверка флага отмены для всех слоёв (io/engine/services/ui).
+pub fn is_cancelled(cancel: Option<&AtomicBool>) -> bool {
+    cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
+}
 
 /// Single Responsibility: A compiled dictionary processor that transforms text.
 /// Open/Closed: New dictionary formats can be added by implementing `TextProcessor`.
@@ -21,18 +26,19 @@ pub trait TextProcessor: Send + Sync {
 }
 
 /// Single Responsibility: Reads a book file (.txt, .fb2, .epub, .docx) into a `BookDocument`.
+/// The cancel-aware variant is the required method; the plain one is a default
+/// convenience so implementers only write the interruptible path once.
 pub trait DocumentReader: Send + Sync {
     fn can_read(&self, path: &Path) -> bool;
-    fn read_document(&self, path: &Path) -> Result<BookDocument, String>;
     /// Reads a document and aborts between large file/archive/XML work when
-    /// the flag is set. The default is for readers that cannot cancel while
-    /// a single small file is being decoded.
+    /// the flag is set.
     fn read_document_with_cancel(
         &self,
         path: &Path,
-        _cancel: Option<&AtomicBool>,
-    ) -> Result<BookDocument, String> {
-        self.read_document(path)
+        cancel: Option<&AtomicBool>,
+    ) -> Result<BookDocument, String>;
+    fn read_document(&self, path: &Path) -> Result<BookDocument, String> {
+        self.read_document_with_cancel(path, None)
     }
 }
 

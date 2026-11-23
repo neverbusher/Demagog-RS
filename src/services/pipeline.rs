@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
@@ -7,7 +7,7 @@ use crate::domain::{
     ChunkConfig, PipelineProgress, PipelineReport, PipelineResult, StepReport, StressFormat,
     TextCleanupConfig,
 };
-use crate::ports::{StressFormatter, TextChunker, TextProcessor};
+use crate::ports::{StressFormatter, TextChunker, TextProcessor, is_cancelled};
 use crate::services::normalize::normalize_text;
 
 pub struct ProcessingPipeline {
@@ -129,10 +129,6 @@ impl ProcessingPipeline {
 
         Some(result)
     }
-}
-
-fn is_cancelled(cancel: Option<&AtomicBool>) -> bool {
-    cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
 }
 
 fn notify_cancelled(progress_tx: Option<&Sender<PipelineProgress>>) {

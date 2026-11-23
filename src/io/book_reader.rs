@@ -9,7 +9,7 @@ use zip::ZipArchive;
 
 use crate::domain::{BookDocument, BookHeading};
 use crate::io::encoding::{decode_text_bytes, looks_like_text_bytes};
-use crate::ports::DocumentReader;
+use crate::ports::{DocumentReader, is_cancelled as book_cancelled};
 
 pub const SUPPORTED_BOOK_FORMATS: &str =
     "Поддерживаются TXT, MD, LOG, FB2, EPUB, DOCX и ZIP с FB2 внутри.";
@@ -32,10 +32,6 @@ impl DocumentReader for TxtDocumentReader {
                 .as_deref(),
             Some("txt" | "md" | "log")
         )
-    }
-
-    fn read_document(&self, path: &Path) -> Result<BookDocument, String> {
-        self.read_document_with_cancel(path, None)
     }
 
     fn read_document_with_cancel(
@@ -72,12 +68,6 @@ impl DocumentReader for TxtDocumentReader {
 }
 
 pub struct Fb2DocumentReader;
-
-fn book_cancelled(cancel: Option<&AtomicBool>) -> bool {
-    cancel
-        .map(|cancel| cancel.load(std::sync::atomic::Ordering::Relaxed))
-        .unwrap_or(false)
-}
 
 const CHUNK_BYTES: usize = 64 * 1024;
 
@@ -119,10 +109,6 @@ impl DocumentReader for Fb2DocumentReader {
             .unwrap_or("")
             .to_ascii_lowercase();
         name.ends_with(".fb2") || name.ends_with(".zip")
-    }
-
-    fn read_document(&self, path: &Path) -> Result<BookDocument, String> {
-        self.read_document_with_cancel(path, None)
     }
 
     fn read_document_with_cancel(
@@ -219,10 +205,6 @@ impl DocumentReader for DocxDocumentReader {
                 .as_deref(),
             Some("docx")
         )
-    }
-
-    fn read_document(&self, path: &Path) -> Result<BookDocument, String> {
-        self.read_document_with_cancel(path, None)
     }
 
     fn read_document_with_cancel(
@@ -334,10 +316,6 @@ impl DocumentReader for DocxDocumentReader {
 pub struct EpubDocumentReader;
 
 impl DocumentReader for EpubDocumentReader {
-    fn read_document(&self, path: &Path) -> Result<BookDocument, String> {
-        self.read_document_with_cancel(path, None)
-    }
-
     fn can_read(&self, path: &Path) -> bool {
         matches!(
             path.extension()
@@ -433,10 +411,6 @@ impl CompositeBookReader {
 impl DocumentReader for CompositeBookReader {
     fn can_read(&self, path: &Path) -> bool {
         self.readers.iter().any(|r| r.can_read(path))
-    }
-
-    fn read_document(&self, path: &Path) -> Result<BookDocument, String> {
-        self.read_document_with_cancel(path, None)
     }
 
     fn read_document_with_cancel(

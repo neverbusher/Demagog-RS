@@ -8,7 +8,7 @@ use crate::engine::dic_processor::DicProcessor;
 use crate::engine::hard_e_processor::HardEProcessor;
 use crate::engine::rex_processor::RexProcessor;
 use crate::io::encoding::decode_text_bytes;
-use crate::ports::TextProcessor;
+use crate::ports::{TextProcessor, is_cancelled as cancellation_error};
 
 pub struct CompiledDictionary {
     pub meta: DictionaryMeta,
@@ -47,12 +47,6 @@ pub fn load_dictionaries_parallel(dir: &Path) -> Result<DictionaryLoadReport, St
 }
 
 const DICTIONARY_CANCELLED: &str = "Загрузка словарей отменена";
-
-fn cancellation_error(cancel: Option<&AtomicBool>) -> bool {
-    cancel
-        .map(|cancel| cancel.load(std::sync::atomic::Ordering::Relaxed))
-        .unwrap_or(false)
-}
 
 pub fn load_dictionaries_parallel_with_cancel(
     dir: &Path,

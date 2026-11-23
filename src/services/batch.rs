@@ -1,11 +1,11 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
 
 use crate::domain::ChunksExportPayload;
-use crate::ports::{DocumentReader, TextProcessor};
+use crate::ports::{DocumentReader, TextProcessor, is_cancelled};
 use crate::services::pipeline::{PipelineOptions, ProcessingPipeline};
 
 pub struct BatchOptions {
@@ -268,6 +268,7 @@ mod tests {
     use crate::io::book_reader::CompositeBookReader;
     use crate::services::chunker::SentenceAwareChunker;
     use crate::services::stress::RussianStressFormatter;
+    use std::sync::atomic::Ordering;
     use std::sync::mpsc;
 
     fn temp_dir(tag: &str) -> PathBuf {

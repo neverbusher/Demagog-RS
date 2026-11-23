@@ -1,11 +1,11 @@
 //! Оркестрация пакетной нарезки: чтение книг, нарезка, экспорт, прогресс.
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
 
 use crate::domain::SplitConfig;
-use crate::ports::DocumentReader;
+use crate::ports::{DocumentReader, is_cancelled};
 use crate::services::batch::{BatchInput, output_stem};
 
 use super::export::export_parts_to;
@@ -161,10 +161,6 @@ fn split_one_book(
         return Err(summary.errors.join("; "));
     }
     Ok(summary.saved)
-}
-
-fn is_cancelled(cancel: Option<&AtomicBool>) -> bool {
-    cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
 }
 
 fn send(tx: Option<&Sender<BatchSplitProgress>>, msg: BatchSplitProgress) {

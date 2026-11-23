@@ -7,7 +7,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::domain::{DictionaryKind, ProcessOutput, ReplacementEvent};
 use crate::engine::rex_processor::CompiledRexRule;
-use crate::ports::TextProcessor;
+use crate::ports::{TextProcessor, is_cancelled};
 
 const LARGE_DIC_BYTES: usize = 8 * 1024 * 1024;
 
@@ -717,10 +717,6 @@ impl TextProcessor for DicProcessor {
             events,
         }
     }
-}
-
-fn is_cancelled(cancel: Option<&AtomicBool>) -> bool {
-    cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 /// Literal `$` in a dictionary RHS must not be interpreted as a regex

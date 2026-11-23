@@ -6,7 +6,7 @@ use rustc_hash::FxHashSet;
 
 use crate::domain::{DictionaryKind, ProcessOutput, ReplacementEvent};
 use crate::engine::rex_normalizer::{normalize_rex_pattern, normalize_rex_replacement};
-use crate::ports::TextProcessor;
+use crate::ports::{TextProcessor, is_cancelled};
 
 #[derive(Debug, Clone)]
 pub struct CompiledRexRule {
@@ -379,10 +379,6 @@ impl TextProcessor for RexProcessor {
             events,
         }
     }
-}
-
-fn is_cancelled(cancel: Option<&AtomicBool>) -> bool {
-    cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 fn compile_rex_rules(pending: Vec<PendingRexRule>) -> (Vec<CompiledRexRule>, Vec<String>) {
