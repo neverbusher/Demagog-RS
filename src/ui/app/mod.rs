@@ -24,13 +24,16 @@ use crate::ui::palette;
 mod batch;
 mod splitter;
 mod splitter_batch;
+mod state;
 mod views;
 mod worker;
 
+use state::{DiffState, SearchState, ViewState};
 use worker::{WorkerMessage, WorkerOutcome, classify_worker_result};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum ActiveTab {
+    #[default]
     RawText,
     ProcessedText,
     Chunks,
@@ -39,8 +42,9 @@ enum ActiveTab {
     Settings,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum StatusLevel {
+    #[default]
     Info,
     Success,
     Warning,
@@ -182,38 +186,18 @@ pub struct DemagogApp {
     dictionaries: Vec<LoadedDictionary>,
     document: BookDocument,
     raw_pipeline_output: String,
-    active_tab: ActiveTab,
+    view: ViewState,
     report: PipelineReport,
-    status_line: String,
-    status_level: StatusLevel,
-    last_error: Option<String>,
     worker: worker::WorkerState,
     processing_snapshot: Option<ProcessingSnapshot>,
-    check_report: Option<CheckReport>,
-    show_check_window: bool,
-    diff_filter: String,
-    dic_search_filter: String,
-    last_copied_chunk: Option<usize>,
     capture_diff_on_run: bool,
     source_dirty: bool,
     result_state: ResultState,
     chunk_apply_pending: bool,
-    find_open: bool,
-    find_query: String,
-    find_matches: FindMatches,
-    find_for_tab: Option<ActiveTab>,
-    find_dirty: bool,
-    find_last_edit: Instant,
-    find_current: usize,
-    find_go_to: Option<usize>,
+    search: SearchState,
     raw_char_count: usize,
     processed_char_count: usize,
-    diff_filter_cache: String,
-    diff_visible: Vec<usize>,
-    diff_cache_valid: bool,
-    focus_find: bool,
-    last_window_title: String,
-    window_icon_applied: bool,
+    diff: DiffState,
     batch: batch::BatchState,
     splitter: splitter::SplitterState,
 }
@@ -298,38 +282,18 @@ impl DemagogApp {
             dictionaries: Vec::new(),
             document,
             raw_pipeline_output: String::new(),
-            active_tab: ActiveTab::RawText,
+            view: ViewState::default(),
             report: PipelineReport::default(),
-            status_line: String::new(),
-            status_level: StatusLevel::Info,
-            last_error: None,
             worker: worker::WorkerState::default(),
             processing_snapshot: None,
-            check_report: None,
-            show_check_window: false,
-            diff_filter: String::new(),
-            dic_search_filter: String::new(),
-            last_copied_chunk: None,
             capture_diff_on_run: false,
             source_dirty: false,
             result_state: ResultState::new(result_format),
             chunk_apply_pending: false,
-            find_open: false,
-            find_query: String::new(),
-            find_matches: FindMatches::default(),
-            find_for_tab: None,
-            find_dirty: false,
-            find_last_edit: Instant::now(),
-            find_current: 0,
-            find_go_to: None,
+            search: SearchState::default(),
             raw_char_count,
             processed_char_count,
-            diff_filter_cache: String::new(),
-            diff_visible: Vec::new(),
-            diff_cache_valid: false,
-            focus_find: false,
-            last_window_title: "Demagog-RS".to_string(),
-            window_icon_applied: false,
+            diff: DiffState::default(),
             batch: batch_state,
             splitter: splitter::SplitterState::default(),
         }
@@ -341,37 +305,19 @@ impl DemagogApp {
         self.document = Self::sample_book_document();
         self.raw_char_count = self.document.raw_text.chars().count();
         self.processed_char_count = 0;
-        self.active_tab = ActiveTab::RawText;
+        self.view.reset_document_state();
         self.report = PipelineReport::default();
         self.raw_pipeline_output.clear();
         self.result_state.reset();
         self.capture_diff_on_run = false;
-        self.last_copied_chunk = None;
         self.chunk_apply_pending = false;
         self.worker = worker::WorkerState::default();
-        self.status_line.clear();
-        self.status_level = StatusLevel::Info;
-        self.last_error = None;
         self.source_dirty = false;
-        self.diff_filter.clear();
-        self.diff_filter_cache.clear();
-        self.diff_visible.clear();
-        self.diff_cache_valid = false;
-        self.find_open = false;
-        self.find_query.clear();
-        self.find_matches = FindMatches::default();
-        self.find_for_tab = None;
-        self.find_dirty = true;
-        self.find_last_edit = Instant::now();
-        self.find_current = 0;
-        self.find_go_to = None;
-        self.focus_find = false;
-        self.dic_search_filter.clear();
+        self.diff.reset();
+        self.search.reset();
         self.splitter = splitter::SplitterState::default();
         self.batch = batch::BatchState::default();
         self.dictionaries.clear();
-        self.check_report = None;
-        self.show_check_window = false;
         self.processing_snapshot = None;
         self.set_status(
             StatusLevel::Info,
@@ -434,8 +380,8 @@ impl DemagogApp {
         }
         self.worker.is_busy = true;
         self.worker.progress_ratio = 0.25;
-        self.check_report = None;
-        self.show_check_window = false;
+        self.view.check_report = None;
+        self.view.show_check_window = false;
         self.set_status(
             StatusLevel::Info,
             "Проверка порядка словарей и эталонных фраз...",
@@ -465,11 +411,11 @@ impl DemagogApp {
     }
 
     fn show_check_window(&mut self, ctx: &egui::Context) {
-        if !self.show_check_window {
+        if !self.view.show_check_window {
             return;
         }
-        let Some(report) = self.check_report.as_ref() else {
-            self.show_check_window = false;
+        let Some(report) = self.view.check_report.as_ref() else {
+            self.view.show_check_window = false;
             return;
         };
 
@@ -618,7 +564,7 @@ impl DemagogApp {
                 });
             });
 
-        self.show_check_window = open && !close_requested;
+        self.view.show_check_window = open && !close_requested;
         if let Some(text) = copy_text {
             self.copy_to_clipboard(&text, "Аудит словарей скопирован".to_string(), None);
         }
@@ -826,20 +772,21 @@ impl DemagogApp {
 
         let find = KeyboardShortcut::new(Modifiers::CTRL, Key::F);
         if ctx.input_mut(|i| i.consume_shortcut(&find)) {
-            if self.active_tab != ActiveTab::RawText && self.active_tab != ActiveTab::ProcessedText
+            if self.view.active_tab != ActiveTab::RawText
+                && self.view.active_tab != ActiveTab::ProcessedText
             {
-                self.active_tab = if self.document.processed_text.is_empty() {
+                self.view.active_tab = if self.document.processed_text.is_empty() {
                     ActiveTab::RawText
                 } else {
                     ActiveTab::ProcessedText
                 };
             }
-            self.find_open = true;
-            self.focus_find = true;
-            self.find_dirty = true;
-            self.find_last_edit = Instant::now();
+            self.search.find_open = true;
+            self.view.focus_find = true;
+            self.search.find_dirty = true;
+            self.search.find_last_edit = Instant::now();
         }
-        if self.find_open {
+        if self.search.find_open {
             let find_next = KeyboardShortcut::new(Modifiers::NONE, Key::F3);
             let find_prev = KeyboardShortcut::new(Modifiers::SHIFT, Key::F3);
             if ctx.input_mut(|i| i.consume_shortcut(&find_prev)) {
@@ -857,16 +804,16 @@ impl DemagogApp {
             self.set_status(StatusLevel::Warning, "Отмена...");
         }
         // A second Esc (cancel already pending, or nothing running) closes find.
-        if self.find_open && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-            self.find_open = false;
+        if self.search.find_open && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+            self.search.find_open = false;
         }
     }
 
     fn update_window_title(&mut self, ctx: &egui::Context) {
         let title = window_title(&self.document.title, self.document.source_path.is_some());
-        if title != self.last_window_title {
+        if title != self.view.last_window_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
-            self.last_window_title = title;
+            self.view.last_window_title = title;
         }
     }
 
@@ -925,12 +872,12 @@ impl DemagogApp {
     }
 
     fn reset_long_list_state(&mut self) {
-        self.diff_cache_valid = false;
+        self.diff.diff_cache_valid = false;
     }
 
     fn refresh_diff_visible(&mut self) {
-        let filter = self.diff_filter.to_lowercase();
-        self.diff_visible.clear();
+        let filter = self.diff.diff_filter.to_lowercase();
+        self.diff.diff_visible.clear();
         for (index, event) in self.report.events.iter().enumerate() {
             if filter.is_empty()
                 || event.dictionary_name.to_lowercase().contains(&filter)
@@ -938,44 +885,44 @@ impl DemagogApp {
                 || event.after_snippet.to_lowercase().contains(&filter)
                 || event.rule_summary.to_lowercase().contains(&filter)
             {
-                self.diff_visible.push(index);
+                self.diff.diff_visible.push(index);
             }
         }
-        self.diff_filter_cache = filter;
-        self.diff_cache_valid = true;
+        self.diff.diff_filter_cache = filter;
+        self.diff.diff_cache_valid = true;
     }
 
     fn refresh_find_matches(&mut self) {
-        let query = self.find_query.clone();
-        let text = match self.active_tab {
+        let query = self.search.find_query.clone();
+        let text = match self.view.active_tab {
             ActiveTab::RawText => self.document.raw_text.as_str(),
             ActiveTab::ProcessedText => self.document.processed_text.as_str(),
             _ => "",
         };
         let matches = find_matches(text, &query);
-        self.find_matches = matches;
-        self.find_current = 0;
-        self.find_go_to = None;
-        self.find_for_tab = Some(self.active_tab);
+        self.search.find_matches = matches;
+        self.search.find_current = 0;
+        self.search.find_go_to = None;
+        self.search.find_for_tab = Some(self.view.active_tab);
     }
 
     fn step_find(&mut self, delta: isize) {
-        if self.find_dirty {
+        if self.search.find_dirty {
             self.refresh_find_matches();
-            self.find_dirty = false;
-            if !self.find_matches.ranges.is_empty() {
-                self.find_current = 0;
-                self.find_go_to = Some(0);
+            self.search.find_dirty = false;
+            if !self.search.find_matches.ranges.is_empty() {
+                self.search.find_current = 0;
+                self.search.find_go_to = Some(0);
             }
             return;
         }
-        let total = self.find_matches.ranges.len();
+        let total = self.search.find_matches.ranges.len();
         if total == 0 {
             return;
         }
-        let current = self.find_current.min(total - 1);
-        self.find_current = (current as isize + delta).rem_euclid(total as isize) as usize;
-        self.find_go_to = Some(self.find_current);
+        let current = self.search.find_current.min(total - 1);
+        self.search.find_current = (current as isize + delta).rem_euclid(total as isize) as usize;
+        self.search.find_go_to = Some(self.search.find_current);
     }
 
     fn scroll_to_find_match(
@@ -983,16 +930,17 @@ impl DemagogApp {
         ui: &egui::Ui,
         output: &egui::widgets::text_edit::TextEditOutput,
     ) {
-        let Some(index) = self.find_go_to else {
+        let Some(index) = self.search.find_go_to else {
             return;
         };
         let char_positions = {
-            let text = match self.active_tab {
+            let text = match self.view.active_tab {
                 ActiveTab::RawText => &self.document.raw_text,
                 ActiveTab::ProcessedText => &self.document.processed_text,
                 _ => "",
             };
-            self.find_matches
+            self.search
+                .find_matches
                 .ranges
                 .get(index)
                 .and_then(|&(start, end)| {
@@ -1002,7 +950,7 @@ impl DemagogApp {
                     ))
                 })
         };
-        self.find_go_to = None;
+        self.search.find_go_to = None;
         let Some((char_start, char_end)) = char_positions else {
             return;
         };
@@ -1029,24 +977,26 @@ impl DemagogApp {
             let label = ui.label("Найти:");
             let response = ui
                 .add(
-                    egui::TextEdit::singleline(&mut self.find_query)
+                    egui::TextEdit::singleline(&mut self.search.find_query)
                         .hint_text("Строка или фрагмент")
                         .desired_width(240.0),
                 )
                 .labelled_by(label.id);
-            if self.focus_find {
+            if self.view.focus_find {
                 response.request_focus();
-                self.focus_find = false;
+                self.view.focus_find = false;
             }
             if response.changed() {
-                self.find_dirty = true;
-                self.find_last_edit = Instant::now();
+                self.search.find_dirty = true;
+                self.search.find_last_edit = Instant::now();
             }
             let debounce = Duration::from_millis(150);
-            if self.find_dirty || self.find_for_tab != Some(self.active_tab) {
-                if self.find_query.trim().is_empty() || self.find_last_edit.elapsed() >= debounce {
+            if self.search.find_dirty || self.search.find_for_tab != Some(self.view.active_tab) {
+                if self.search.find_query.trim().is_empty()
+                    || self.search.find_last_edit.elapsed() >= debounce
+                {
                     self.refresh_find_matches();
-                    self.find_dirty = false;
+                    self.search.find_dirty = false;
                 } else {
                     ui.ctx().request_repaint_after(debounce);
                 }
@@ -1058,18 +1008,18 @@ impl DemagogApp {
                     1
                 };
                 self.step_find(step);
-                self.focus_find = true;
+                self.view.focus_find = true;
             }
 
-            let total = self.find_matches.ranges.len();
-            let counter = if self.find_query.trim().is_empty() {
+            let total = self.search.find_matches.ranges.len();
+            let counter = if self.search.find_query.trim().is_empty() {
                 "Введите строку".to_string()
             } else if total == 0 {
                 "Совпадений не найдено".to_string()
             } else {
                 format!(
                     "{} из {}",
-                    format_num((self.find_current + 1).min(total)),
+                    format_num((self.search.find_current + 1).min(total)),
                     format_num(total)
                 )
             };
@@ -1101,7 +1051,7 @@ impl DemagogApp {
             if next.clicked() {
                 self.step_find(1);
             }
-            if self.find_matches.truncated {
+            if self.search.find_matches.truncated {
                 ui.label(
                     RichText::new(format!("показаны первые {}", format_num(MAX_FIND_MATCHES)))
                         .small()
@@ -1114,7 +1064,7 @@ impl DemagogApp {
                 egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Закрыть поиск")
             });
             if close.clicked() {
-                self.find_open = false;
+                self.search.find_open = false;
             }
         });
     }
@@ -1263,9 +1213,9 @@ impl DemagogApp {
     fn rechunk_result(&mut self) {
         self.document.chunks =
             chunks_for_text(&self.document.processed_text, &self.settings.chunk_config);
-        self.last_copied_chunk = None;
+        self.view.last_copied_chunk = None;
         self.result_state.mark_rechunked();
-        self.find_dirty = true;
+        self.search.find_dirty = true;
     }
 
     /// Apply chunk settings when a drag ends instead of on every slider tick.
@@ -1298,10 +1248,10 @@ impl eframe::App for DemagogApp {
 
 impl DemagogApp {
     fn set_status(&mut self, level: StatusLevel, text: impl Into<String>) {
-        self.status_line = text.into();
-        self.status_level = level;
+        self.view.status_line = text.into();
+        self.view.status_level = level;
         if level == StatusLevel::Error {
-            self.last_error = Some(self.status_line.clone());
+            self.view.last_error = Some(self.view.status_line.clone());
         }
     }
 
@@ -1374,7 +1324,7 @@ impl DemagogApp {
         {
             Ok(()) => {
                 if let Some(index) = chunk {
-                    self.last_copied_chunk = Some(index);
+                    self.view.last_copied_chunk = Some(index);
                 }
                 self.set_status(StatusLevel::Success, success);
             }
@@ -1407,30 +1357,32 @@ impl DemagogApp {
                 }
             }
         }
-        let (icon, color) = match self.status_level {
+        let (icon, color) = match self.view.status_level {
             StatusLevel::Info => ("", ui.visuals().text_color()),
             StatusLevel::Success => ("✅ ", palette::success_text(theme)),
             StatusLevel::Warning => ("⚠️ ", palette::warning_text(theme)),
             StatusLevel::Error => ("❌ ", palette::diff_before(theme)),
         };
         let status = ui.add(
-            egui::Label::new(RichText::new(format!("{icon}{}", self.status_line)).color(color))
-                .selectable(true),
+            egui::Label::new(
+                RichText::new(format!("{icon}{}", self.view.status_line)).color(color),
+            )
+            .selectable(true),
         );
         status.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Label, true, self.status_line.clone())
+            egui::WidgetInfo::labeled(egui::WidgetType::Label, true, self.view.status_line.clone())
         });
         ui.ctx().accesskit_node_builder(status.id, |node| {
             node.set_role(egui::accesskit::Role::Status);
-            node.set_live(status_live(self.worker.is_busy, self.status_level));
+            node.set_live(status_live(self.worker.is_busy, self.view.status_level));
             node.set_live_atomic();
-            node.set_label(self.status_line.clone());
+            node.set_label(self.view.status_line.clone());
         });
         if !self.worker.dic_load_errors.is_empty() {
             status.on_hover_text(self.worker.dic_load_errors.join("\n"));
         }
-        if self.status_level != StatusLevel::Error
-            && let Some(error) = self.last_error.clone()
+        if self.view.status_level != StatusLevel::Error
+            && let Some(error) = self.view.last_error.clone()
         {
             let chip = ui
                 .add(
@@ -1455,7 +1407,7 @@ impl DemagogApp {
                 .on_hover_text("Скрыть ошибку")
                 .clicked()
             {
-                self.last_error = None;
+                self.view.last_error = None;
             }
         }
     }
@@ -1523,8 +1475,8 @@ impl DemagogApp {
     pub(crate) fn update_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.poll_worker();
-        if !self.window_icon_applied {
-            self.window_icon_applied = super::window::apply_window_icon();
+        if !self.view.window_icon_applied {
+            self.view.window_icon_applied = super::window::apply_window_icon();
         }
         let theme = self.settings.theme();
 

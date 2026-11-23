@@ -419,7 +419,7 @@ fn ui_test_app(raw_text: &str, processed_text: &str, chunks: Vec<String>) -> Dem
         headings: Vec::new(),
     };
     let mut app = DemagogApp::from_parts(AppSettings::default(), document);
-    app.window_icon_applied = true;
+    app.view.window_icon_applied = true;
     app
 }
 
@@ -430,7 +430,7 @@ fn diff_events_render_only_the_visible_rows() {
     use egui_kittest::kittest::Queryable;
 
     let mut app = ui_test_app("", "Результат", Vec::new());
-    app.active_tab = ActiveTab::DiffAndStats;
+    app.view.active_tab = ActiveTab::DiffAndStats;
     app.report.events = (0..1000)
         .map(|index| ReplacementEvent {
             dictionary_name: format!("dict-{index}"),
@@ -468,7 +468,7 @@ fn chunks_render_only_the_visible_rows() {
         .map(|index| format!("Чанк {index}"))
         .collect::<Vec<_>>();
     let mut app = ui_test_app("", "Результат", chunks);
-    app.active_tab = ActiveTab::Chunks;
+    app.view.active_tab = ActiveTab::Chunks;
     app.result_state
         .mark_computed(StressFormat::PlusBeforeVowel);
 
@@ -540,7 +540,7 @@ fn settings_content_reaches_the_bottom_at_smallest_window() {
     use egui_kittest::kittest::Queryable;
 
     let mut app = ui_test_app("Исходный текст", "Результат", Vec::new());
-    app.active_tab = ActiveTab::Settings;
+    app.view.active_tab = ActiveTab::Settings;
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1000.0, 640.0))
         .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
@@ -562,7 +562,7 @@ fn settings_expose_theme_hotkeys_and_about() {
     use egui_kittest::kittest::Queryable;
 
     let mut app = ui_test_app("Исходный текст", "Результат", Vec::new());
-    app.active_tab = ActiveTab::Settings;
+    app.view.active_tab = ActiveTab::Settings;
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1280.0, 900.0))
         .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
@@ -696,7 +696,7 @@ fn settings_about_is_scrollable_at_min_height() {
     use egui_kittest::kittest::Queryable;
 
     let mut app = ui_test_app("", "", Vec::new());
-    app.active_tab = ActiveTab::Settings;
+    app.view.active_tab = ActiveTab::Settings;
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1000.0, 640.0))
         .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
@@ -720,7 +720,7 @@ fn journal_shows_truncation_notice() {
     use egui_kittest::kittest::Queryable;
 
     let mut app = ui_test_app("", "Результат", Vec::new());
-    app.active_tab = ActiveTab::DiffAndStats;
+    app.view.active_tab = ActiveTab::DiffAndStats;
     app.report.events_truncated = true;
     app.report.events = (0..600)
         .map(|i| ReplacementEvent {
@@ -757,7 +757,7 @@ fn journal_heading_stays_visible_with_many_steps() {
     use egui_kittest::kittest::Queryable;
 
     let mut app = ui_test_app("", "Результат", Vec::new());
-    app.active_tab = ActiveTab::DiffAndStats;
+    app.view.active_tab = ActiveTab::DiffAndStats;
     app.report.steps = (0..40)
         .map(|i| StepReport {
             dictionary_name: format!("dict-{i}"),
@@ -837,7 +837,7 @@ fn stale_chunk_banner_rebuilds_chunks_through_the_ui() {
     use egui_kittest::kittest::Queryable;
 
     let mut app = ui_test_app("", "Первое предложение.", Vec::new());
-    app.active_tab = ActiveTab::Chunks;
+    app.view.active_tab = ActiveTab::Chunks;
     app.result_state
         .mark_computed(StressFormat::PlusBeforeVowel);
     app.result_state.mark_edited();
@@ -943,9 +943,9 @@ fn settings_show_dictionary_check_button_and_report() {
     };
 
     let mut app = ui_test_app("", "", Vec::new());
-    app.active_tab = ActiveTab::Settings;
-    app.check_report = Some(report);
-    app.show_check_window = true;
+    app.view.active_tab = ActiveTab::Settings;
+    app.view.check_report = Some(report);
+    app.view.show_check_window = true;
 
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1280.0, 900.0))
@@ -966,7 +966,7 @@ fn clicking_dictionary_check_loads_report() {
     use egui_kittest::kittest::Queryable;
 
     let mut app = ui_test_app("", "", Vec::new());
-    app.active_tab = ActiveTab::Settings;
+    app.view.active_tab = ActiveTab::Settings;
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1280.0, 900.0))
         .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
@@ -978,16 +978,16 @@ fn clicking_dictionary_check_loads_report() {
     // Generous deadline: under parallel test/agent load the debug dictionary
     // compile can be slow; run ignored tests serially for stable timing.
     let deadline = Instant::now() + Duration::from_secs(120);
-    while harness.state().check_report.is_none() && Instant::now() < deadline {
+    while harness.state().view.check_report.is_none() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
         harness.run_steps(1);
     }
 
     assert!(
-        harness.state().check_report.is_some(),
+        harness.state().view.check_report.is_some(),
         "dictionary check did not finish within 60 seconds"
     );
-    assert!(harness.state().show_check_window);
+    assert!(harness.state().view.show_check_window);
     harness.get_by_label_contains("Фонетические кандидаты");
 }
 
@@ -1058,7 +1058,7 @@ fn escape_closes_find_while_cancel_is_pending() {
     let mut app = ui_test_app("текст", "", Vec::new());
     app.worker.is_busy = true;
     app.worker.cancel_flag = Some(Arc::new(AtomicBool::new(true)));
-    app.find_open = true;
+    app.search.find_open = true;
 
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1280.0, 900.0))
@@ -1068,7 +1068,7 @@ fn escape_closes_find_while_cancel_is_pending() {
     harness.run_steps(1);
 
     assert!(
-        !harness.state().find_open,
+        !harness.state().search.find_open,
         "Esc must close the find bar when a cancel is already pending"
     );
 }
@@ -1115,16 +1115,16 @@ fn find_counter_clamps_stale_current_match() {
     use egui_kittest::kittest::{NodeT, Queryable};
 
     let mut app = ui_test_app("текст текст", "", Vec::new());
-    app.find_open = true;
-    app.find_query = "тек".to_string();
-    app.find_for_tab = Some(app.active_tab);
+    app.search.find_open = true;
+    app.search.find_query = "тек".to_string();
+    app.search.find_for_tab = Some(app.view.active_tab);
     // Не dirty: debounce не должен сбрасывать find_current до рендера счётчика.
-    app.find_dirty = false;
-    app.find_matches = FindMatches {
+    app.search.find_dirty = false;
+    app.search.find_matches = FindMatches {
         ranges: vec![(0, 3), (6, 9)],
         truncated: false,
     };
-    app.find_current = 5;
+    app.search.find_current = 5;
 
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1280.0, 900.0))
@@ -1164,7 +1164,7 @@ fn replacing_source_with_result_marks_result_stale() {
     use egui_kittest::kittest::Queryable;
 
     let mut app = ui_test_app("", "новый результат", Vec::new());
-    app.active_tab = ActiveTab::ProcessedText;
+    app.view.active_tab = ActiveTab::ProcessedText;
     app.result_state
         .mark_computed(StressFormat::PlusBeforeVowel);
 
@@ -1190,7 +1190,7 @@ fn settings_cleanup_checkboxes_toggle_and_mark_result_stale() {
     use egui_kittest::kittest::Queryable;
 
     let mut app = ui_test_app("Глава первая", "Глава первая", vec!["Глава первая".into()]);
-    app.active_tab = ActiveTab::Settings;
+    app.view.active_tab = ActiveTab::Settings;
     app.result_state
         .mark_computed(StressFormat::PlusBeforeVowel);
 
@@ -1219,7 +1219,7 @@ fn diff_tab_shows_cleanup_stats_when_normalization_changed_text() {
     use egui_kittest::kittest::Queryable;
 
     let mut app = ui_test_app("Глава", "Глава.", vec!["Глава.".into()]);
-    app.active_tab = ActiveTab::DiffAndStats;
+    app.view.active_tab = ActiveTab::DiffAndStats;
     app.report.cleanup = crate::domain::NormalizationStats {
         removed_empty_lines: 2,
         added_periods: 3,
@@ -1362,8 +1362,8 @@ fn batch_cancel_resets_running_items_to_queued() {
     assert!(!app.worker.is_busy);
     assert_eq!(app.batch.summary, Some(outcome));
     assert_eq!(app.worker.progress_ratio, 0.0);
-    assert_eq!(app.status_line, "Пакетная обработка отменена");
-    assert_eq!(app.status_level, StatusLevel::Warning);
+    assert_eq!(app.view.status_line, "Пакетная обработка отменена");
+    assert_eq!(app.view.status_level, StatusLevel::Warning);
 }
 
 #[test]
@@ -1390,8 +1390,8 @@ fn batch_completion_uses_service_counts_and_finishes_progress() {
     assert!(!app.worker.is_busy);
     assert_eq!(app.batch.summary, Some(outcome));
     assert_eq!(app.worker.progress_ratio, 1.0);
-    assert_eq!(app.status_line, "Пакет готов: обработано 3, ошибок 2");
-    assert_eq!(app.status_level, StatusLevel::Warning);
+    assert_eq!(app.view.status_line, "Пакет готов: обработано 3, ошибок 2");
+    assert_eq!(app.view.status_level, StatusLevel::Warning);
 }
 
 #[test]
@@ -1449,8 +1449,8 @@ fn batch_run_through_app_worker_writes_outputs_and_updates_queue() {
         })
     );
     assert_eq!(app.worker.progress_ratio, 1.0);
-    assert_eq!(app.status_line, "Пакет готов: обработано 1, ошибок 0");
-    assert_eq!(app.status_level, StatusLevel::Success);
+    assert_eq!(app.view.status_line, "Пакет готов: обработано 1, ошибок 0");
+    assert_eq!(app.view.status_level, StatusLevel::Success);
     assert_eq!(
         std::fs::read_to_string(out.join("sub").join("alpha.txt")).unwrap(),
         "Глава первая.\nТекст."
@@ -1586,7 +1586,7 @@ fn knigorez_tab_previews_parts_on_open() {
         "",
         Vec::new(),
     );
-    app.active_tab = ActiveTab::BookCutter;
+    app.view.active_tab = ActiveTab::BookCutter;
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1100.0, 800.0))
         .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
@@ -1606,7 +1606,7 @@ fn knigorez_empty_keywords_show_validation_error() {
 
     let mut app = ui_test_app("Глава 1\nТекст.", "", Vec::new());
     app.settings.split.keywords = "  ".to_string();
-    app.active_tab = ActiveTab::BookCutter;
+    app.view.active_tab = ActiveTab::BookCutter;
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1100.0, 800.0))
         .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
@@ -1622,7 +1622,7 @@ fn knigorez_tab_has_batch_queue_section() {
 
     let mut app = ui_test_app("Глава 1\nТекст.", "", Vec::new());
     app.document.source_path = None;
-    app.active_tab = ActiveTab::BookCutter;
+    app.view.active_tab = ActiveTab::BookCutter;
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1100.0, 800.0))
         .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
@@ -1655,7 +1655,7 @@ fn knigorez_batch_cancellation_resets_running_and_renders_service_counts() {
 
     let mut app = ui_test_app("", "", Vec::new());
     app.document.source_path = None;
-    app.active_tab = ActiveTab::BookCutter;
+    app.view.active_tab = ActiveTab::BookCutter;
     app.splitter.batch_queue.add_files([
         std::env::temp_dir().join("demagog-knigorez-cancel-a.txt"),
         std::env::temp_dir().join("demagog-knigorez-cancel-b.txt"),
@@ -1708,9 +1708,9 @@ fn knigorez_batch_cancellation_resets_running_and_renders_service_counts() {
     assert!(app.worker.cancel_flag.is_none());
     assert_eq!(app.splitter.batch_queue.summary, Some(outcome));
     assert_eq!(app.worker.progress_ratio, 1.0);
-    assert_eq!(app.status_line, "Отменено: нарезано 1, ошибок 0");
-    assert_eq!(app.status_level, StatusLevel::Success);
-    app.status_line.clear();
+    assert_eq!(app.view.status_line, "Отменено: нарезано 1, ошибок 0");
+    assert_eq!(app.view.status_level, StatusLevel::Success);
+    app.view.status_line.clear();
 
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1100.0, 800.0))
@@ -1732,7 +1732,7 @@ fn knigorez_batch_completion_uses_service_counts_and_renders_summary() {
 
     let mut app = ui_test_app("", "", Vec::new());
     app.document.source_path = None;
-    app.active_tab = ActiveTab::BookCutter;
+    app.view.active_tab = ActiveTab::BookCutter;
     app.splitter.batch_queue.add_files([
         std::env::temp_dir().join("demagog-knigorez-done-a.txt"),
         std::env::temp_dir().join("demagog-knigorez-done-b.txt"),
@@ -1778,8 +1778,11 @@ fn knigorez_batch_completion_uses_service_counts_and_renders_summary() {
     assert!(app.worker.cancel_flag.is_none());
     assert_eq!(app.splitter.batch_queue.summary, Some(outcome));
     assert_eq!(app.worker.progress_ratio, 1.0);
-    assert_eq!(app.status_line, "Пакетный книгорез: 3 частей, ошибок 2");
-    assert_eq!(app.status_level, StatusLevel::Warning);
+    assert_eq!(
+        app.view.status_line,
+        "Пакетный книгорез: 3 частей, ошибок 2"
+    );
+    assert_eq!(app.view.status_level, StatusLevel::Warning);
 
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1100.0, 800.0))
@@ -1797,7 +1800,7 @@ fn reset_button_returns_app_to_launch_state() {
     app.splitter
         .batch_queue
         .add_files([std::env::temp_dir().join("demagog-reset-test.txt")]);
-    app.active_tab = ActiveTab::DiffAndStats;
+    app.view.active_tab = ActiveTab::DiffAndStats;
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1280.0, 900.0))
         .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
@@ -1808,8 +1811,20 @@ fn reset_button_returns_app_to_launch_state() {
     assert_eq!(state.document.title, "Пример текста");
     assert!(state.document.source_path.is_none());
     assert!(state.document.raw_text.contains("В 1995 году"));
-    assert_eq!(state.active_tab, ActiveTab::RawText);
+    assert_eq!(state.view.active_tab, ActiveTab::RawText);
     assert!(state.splitter.batch_queue.files.is_empty());
+}
+
+#[test]
+fn reset_app_preserves_window_title_and_icon() {
+    let mut app = ui_test_app("Текст", "Результат", Vec::new());
+    app.view.last_window_title = "Demagog-RS — Текст".to_string();
+    app.view.window_icon_applied = true;
+
+    app.reset_app(egui::Context::default());
+
+    assert_eq!(app.view.last_window_title, "Demagog-RS — Текст");
+    assert!(app.view.window_icon_applied);
 }
 
 #[test]

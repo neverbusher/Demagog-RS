@@ -217,8 +217,8 @@ impl DemagogApp {
                     StatusLevel::Success
                 };
                 *pending_status = Some((level, status));
-                self.check_report = Some(report);
-                self.show_check_window = true;
+                self.view.check_report = Some(report);
+                self.view.show_check_window = true;
             }
             Err(error) => {
                 *pending_status = Some((StatusLevel::Error, format!("Проверка словарей: {error}")));
@@ -247,10 +247,10 @@ impl DemagogApp {
                 self.document = doc;
                 self.raw_char_count = chars;
                 self.processed_char_count = 0;
-                self.diff_cache_valid = false;
+                self.diff.diff_cache_valid = false;
                 self.raw_pipeline_output.clear();
-                self.active_tab = ActiveTab::RawText;
-                self.last_copied_chunk = None;
+                self.view.active_tab = ActiveTab::RawText;
+                self.view.last_copied_chunk = None;
                 self.report = PipelineReport::default();
                 for d in &mut self.dictionaries {
                     d.meta.last_ms = None;
@@ -259,7 +259,7 @@ impl DemagogApp {
                 self.source_dirty = false;
                 self.result_state.reset();
                 self.splitter = splitter::SplitterState::default();
-                self.find_dirty = true;
+                self.search.find_dirty = true;
             }
             Err(err) => {
                 *pending_status = Some((StatusLevel::Error, err));
@@ -311,7 +311,7 @@ impl DemagogApp {
                 self.document.processed_text = result.processed_text;
                 self.document.chunks = result.chunks;
                 self.processed_char_count = self.document.processed_text.chars().count();
-                self.diff_cache_valid = false;
+                self.diff.diff_cache_valid = false;
                 let had_events = !result.report.events.is_empty();
                 self.report = result.report;
                 self.result_state.mark_computed(self.settings.stress_format);
@@ -326,15 +326,15 @@ impl DemagogApp {
                 } else {
                     *pending_status = Some((StatusLevel::Success, summary));
                 }
-                self.last_copied_chunk = None;
-                self.find_dirty = true;
+                self.view.last_copied_chunk = None;
+                self.search.find_dirty = true;
                 self.worker.cancel_flag = None;
                 self.worker.is_busy = false;
                 self.worker.progress_ratio = 1.0;
                 if had_events && self.capture_diff_on_run {
-                    self.active_tab = ActiveTab::DiffAndStats;
-                } else if self.active_tab == ActiveTab::RawText {
-                    self.active_tab = ActiveTab::ProcessedText;
+                    self.view.active_tab = ActiveTab::DiffAndStats;
+                } else if self.view.active_tab == ActiveTab::RawText {
+                    self.view.active_tab = ActiveTab::ProcessedText;
                 }
                 true
             }

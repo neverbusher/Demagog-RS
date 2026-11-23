@@ -323,7 +323,7 @@ impl DemagogApp {
 
             let font = self.settings.ui_font_size;
             let estimate = counters.chars().count() as f32 * font * 0.6
-                + self.status_line.chars().count() as f32 * font * 0.6
+                + self.view.status_line.chars().count() as f32 * font * 0.6
                 + if self.worker.dic_load_errors.is_empty() {
                     0.0
                 } else {
@@ -403,12 +403,12 @@ impl DemagogApp {
                     let label = ui.label("Фильтр:");
                     let width = (ui.available_width() - 24.0).max(80.0);
                     ui.add(
-                        egui::TextEdit::singleline(&mut self.dic_search_filter)
+                        egui::TextEdit::singleline(&mut self.view.dic_search_filter)
                             .hint_text("Имя, описание или тип")
                             .desired_width(width),
                     )
                     .labelled_by(label.id);
-                    if !self.dic_search_filter.is_empty() {
+                    if !self.view.dic_search_filter.is_empty() {
                         let clear = ui.small_button("✖").on_hover_text("Сбросить фильтр");
                         clear.widget_info(|| {
                             egui::WidgetInfo::labeled(
@@ -418,7 +418,7 @@ impl DemagogApp {
                             )
                         });
                         if clear.clicked() {
-                            self.dic_search_filter.clear();
+                            self.view.dic_search_filter.clear();
                         }
                     }
                 });
@@ -427,7 +427,7 @@ impl DemagogApp {
                 ui.separator();
                 ui.add_space(4.0);
 
-                let filter_low = self.dic_search_filter.to_lowercase();
+                let filter_low = self.view.dic_search_filter.to_lowercase();
                 let mut changed_any = false;
                 let visible: Vec<usize> = self
                     .dictionaries
@@ -447,16 +447,16 @@ impl DemagogApp {
                     .show(ui, |ui| {
                         if visible.is_empty() {
                             ui.add_space(8.0);
-                            if !self.dic_search_filter.trim().is_empty() {
+                            if !self.view.dic_search_filter.trim().is_empty() {
                                 ui.label(
                                     RichText::new(format!(
                                         "Ничего не найдено по запросу «{}».",
-                                        self.dic_search_filter.trim()
+                                        self.view.dic_search_filter.trim()
                                     ))
                                     .weak(),
                                 );
                                 if ui.button("Сбросить фильтр").clicked() {
-                                    self.dic_search_filter.clear();
+                                    self.view.dic_search_filter.clear();
                                 }
                             } else if self.dictionaries.is_empty() {
                                 ui.label(
@@ -637,30 +637,38 @@ impl DemagogApp {
         egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.selectable_value(
-                    &mut self.active_tab,
+                    &mut self.view.active_tab,
                     ActiveTab::RawText,
                     format!("📝 Исходный текст ({})", format_num(self.raw_char_count)),
                 );
                 ui.selectable_value(
-                    &mut self.active_tab,
+                    &mut self.view.active_tab,
                     ActiveTab::ProcessedText,
                     format!("✅ Результат ({})", format_num(self.processed_char_count)),
                 );
                 ui.selectable_value(
-                    &mut self.active_tab,
+                    &mut self.view.active_tab,
                     ActiveTab::Chunks,
                     format!("✂ Чанки ({})", self.document.chunks.len()),
                 );
-                ui.selectable_value(&mut self.active_tab, ActiveTab::BookCutter, "🔪 Книгорез");
                 ui.selectable_value(
-                    &mut self.active_tab,
+                    &mut self.view.active_tab,
+                    ActiveTab::BookCutter,
+                    "🔪 Книгорез",
+                );
+                ui.selectable_value(
+                    &mut self.view.active_tab,
                     ActiveTab::DiffAndStats,
                     format!(
                         "🔬 Журнал замен ({})",
                         format_num(self.report.total_replacements)
                     ),
                 );
-                ui.selectable_value(&mut self.active_tab, ActiveTab::Settings, "⚙ Настройки");
+                ui.selectable_value(
+                    &mut self.view.active_tab,
+                    ActiveTab::Settings,
+                    "⚙ Настройки",
+                );
             });
             ui.separator();
             if self.worker.is_busy {
@@ -671,7 +679,7 @@ impl DemagogApp {
                 ui.add_space(4.0);
             }
 
-            match self.active_tab {
+            match self.view.active_tab {
                 ActiveTab::RawText => self.show_raw_text_tab(ui),
                 ActiveTab::ProcessedText => self.show_processed_text_tab(ui, theme),
                 ActiveTab::Chunks => self.show_chunks_tab(ui, theme),
@@ -720,8 +728,8 @@ impl DemagogApp {
                                         self.source_dirty = true;
                                         self.splitter.stale = true;
                                         self.mark_result_stale();
-                                        self.find_dirty = true;
-                                        self.find_last_edit = Instant::now();
+                                        self.search.find_dirty = true;
+                                        self.search.find_last_edit = Instant::now();
                                     }
                                 }
                                 Ok(_) => {
@@ -754,22 +762,22 @@ impl DemagogApp {
                                 self.document.source_path = None;
                                 self.source_dirty = false;
                                 self.mark_result_stale();
-                                self.find_dirty = true;
-                                self.find_last_edit = Instant::now();
+                                self.search.find_dirty = true;
+                                self.search.find_last_edit = Instant::now();
                             }
                         }
                     });
-        if self.find_open {
+        if self.search.find_open {
             self.show_find_bar(ui);
         }
         ui.add_space(4.0);
-        let find_ranges = if self.find_open {
-            self.find_matches.ranges.clone()
+        let find_ranges = if self.search.find_open {
+            self.search.find_matches.ranges.clone()
         } else {
             Vec::new()
         };
-        let find_current = if self.find_open {
-            Some(self.find_current)
+        let find_current = if self.search.find_open {
+            Some(self.search.find_current)
         } else {
             None
         };
@@ -797,8 +805,8 @@ impl DemagogApp {
                 self.splitter.stale = true;
                 self.refresh_raw_char_count();
                 self.mark_result_stale();
-                self.find_dirty = true;
-                self.find_last_edit = Instant::now();
+                self.search.find_dirty = true;
+                self.search.find_last_edit = Instant::now();
             }
             self.scroll_to_find_match(ui, &output);
         });
@@ -847,8 +855,8 @@ impl DemagogApp {
                                 self.source_dirty = true;
                                 self.splitter.stale = true;
                                 self.mark_result_stale();
-                                self.find_dirty = true;
-                                self.find_last_edit = Instant::now();
+                                self.search.find_dirty = true;
+                                self.search.find_last_edit = Instant::now();
                             }
                         }
                     });
@@ -862,17 +870,17 @@ impl DemagogApp {
                         );
             ui.add_space(4.0);
         }
-        if self.find_open {
+        if self.search.find_open {
             self.show_find_bar(ui);
         }
         ui.add_space(4.0);
-        let find_ranges = if self.find_open {
-            self.find_matches.ranges.clone()
+        let find_ranges = if self.search.find_open {
+            self.search.find_matches.ranges.clone()
         } else {
             Vec::new()
         };
-        let find_current = if self.find_open {
-            Some(self.find_current)
+        let find_current = if self.search.find_open {
+            Some(self.search.find_current)
         } else {
             None
         };
@@ -900,8 +908,8 @@ impl DemagogApp {
                     self.rechunk_result();
                 }
                 self.refresh_processed_char_count();
-                self.find_dirty = true;
-                self.find_last_edit = Instant::now();
+                self.search.find_dirty = true;
+                self.search.find_last_edit = Instant::now();
             }
             self.scroll_to_find_match(ui, &output);
         });
@@ -976,7 +984,7 @@ impl DemagogApp {
                 |ui, rows| {
                     for idx in rows {
                         let chunk = &self.document.chunks[idx];
-                        let is_copied = self.last_copied_chunk == Some(idx);
+                        let is_copied = self.view.last_copied_chunk == Some(idx);
                         let mut frame = egui::Frame::group(ui.style());
                         if is_copied {
                             frame = frame
@@ -1006,7 +1014,7 @@ impl DemagogApp {
                                         .and_then(|mut cb| cb.set_text(chunk.clone()))
                                     {
                                         Ok(()) => {
-                                            self.last_copied_chunk = Some(idx);
+                                            self.view.last_copied_chunk = Some(idx);
                                             copied_status = Some((
                                                 StatusLevel::Success,
                                                 format!(
@@ -1067,16 +1075,18 @@ impl DemagogApp {
             }
             ui.separator();
             let filter_label = ui.label("Поиск по заменам:");
-            ui.add(egui::TextEdit::singleline(&mut self.diff_filter).desired_width(240.0))
+            ui.add(egui::TextEdit::singleline(&mut self.diff.diff_filter).desired_width(240.0))
                 .labelled_by(filter_label.id);
         });
         self.show_stale_banner(ui, theme);
         ui.separator();
 
-        if !self.diff_cache_valid || self.diff_filter.to_lowercase() != self.diff_filter_cache {
+        if !self.diff.diff_cache_valid
+            || self.diff.diff_filter.to_lowercase() != self.diff.diff_filter_cache
+        {
             self.refresh_diff_visible();
         }
-        let diff_total = self.diff_visible.len();
+        let diff_total = self.diff.diff_visible.len();
         egui::CollapsingHeader::new("⏱ Тайминги по словарям")
             .default_open(false)
             .show(ui, |ui| {
@@ -1118,7 +1128,7 @@ impl DemagogApp {
         }
         if self.report.events.is_empty() {
             ui.label("Для записи детальных примеров каждого сработавшего правила нажмите кнопку «🔬 С журналом замен» на верхней панели.");
-        } else if self.diff_visible.is_empty() {
+        } else if self.diff.diff_visible.is_empty() {
             ui.label("Ничего не найдено по фильтру замен.");
         } else {
             ScrollArea::both().id_salt("diff_scroll").show_rows(
@@ -1133,7 +1143,7 @@ impl DemagogApp {
                         .start_row(rows.start)
                         .striped(true)
                         .show(ui, |ui| {
-                            for &event_index in &self.diff_visible[rows.clone()] {
+                            for &event_index in &self.diff.diff_visible[rows.clone()] {
                                 let ev = &self.report.events[event_index];
                                 ui.label(&ev.dictionary_name);
                                 ui.add(
