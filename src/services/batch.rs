@@ -206,52 +206,8 @@ fn process_one(
     Ok(outputs)
 }
 
-pub(crate) fn target_key(path: &Path) -> String {
-    path.to_string_lossy().to_lowercase()
-}
-
-pub(crate) fn unique_target(
-    dir: &Path,
-    file_name: &str,
-    overwrite: bool,
-    used: &HashSet<String>,
-) -> PathBuf {
-    // `used` guards against two inputs of the same run mapping to one target:
-    // overwrite may replace previous runs' files, never a sibling's result.
-    // Keys are lowercased because Windows paths are case-insensitive.
-    let is_free = |path: &Path| !used.contains(&target_key(path)) && (overwrite || !path.exists());
-    let target = dir.join(file_name);
-    if is_free(&target) {
-        return target;
-    }
-    let (stem, ext) = match file_name.rfind('.') {
-        Some(pos) => (&file_name[..pos], &file_name[pos..]),
-        None => (file_name, ""),
-    };
-    let mut n = 2;
-    loop {
-        let candidate = dir.join(format!("{stem} ({n}){ext}"));
-        if is_free(&candidate) {
-            return candidate;
-        }
-        n += 1;
-    }
-}
-
-pub(crate) fn output_stem(path: &Path) -> String {
-    let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    if file_name.to_ascii_lowercase().ends_with(".fb2.zip") {
-        return file_name[..file_name.len() - ".fb2.zip".len()].to_string();
-    }
-    path.file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("book")
-        .to_string()
-}
-
-fn is_cancelled(cancel: Option<&AtomicBool>) -> bool {
-    cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
-}
+// Утилиты именования живут в нейтральном `io::paths`; ре-экспорт для совместимости.
+pub(crate) use crate::io::paths::{output_stem, target_key, unique_target};
 
 fn send(tx: Option<&Sender<BatchProgress>>, msg: BatchProgress) {
     if let Some(tx) = tx {
