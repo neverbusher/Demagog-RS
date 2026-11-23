@@ -1,6 +1,6 @@
 use super::*;
 use crate::domain::{BatchQueueEntry, BatchSettings};
-use crate::services::batch::{BatchInput, BatchOptions, BatchOutputs, BatchSummary, run_batch};
+use crate::services::batch::{BatchInput, BatchOptions, BatchOutcome, BatchOutputs, run_batch};
 
 #[derive(Debug, Clone)]
 pub(super) enum BatchItemStatus {
@@ -26,7 +26,7 @@ pub(super) struct BatchState {
     pub export_chunks: bool,
     pub overwrite: bool,
     pub running: bool,
-    pub summary: Option<BatchSummary>,
+    pub summary: Option<BatchOutcome>,
     pub error: Option<String>,
 }
 
@@ -333,14 +333,15 @@ impl DemagogApp {
                     {
                         self.start_batch(ctx.clone());
                     }
-                    if let Some(summary) = self.batch.summary {
-                        let text = if summary.cancelled {
+                    if let Some(outcome) = self.batch.summary {
+                        let counts = outcome.counts();
+                        let text = if outcome.is_cancelled() {
                             format!(
                                 "Отменено: обработано {}, ошибок {}",
-                                summary.succeeded, summary.failed
+                                counts.succeeded, counts.failed
                             )
                         } else {
-                            format!("Готово: {} | Ошибок: {}", summary.succeeded, summary.failed)
+                            format!("Готово: {} | Ошибок: {}", counts.succeeded, counts.failed)
                         };
                         ui.label(RichText::new(text).strong());
                     }
@@ -440,7 +441,7 @@ impl DemagogApp {
             );
             drop(btx);
             let _ = forwarder.join();
-            if let Err(error) = result {
+            if let Err(AppError::Failed(error)) = result {
                 let _ = tx.send(WorkerMessage::BatchSetupError(error));
                 ctx.request_repaint();
             }

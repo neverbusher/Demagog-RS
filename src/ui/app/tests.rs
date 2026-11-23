@@ -1,5 +1,6 @@
 use super::*;
 use crate::domain::{DictionaryKind, ProcessOutput};
+use crate::services::batch::{BatchCounts, BatchOutcome};
 
 #[test]
 fn text_would_be_lost_for_non_empty_text() {
@@ -1342,7 +1343,11 @@ fn batch_cancel_resets_running_items_to_queued() {
         name: "demagog-batch-cancel-a.txt".to_string(),
     }))
     .unwrap();
-    tx.send(WorkerMessage::Batch(BatchProgress::Cancelled))
+    let outcome = BatchOutcome::Cancelled(BatchCounts {
+        succeeded: 1,
+        failed: 2,
+    });
+    tx.send(WorkerMessage::Batch(BatchProgress::Finished(outcome)))
         .unwrap();
     drop(tx);
 
@@ -1354,7 +1359,38 @@ fn batch_cancel_resets_running_items_to_queued() {
     ));
     assert!(!app.batch.running);
     assert!(!app.is_busy);
-    assert!(app.batch.summary.expect("summary set").cancelled);
+    assert_eq!(app.batch.summary, Some(outcome));
+    assert_eq!(app.progress_ratio, 0.0);
+    assert_eq!(app.status_line, "Пакетная обработка отменена");
+    assert_eq!(app.status_level, StatusLevel::Warning);
+}
+
+#[test]
+fn batch_completion_uses_service_counts_and_finishes_progress() {
+    use std::sync::mpsc;
+
+    let mut app = ui_test_app("", "", Vec::new());
+    app.batch.running = true;
+    app.is_busy = true;
+    let outcome = BatchOutcome::Completed(BatchCounts {
+        succeeded: 3,
+        failed: 2,
+    });
+
+    let (tx, rx) = mpsc::channel();
+    app.rx = Some(rx);
+    tx.send(WorkerMessage::Batch(BatchProgress::Finished(outcome)))
+        .unwrap();
+    drop(tx);
+
+    app.poll_worker();
+
+    assert!(!app.batch.running);
+    assert!(!app.is_busy);
+    assert_eq!(app.batch.summary, Some(outcome));
+    assert_eq!(app.progress_ratio, 1.0);
+    assert_eq!(app.status_line, "Пакет готов: обработано 3, ошибок 2");
+    assert_eq!(app.status_level, StatusLevel::Warning);
 }
 
 #[test]
@@ -1400,9 +1436,17 @@ fn batch_run_through_app_worker_writes_outputs_and_updates_queue() {
         app.batch.items[0].status,
         batch::BatchItemStatus::Done(_)
     ));
-    let summary = app.batch.summary.expect("summary set");
-    assert_eq!(summary.succeeded, 1);
-    assert_eq!(summary.failed, 0);
+    let outcome = app.batch.summary.expect("summary set");
+    assert_eq!(
+        outcome,
+        BatchOutcome::Completed(BatchCounts {
+            succeeded: 1,
+            failed: 0,
+        })
+    );
+    assert_eq!(app.progress_ratio, 1.0);
+    assert_eq!(app.status_line, "Пакет готов: обработано 1, ошибок 0");
+    assert_eq!(app.status_level, StatusLevel::Success);
     assert_eq!(
         std::fs::read_to_string(out.join("sub").join("alpha.txt")).unwrap(),
         "Глава первая.\nТекст."

@@ -17,7 +17,7 @@ use crate::engine::loader::{
 use crate::io::book_reader::{CompositeBookReader, SUPPORTED_BOOK_FORMATS, can_read_book};
 use crate::io::settings_store;
 use crate::ports::{DocumentReader, StressFormatter, TextChunker, TextProcessor, is_cancelled};
-use crate::services::batch::{BatchProgress, BatchSummary};
+use crate::services::batch::BatchProgress;
 use crate::services::book_splitter::{BatchSplitProgress, BatchSplitSummary};
 use crate::services::chunker::SentenceAwareChunker;
 use crate::services::dictionary_check::{self, CheckReport};
@@ -1032,64 +1032,41 @@ impl DemagogApp {
                                     let total = self.batch.items.len().max(1);
                                     self.progress_ratio = (index + 1) as f32 / total as f32;
                                 }
-                                BatchProgress::Completed { succeeded, failed } => {
+                                BatchProgress::Finished(outcome) => {
                                     self.batch.running = false;
-                                    self.batch.summary = Some(BatchSummary {
-                                        succeeded,
-                                        failed,
-                                        cancelled: false,
-                                    });
-                                    self.cancel_flag = None;
-                                    self.is_busy = false;
-                                    self.progress_ratio = 1.0;
-                                    let level = if failed > 0 {
-                                        StatusLevel::Warning
-                                    } else {
-                                        StatusLevel::Success
-                                    };
-                                    pending_status = Some((
-                                        level,
-                                        format!(
-                                            "Пакет готов: обработано {succeeded}, ошибок {failed}"
-                                        ),
-                                    ));
-                                    finished = true;
-                                }
-                                BatchProgress::Cancelled => {
-                                    self.batch.running = false;
-                                    for item in &mut self.batch.items {
-                                        if matches!(item.status, batch::BatchItemStatus::Running) {
-                                            item.status = batch::BatchItemStatus::Queued;
+                                    self.batch.summary = Some(outcome);
+                                    let counts = outcome.counts();
+                                    if outcome.is_cancelled() {
+                                        for item in &mut self.batch.items {
+                                            if matches!(
+                                                item.status,
+                                                batch::BatchItemStatus::Running
+                                            ) {
+                                                item.status = batch::BatchItemStatus::Queued;
+                                            }
                                         }
+                                        self.progress_ratio = 0.0;
+                                        pending_status = Some((
+                                            StatusLevel::Warning,
+                                            "Пакетная обработка отменена".to_string(),
+                                        ));
+                                    } else {
+                                        self.progress_ratio = 1.0;
+                                        let level = if counts.failed > 0 {
+                                            StatusLevel::Warning
+                                        } else {
+                                            StatusLevel::Success
+                                        };
+                                        pending_status = Some((
+                                            level,
+                                            format!(
+                                                "Пакет готов: обработано {}, ошибок {}",
+                                                counts.succeeded, counts.failed
+                                            ),
+                                        ));
                                     }
-                                    let succeeded = self
-                                        .batch
-                                        .items
-                                        .iter()
-                                        .filter(|item| {
-                                            matches!(item.status, batch::BatchItemStatus::Done(_))
-                                        })
-                                        .count();
-                                    let failed = self
-                                        .batch
-                                        .items
-                                        .iter()
-                                        .filter(|item| {
-                                            matches!(item.status, batch::BatchItemStatus::Failed(_))
-                                        })
-                                        .count();
-                                    self.batch.summary = Some(BatchSummary {
-                                        succeeded,
-                                        failed,
-                                        cancelled: true,
-                                    });
                                     self.cancel_flag = None;
                                     self.is_busy = false;
-                                    self.progress_ratio = 0.0;
-                                    pending_status = Some((
-                                        StatusLevel::Warning,
-                                        "Пакетная обработка отменена".to_string(),
-                                    ));
                                     finished = true;
                                 }
                             },

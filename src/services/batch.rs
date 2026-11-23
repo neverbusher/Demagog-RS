@@ -32,6 +32,30 @@ pub struct BatchOutputs {
     pub chunk_count: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BatchCounts {
+    pub succeeded: usize,
+    pub failed: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchOutcome {
+    Completed(BatchCounts),
+    Cancelled(BatchCounts),
+}
+
+impl BatchOutcome {
+    pub fn counts(self) -> BatchCounts {
+        match self {
+            Self::Completed(counts) | Self::Cancelled(counts) => counts,
+        }
+    }
+
+    pub fn is_cancelled(self) -> bool {
+        matches!(self, Self::Cancelled(_))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum BatchProgress {
     FileStarted {
@@ -43,18 +67,7 @@ pub enum BatchProgress {
         index: usize,
         outcome: Result<BatchOutputs, String>,
     },
-    Completed {
-        succeeded: usize,
-        failed: usize,
-    },
-    Cancelled,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct BatchSummary {
-    pub succeeded: usize,
-    pub failed: usize,
-    pub cancelled: bool,
+    Finished(BatchOutcome),
 }
 
 pub fn run_batch(
@@ -65,22 +78,22 @@ pub fn run_batch(
     options: &BatchOptions,
     cancel: Option<&AtomicBool>,
     progress_tx: Option<&Sender<BatchProgress>>,
-) -> Result<BatchSummary, String> {
+) -> AppResult<BatchOutcome> {
     std::fs::create_dir_all(&options.output_dir).map_err(|e| {
-        format!(
+        AppError::failed(format!(
             "Не удалось создать папку {}: {e}",
             options.output_dir.display()
-        )
+        ))
     })?;
 
-    let mut summary = BatchSummary::default();
+    let mut counts = BatchCounts::default();
     let mut used: HashSet<String> = HashSet::new();
     let total = files.len();
     for (index, input) in files.iter().enumerate() {
         if is_cancelled(cancel) {
-            summary.cancelled = true;
-            send(progress_tx, BatchProgress::Cancelled);
-            return Ok(summary);
+            let outcome = BatchOutcome::Cancelled(counts);
+            send(progress_tx, BatchProgress::Finished(outcome));
+            return Ok(outcome);
         }
         send(
             progress_tx,
@@ -97,7 +110,7 @@ pub fn run_batch(
 
         match process_one(input, reader, processors, pipeline, options, cancel, &used) {
             Ok(outputs) => {
-                summary.succeeded += 1;
+                counts.succeeded += 1;
                 if let Some(path) = &outputs.txt {
                     used.insert(target_key(path));
                 }
@@ -114,11 +127,11 @@ pub fn run_batch(
             }
             Err(err) => {
                 if is_cancelled(cancel) || err.is_cancelled() {
-                    summary.cancelled = true;
-                    send(progress_tx, BatchProgress::Cancelled);
-                    return Ok(summary);
+                    let outcome = BatchOutcome::Cancelled(counts);
+                    send(progress_tx, BatchProgress::Finished(outcome));
+                    return Ok(outcome);
                 }
-                summary.failed += 1;
+                counts.failed += 1;
                 send(
                     progress_tx,
                     BatchProgress::FileFinished {
@@ -130,14 +143,9 @@ pub fn run_batch(
         }
     }
 
-    send(
-        progress_tx,
-        BatchProgress::Completed {
-            succeeded: summary.succeeded,
-            failed: summary.failed,
-        },
-    );
-    Ok(summary)
+    let outcome = BatchOutcome::Completed(counts);
+    send(progress_tx, BatchProgress::Finished(outcome));
+    Ok(outcome)
 }
 
 fn process_one(
@@ -217,7 +225,7 @@ fn send(tx: Option<&Sender<BatchProgress>>, msg: BatchProgress) {
 mod tests {
     use super::*;
     use crate::domain::{
-        ChunkConfig, DictionaryKind, ProcessOutput, StressFormat, TextCleanupConfig,
+        BookDocument, ChunkConfig, DictionaryKind, ProcessOutput, StressFormat, TextCleanupConfig,
     };
     use crate::io::book_reader::CompositeBookReader;
     use crate::services::chunker::SentenceAwareChunker;
@@ -322,6 +330,28 @@ mod tests {
         }
     }
 
+    struct CancelSpecificReader {
+        inner: CompositeBookReader,
+        path: PathBuf,
+    }
+
+    impl DocumentReader for CancelSpecificReader {
+        fn can_read(&self, path: &Path) -> bool {
+            self.inner.can_read(path)
+        }
+
+        fn read_document_with_cancel(
+            &self,
+            path: &Path,
+            cancel: Option<&AtomicBool>,
+        ) -> AppResult<BookDocument> {
+            if path == self.path.as_path() {
+                return Err(AppError::cancelled("Чтение книги отменено"));
+            }
+            self.inner.read_document_with_cancel(path, cancel)
+        }
+    }
+
     #[test]
     fn writes_txt_and_chunks_json_for_each_file() {
         let root = temp_dir("both");
@@ -332,7 +362,7 @@ mod tests {
         let out = root.join("out");
 
         let (tx, rx) = mpsc::channel();
-        let summary = run_batch(
+        let outcome = run_batch(
             &flat(&[alpha, beta]),
             &CompositeBookReader::new(),
             &[],
@@ -345,12 +375,11 @@ mod tests {
         drop(tx);
 
         assert_eq!(
-            summary,
-            BatchSummary {
+            outcome,
+            BatchOutcome::Completed(BatchCounts {
                 succeeded: 2,
                 failed: 0,
-                cancelled: false
-            }
+            })
         );
         assert_eq!(
             std::fs::read_to_string(out.join("alpha.txt")).unwrap(),
@@ -384,10 +413,7 @@ mod tests {
         assert_eq!(finished_ok, 2);
         assert!(matches!(
             messages.last(),
-            Some(BatchProgress::Completed {
-                succeeded: 2,
-                failed: 0
-            })
+            Some(BatchProgress::Finished(finished)) if *finished == outcome
         ));
 
         let _ = std::fs::remove_dir_all(&root);
@@ -402,7 +428,7 @@ mod tests {
         let out = root.join("out");
 
         let (tx, rx) = mpsc::channel();
-        let summary = run_batch(
+        let outcome = run_batch(
             &flat(&[alpha, missing, beta]),
             &CompositeBookReader::new(),
             &[],
@@ -414,8 +440,13 @@ mod tests {
         .expect("batch runs");
         drop(tx);
 
-        assert_eq!(summary.succeeded, 2);
-        assert_eq!(summary.failed, 1);
+        assert_eq!(
+            outcome,
+            BatchOutcome::Completed(BatchCounts {
+                succeeded: 2,
+                failed: 1,
+            })
+        );
         assert!(out.join("alpha.txt").exists());
         assert!(out.join("beta.txt").exists());
         let messages = collect(rx);
@@ -426,6 +457,10 @@ mod tests {
                 outcome: Err(_)
             }
         )));
+        assert!(matches!(
+            messages.last(),
+            Some(BatchProgress::Finished(finished)) if *finished == outcome
+        ));
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -437,7 +472,7 @@ mod tests {
         let image = write_book(&root, "image.png", "not a book");
         let out = root.join("out");
 
-        let summary = run_batch(
+        let outcome = run_batch(
             &flat(&[alpha, image]),
             &CompositeBookReader::new(),
             &[],
@@ -448,8 +483,13 @@ mod tests {
         )
         .expect("batch runs");
 
-        assert_eq!(summary.succeeded, 1);
-        assert_eq!(summary.failed, 1);
+        assert_eq!(
+            outcome,
+            BatchOutcome::Completed(BatchCounts {
+                succeeded: 1,
+                failed: 1,
+            })
+        );
         assert!(out.join("alpha.txt").exists());
         assert!(!out.join("image.txt").exists());
 
@@ -464,7 +504,7 @@ mod tests {
         let flag = AtomicBool::new(true);
 
         let (tx, rx) = mpsc::channel();
-        let summary = run_batch(
+        let outcome = run_batch(
             &flat(&[alpha]),
             &CompositeBookReader::new(),
             &[],
@@ -476,10 +516,19 @@ mod tests {
         .expect("batch runs");
         drop(tx);
 
-        assert!(summary.cancelled);
-        assert_eq!(summary.succeeded, 0);
+        assert_eq!(
+            outcome,
+            BatchOutcome::Cancelled(BatchCounts {
+                succeeded: 0,
+                failed: 0,
+            })
+        );
         assert!(!out.join("alpha.txt").exists());
-        assert!(matches!(collect(rx).last(), Some(BatchProgress::Cancelled)));
+        let messages = collect(rx);
+        assert!(matches!(
+            messages.last(),
+            Some(BatchProgress::Finished(finished)) if *finished == outcome
+        ));
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -496,21 +545,99 @@ mod tests {
             calls: std::sync::atomic::AtomicUsize::new(0),
         })];
 
-        let summary = run_batch(
+        let (tx, rx) = mpsc::channel();
+        let outcome = run_batch(
             &flat(&[alpha, beta]),
             &CompositeBookReader::new(),
             &processors,
             &pipeline(),
             &options(out.clone()),
             Some(flag.as_ref()),
-            None,
+            Some(&tx),
         )
         .expect("batch runs");
+        drop(tx);
 
-        assert!(summary.cancelled);
-        assert_eq!(summary.succeeded, 1);
+        assert_eq!(
+            outcome,
+            BatchOutcome::Cancelled(BatchCounts {
+                succeeded: 1,
+                failed: 0,
+            })
+        );
         assert!(out.join("alpha.txt").exists());
         assert!(!out.join("beta.txt").exists());
+        let messages = collect(rx);
+        assert!(matches!(
+            messages.last(),
+            Some(BatchProgress::Finished(finished)) if *finished == outcome
+        ));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn typed_cancellation_preserves_partial_counts_without_flag() {
+        let root = temp_dir("typedcancel");
+        let missing = root.join("missing.txt");
+        let alpha = write_book(&root, "alpha.txt", "Текст.");
+        let beta = write_book(&root, "beta.txt", "Отменяемая книга.");
+        let gamma = write_book(&root, "gamma.txt", "Недостигнутая книга.");
+        let out = root.join("out");
+        let flag = AtomicBool::new(false);
+        let reader = CancelSpecificReader {
+            inner: CompositeBookReader::new(),
+            path: beta.clone(),
+        };
+
+        let (tx, rx) = mpsc::channel();
+        let outcome = run_batch(
+            &flat(&[missing, alpha, beta, gamma]),
+            &reader,
+            &[],
+            &pipeline(),
+            &options(out.clone()),
+            Some(&flag),
+            Some(&tx),
+        )
+        .expect("batch runs");
+        drop(tx);
+
+        assert_eq!(
+            outcome,
+            BatchOutcome::Cancelled(BatchCounts {
+                succeeded: 1,
+                failed: 1,
+            })
+        );
+        assert!(!flag.load(Ordering::Relaxed));
+        assert!(out.join("alpha.txt").exists());
+        assert!(!out.join("beta.txt").exists());
+        assert!(!out.join("gamma.txt").exists());
+        let messages = collect(rx);
+        assert!(messages.iter().any(|m| matches!(
+            m,
+            BatchProgress::FileFinished {
+                index: 0,
+                outcome: Err(_)
+            }
+        )));
+        assert!(messages.iter().any(|m| matches!(
+            m,
+            BatchProgress::FileFinished {
+                index: 1,
+                outcome: Ok(_)
+            }
+        )));
+        assert!(
+            !messages
+                .iter()
+                .any(|m| matches!(m, BatchProgress::FileFinished { index: 2, .. }))
+        );
+        assert!(matches!(
+            messages.last(),
+            Some(BatchProgress::Finished(finished)) if *finished == outcome
+        ));
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -525,7 +652,7 @@ mod tests {
 
         let mut opts = options(out.clone());
         opts.overwrite = false;
-        let summary = run_batch(
+        let outcome = run_batch(
             &flat(&[alpha]),
             &CompositeBookReader::new(),
             &[],
@@ -536,7 +663,13 @@ mod tests {
         )
         .expect("batch runs");
 
-        assert_eq!(summary.succeeded, 1);
+        assert_eq!(
+            outcome,
+            BatchOutcome::Completed(BatchCounts {
+                succeeded: 1,
+                failed: 0,
+            })
+        );
         assert_eq!(
             std::fs::read_to_string(out.join("alpha.txt")).unwrap(),
             "старое"
@@ -557,7 +690,7 @@ mod tests {
         std::fs::create_dir_all(&out).unwrap();
         std::fs::write(out.join("alpha.txt"), "старое").unwrap();
 
-        run_batch(
+        let outcome = run_batch(
             &flat(&[alpha]),
             &CompositeBookReader::new(),
             &[],
@@ -568,6 +701,13 @@ mod tests {
         )
         .expect("batch runs");
 
+        assert_eq!(
+            outcome,
+            BatchOutcome::Completed(BatchCounts {
+                succeeded: 1,
+                failed: 0,
+            })
+        );
         assert_eq!(
             std::fs::read_to_string(out.join("alpha.txt")).unwrap(),
             "Новый текст."
@@ -584,7 +724,7 @@ mod tests {
 
         let mut opts = options(out.clone());
         opts.export_chunks = false;
-        run_batch(
+        let outcome = run_batch(
             &flat(&[alpha]),
             &CompositeBookReader::new(),
             &[],
@@ -595,6 +735,13 @@ mod tests {
         )
         .expect("batch runs");
 
+        assert_eq!(
+            outcome,
+            BatchOutcome::Completed(BatchCounts {
+                succeeded: 1,
+                failed: 0,
+            })
+        );
         assert!(out.join("alpha.txt").exists());
         assert!(!out.join("alpha_chunks.json").exists());
 
@@ -609,7 +756,7 @@ mod tests {
 
         let mut opts = options(out.clone());
         opts.export_txt = false;
-        run_batch(
+        let outcome = run_batch(
             &flat(&[alpha]),
             &CompositeBookReader::new(),
             &[],
@@ -620,6 +767,13 @@ mod tests {
         )
         .expect("batch runs");
 
+        assert_eq!(
+            outcome,
+            BatchOutcome::Completed(BatchCounts {
+                succeeded: 1,
+                failed: 0,
+            })
+        );
         assert!(!out.join("alpha.txt").exists());
         assert!(out.join("alpha_chunks.json").exists());
 
@@ -632,22 +786,41 @@ mod tests {
         let alpha = write_book(&root, "alpha.txt", "Текст.");
         let out = root.join("out");
         let processors: Vec<Arc<dyn TextProcessor>> = vec![Arc::new(EmptyingProcessor)];
+        let (tx, rx) = mpsc::channel();
 
-        let summary = run_batch(
+        let outcome = run_batch(
             &flat(&[alpha]),
             &CompositeBookReader::new(),
             &processors,
             &pipeline(),
             &options(out.clone()),
             None,
-            None,
+            Some(&tx),
         )
         .expect("batch runs");
+        drop(tx);
 
-        assert_eq!(summary.failed, 1);
-        assert_eq!(summary.succeeded, 0);
+        assert_eq!(
+            outcome,
+            BatchOutcome::Completed(BatchCounts {
+                succeeded: 0,
+                failed: 1,
+            })
+        );
         assert!(!out.join("alpha.txt").exists());
         assert!(!out.join("alpha_chunks.json").exists());
+        let messages = collect(rx);
+        assert!(messages.iter().any(|m| matches!(
+            m,
+            BatchProgress::FileFinished {
+                index: 0,
+                outcome: Err(_)
+            }
+        )));
+        assert!(matches!(
+            messages.last(),
+            Some(BatchProgress::Finished(finished)) if *finished == outcome
+        ));
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -669,7 +842,17 @@ mod tests {
             None,
         );
 
-        assert!(result.is_err());
+        let expected_prefix = format!(
+            "Не удалось создать папку {}: ",
+            blocker.join("out").display()
+        );
+        match result {
+            Err(AppError::Failed(message)) => {
+                assert!(message.starts_with(&expected_prefix), "{message}");
+            }
+            Err(error) => panic!("setup failure must be a genuine AppError: {error:?}"),
+            Ok(outcome) => panic!("setup unexpectedly succeeded: {outcome:?}"),
+        }
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -715,7 +898,7 @@ mod tests {
                 base_dir: input.clone(),
             },
         ];
-        let summary = run_batch(
+        let outcome = run_batch(
             &inputs,
             &CompositeBookReader::new(),
             &[],
@@ -726,7 +909,13 @@ mod tests {
         )
         .expect("batch runs");
 
-        assert_eq!(summary.succeeded, 2);
+        assert_eq!(
+            outcome,
+            BatchOutcome::Completed(BatchCounts {
+                succeeded: 2,
+                failed: 0,
+            })
+        );
         assert_eq!(
             std::fs::read_to_string(out.join("sub1").join("book.txt")).unwrap(),
             "Первая книга."
@@ -752,7 +941,7 @@ mod tests {
             path: book,
             base_dir: input.clone(),
         }];
-        run_batch(
+        let outcome = run_batch(
             &inputs,
             &CompositeBookReader::new(),
             &[],
@@ -763,6 +952,13 @@ mod tests {
         )
         .expect("batch runs");
 
+        assert_eq!(
+            outcome,
+            BatchOutcome::Completed(BatchCounts {
+                succeeded: 1,
+                failed: 0,
+            })
+        );
         let mirrored = out.join("Автор").join("Цикл");
         assert!(mirrored.join("book.txt").exists());
         assert!(mirrored.join("book_chunks.json").exists());
@@ -777,7 +973,7 @@ mod tests {
         let book = write_book(&root, "book.txt", "Текст.");
         let out = root.join("out");
 
-        run_batch(
+        let outcome = run_batch(
             &flat(&[book]),
             &CompositeBookReader::new(),
             &[],
@@ -788,6 +984,13 @@ mod tests {
         )
         .expect("batch runs");
 
+        assert_eq!(
+            outcome,
+            BatchOutcome::Completed(BatchCounts {
+                succeeded: 1,
+                failed: 0,
+            })
+        );
         assert!(out.join("book.txt").exists());
 
         let _ = std::fs::remove_dir_all(&root);
@@ -816,7 +1019,7 @@ mod tests {
         ];
         let mut opts = options(out.clone());
         opts.overwrite = false;
-        run_batch(
+        let outcome = run_batch(
             &inputs,
             &CompositeBookReader::new(),
             &[],
@@ -827,6 +1030,13 @@ mod tests {
         )
         .expect("batch runs");
 
+        assert_eq!(
+            outcome,
+            BatchOutcome::Completed(BatchCounts {
+                succeeded: 2,
+                failed: 0,
+            })
+        );
         assert_eq!(
             std::fs::read_to_string(out.join("book.txt")).unwrap(),
             "Первая."
@@ -860,7 +1070,7 @@ mod tests {
                 base_dir: in2,
             },
         ];
-        let summary = run_batch(
+        let outcome = run_batch(
             &inputs,
             &CompositeBookReader::new(),
             &[],
@@ -871,7 +1081,13 @@ mod tests {
         )
         .expect("batch runs");
 
-        assert_eq!(summary.succeeded, 2);
+        assert_eq!(
+            outcome,
+            BatchOutcome::Completed(BatchCounts {
+                succeeded: 2,
+                failed: 0,
+            })
+        );
         assert_eq!(
             std::fs::read_to_string(out.join("book.txt")).unwrap(),
             "Первая."
@@ -907,7 +1123,7 @@ mod tests {
                 base_dir: in2,
             },
         ];
-        let summary = run_batch(
+        let outcome = run_batch(
             &inputs,
             &CompositeBookReader::new(),
             &[],
@@ -918,7 +1134,13 @@ mod tests {
         )
         .expect("batch runs");
 
-        assert_eq!(summary.succeeded, 2);
+        assert_eq!(
+            outcome,
+            BatchOutcome::Completed(BatchCounts {
+                succeeded: 2,
+                failed: 0,
+            })
+        );
         assert_eq!(
             std::fs::read_to_string(out.join("Book.txt")).unwrap(),
             "Первая."
