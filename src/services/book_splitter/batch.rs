@@ -128,7 +128,9 @@ fn split_one_book(
     cancel: Option<&AtomicBool>,
     used: &mut HashSet<String>,
 ) -> Result<usize, String> {
-    let doc = reader.read_document_with_cancel(&input.path, cancel)?;
+    let doc = reader
+        .read_document_with_cancel(&input.path, cancel)
+        .map_err(|error| error.to_string())?;
     let parts = split_book(&doc.raw_text, &doc.headings, config);
     if parts.is_empty() {
         return Err("Книга пуста".to_string());

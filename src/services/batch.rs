@@ -149,7 +149,9 @@ fn process_one(
     cancel: Option<&AtomicBool>,
     used: &HashSet<String>,
 ) -> Result<BatchOutputs, String> {
-    let doc = reader.read_document_with_cancel(&input.path, cancel)?;
+    let doc = reader
+        .read_document_with_cancel(&input.path, cancel)
+        .map_err(|error| error.to_string())?;
     let result = pipeline
         .execute(
             &doc.raw_text,

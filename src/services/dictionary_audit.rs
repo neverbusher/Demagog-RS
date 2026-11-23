@@ -1,9 +1,11 @@
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
+use crate::domain::{AppError, AppResult};
 use crate::engine::dic_processor::split_dic_rule as split_rule;
 use crate::engine::loader::sorted_dictionary_paths;
 use crate::io::encoding::decode_text_bytes;
+use crate::ports::is_cancelled;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuditKind {
@@ -153,13 +155,13 @@ pub fn expected_by_design(purpose: &str) -> bool {
 pub fn audit_dictionaries_with_cancel(
     dir: &Path,
     cancel: Option<&AtomicBool>,
-) -> Result<AuditReport, String> {
+) -> AppResult<AuditReport> {
     let paths = sorted_dictionary_paths(dir)?;
     let mut report = AuditReport::default();
 
     for path in paths {
-        if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
-            return Err("Аудит словарей отменён".to_string());
+        if is_cancelled(cancel) {
+            return Err(AppError::cancelled("Аудит словарей отменён"));
         }
         if !path
             .extension()

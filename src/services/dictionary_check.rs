@@ -187,11 +187,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
-use crate::domain::{ChunkConfig, StressFormat, TextCleanupConfig};
+use crate::domain::{AppError, AppResult, ChunkConfig, StressFormat, TextCleanupConfig};
 use crate::engine::loader::{load_dictionaries_parallel_with_cancel, sorted_dictionary_paths};
-use crate::ports::TextProcessor;
+use crate::ports::{TextProcessor, is_cancelled};
 use crate::services::chunker::SentenceAwareChunker;
 use crate::services::dictionary_audit::{AuditReport, audit_dictionaries_with_cancel};
 use crate::services::pipeline::{PipelineOptions, ProcessingPipeline};
@@ -351,7 +351,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 /// Hashes every top-level .dic/.rex file, sorted by name.
 pub fn dictionary_hashes(dir: &Path) -> Result<Vec<(String, String)>, String> {
-    let paths = sorted_dictionary_paths(dir)?;
+    let paths = sorted_dictionary_paths(dir).map_err(|error| error.to_string())?;
     let mut out = Vec::new();
     for path in paths {
         let name = path
@@ -433,23 +433,20 @@ impl CheckReport {
     }
 }
 
-pub fn run_check(dir: &Path) -> Result<CheckReport, String> {
+pub fn run_check(dir: &Path) -> AppResult<CheckReport> {
     run_check_with_cancel(dir, None)
 }
 
 const CHECK_CANCELLED: &str = "Проверка словарей отменена";
 
-pub fn run_check_with_cancel(
-    dir: &Path,
-    cancel: Option<&AtomicBool>,
-) -> Result<CheckReport, String> {
-    let is_cancelled = || {
-        cancel
-            .map(|flag| flag.load(Ordering::Relaxed))
-            .unwrap_or(false)
-    };
+fn check_cancelled() -> AppError {
+    AppError::cancelled(CHECK_CANCELLED)
+}
+
+pub fn run_check_with_cancel(dir: &Path, cancel: Option<&AtomicBool>) -> AppResult<CheckReport> {
+    let is_cancelled = || is_cancelled(cancel);
     if is_cancelled() {
-        return Err(CHECK_CANCELLED.to_string());
+        return Err(check_cancelled());
     }
     let paths = sorted_dictionary_paths(dir)?;
     let names: Vec<String> = paths
@@ -467,7 +464,7 @@ pub fn run_check_with_cancel(
     }
     let report = load_dictionaries_parallel_with_cancel(dir, cancel)?;
     if is_cancelled() {
-        return Err(CHECK_CANCELLED.to_string());
+        return Err(check_cancelled());
     }
     let loaded = report.compiled.len();
     let total_rules: usize = report
@@ -490,7 +487,7 @@ pub fn run_check_with_cancel(
         Ok(audit) => audit,
         Err(error) => {
             if is_cancelled() {
-                return Err("Проверка словарей отменена".to_string());
+                return Err(check_cancelled());
             }
             order
                 .warnings
@@ -545,7 +542,7 @@ pub fn run_check_with_cancel(
     }
 
     if is_cancelled() {
-        return Err(CHECK_CANCELLED.to_string());
+        return Err(check_cancelled());
     }
 
     Ok(CheckReport {

@@ -447,7 +447,9 @@ impl DemagogApp {
                         });
                     }
                     Err(e) => {
-                        let _ = tx.send(WorkerMessage::Pipeline(PipelineProgress::Error(e)));
+                        let _ = tx.send(WorkerMessage::Pipeline(PipelineProgress::Error(
+                            e.to_string(),
+                        )));
                     }
                 }
             }
@@ -477,7 +479,9 @@ impl DemagogApp {
             if cancel.load(Ordering::Relaxed) {
                 let _ = tx.send(WorkerMessage::Pipeline(PipelineProgress::Cancelled));
             } else {
-                let _ = tx.send(WorkerMessage::DictionaryCheckFinished(result));
+                let _ = tx.send(WorkerMessage::DictionaryCheckFinished(
+                    result.map_err(|error| error.to_string()),
+                ));
             }
             ctx.request_repaint();
         });
@@ -1208,7 +1212,9 @@ impl DemagogApp {
             if cancel.load(Ordering::Relaxed) {
                 let _ = tx.send(WorkerMessage::Pipeline(PipelineProgress::Cancelled));
             } else {
-                let _ = tx.send(WorkerMessage::BookLoaded(result));
+                let _ = tx.send(WorkerMessage::BookLoaded(
+                    result.map_err(|error| error.to_string()),
+                ));
             }
             ctx.request_repaint();
         });
