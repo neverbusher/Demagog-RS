@@ -9,6 +9,7 @@ use zip::ZipArchive;
 
 use crate::domain::{BookDocument, BookHeading};
 use crate::io::encoding::{decode_text_bytes, looks_like_text_bytes};
+use crate::io::paths::book_stem;
 use crate::ports::{DocumentReader, is_cancelled as book_cancelled};
 
 pub const SUPPORTED_BOOK_FORMATS: &str =
@@ -433,17 +434,9 @@ impl DocumentReader for CompositeBookReader {
 }
 
 fn document_title_from_path(path: &Path) -> String {
-    let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    let base = if file_name.to_ascii_lowercase().ends_with(".fb2.zip") {
-        &file_name[..file_name.len() - ".fb2.zip".len()]
-    } else {
-        path.file_stem().and_then(|s| s.to_str()).unwrap_or("")
-    };
-    if base.is_empty() {
-        "Без названия".to_string()
-    } else {
-        base.to_string()
-    }
+    book_stem(path)
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or_else(|| "Без названия".to_string())
 }
 
 fn xml_element_text(xml: &str, element: &[u8]) -> Option<String> {

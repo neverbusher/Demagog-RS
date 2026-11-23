@@ -36,13 +36,20 @@ pub fn unique_target(
     }
 }
 
-pub fn output_stem(path: &Path) -> String {
+/// Book name without a compound `.fb2.zip` extension, or `None` when the
+/// path has no usable stem.
+pub fn book_stem(path: &Path) -> Option<String> {
     let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
     if file_name.to_ascii_lowercase().ends_with(".fb2.zip") {
-        return file_name[..file_name.len() - ".fb2.zip".len()].to_string();
+        return Some(file_name[..file_name.len() - ".fb2.zip".len()].to_string());
     }
     path.file_stem()
         .and_then(|s| s.to_str())
-        .unwrap_or("book")
-        .to_string()
+        .map(str::to_string)
+}
+
+pub fn output_stem(path: &Path) -> String {
+    book_stem(path)
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or_else(|| "book".to_string())
 }
