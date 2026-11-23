@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::engine::dic_processor::split_dic_rule as split_rule;
 use crate::engine::loader::sorted_dictionary_paths;
 use crate::io::encoding::decode_text_bytes;
 
@@ -218,16 +219,6 @@ pub fn audit_dictionaries_with_cancel(
     }
 
     Ok(report)
-}
-
-fn split_rule(line: &str) -> Option<(&str, &str)> {
-    if let Some(position) = line.find('\x06') {
-        return Some((&line[..position], &line[position + 1..]));
-    }
-    if let Some(position) = line.find("::") {
-        return Some((&line[..position], &line[position + 2..]));
-    }
-    line.split_once('=')
 }
 
 fn strip_markers(lhs: &str) -> &str {

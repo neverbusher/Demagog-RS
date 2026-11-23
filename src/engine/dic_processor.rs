@@ -725,7 +725,9 @@ fn escape_replacement_dollars(rhs: &str) -> String {
     rhs.replace('$', "$$")
 }
 
-fn split_dic_rule(line: &str) -> Option<(&str, &str)> {
+/// Разбор правила на LHS/RHS по первому встретившемуся разделителю
+/// (`\x06`, `::`, `=`). Единый источник правды для компилятора и аудита.
+pub(crate) fn split_dic_rule(line: &str) -> Option<(&str, &str)> {
     let mut best: Option<(usize, usize)> = None;
     for (separator, width) in [("\x06", 1usize), ("::", 2), ("=", 1)] {
         if let Some(pos) = line.find(separator)
