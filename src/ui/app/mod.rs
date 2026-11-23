@@ -15,6 +15,7 @@ use crate::engine::loader::{
     CompiledDictionary, DictionaryLoadReport, load_dictionaries_parallel_with_cancel,
 };
 use crate::io::book_reader::{CompositeBookReader, SUPPORTED_BOOK_FORMATS, can_read_book};
+use crate::io::settings_store;
 use crate::ports::{DocumentReader, StressFormatter, TextChunker, TextProcessor};
 use crate::services::batch::{BatchProgress, BatchSummary};
 use crate::services::book_splitter::{BatchSplitProgress, BatchSplitSummary};
@@ -263,7 +264,7 @@ impl DemagogApp {
     }
     pub fn init(egui_ctx: egui::Context, initial_dic_folder: PathBuf) -> Self {
         configure_cyrillic_fonts(&egui_ctx);
-        let (settings, settings_warning) = AppSettings::load(initial_dic_folder);
+        let (settings, settings_warning) = settings_store::load(initial_dic_folder);
         apply_style_settings(&egui_ctx, &settings);
 
         let document = Self::sample_book_document();
@@ -1750,7 +1751,7 @@ impl DemagogApp {
     }
 
     fn save_settings(&mut self) {
-        if let Err(err) = self.settings.save() {
+        if let Err(err) = settings_store::save(&self.settings) {
             self.set_status(
                 StatusLevel::Error,
                 format!("Не удалось сохранить настройки: {err}"),

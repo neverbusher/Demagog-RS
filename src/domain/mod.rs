@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ThemeMode {
@@ -376,78 +376,12 @@ impl AppSettings {
         self.theme = theme;
     }
 
-    pub fn settings_path() -> PathBuf {
-        if let Ok(exe) = std::env::current_exe()
-            && let Some(dir) = exe.parent()
-        {
-            return dir.join("settings.json");
-        }
-        PathBuf::from("settings.json")
-    }
-
-    pub fn load(default_dic_folder: PathBuf) -> (Self, Option<String>) {
-        Self::load_from_path(&Self::settings_path(), default_dic_folder)
-    }
-
-    fn load_from_path(path: &Path, default_dic_folder: PathBuf) -> (Self, Option<String>) {
-        let bytes = match std::fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return (Self::with_default_folder(default_dic_folder), None);
-            }
-            Err(error) => {
-                return (
-                    Self::with_default_folder(default_dic_folder),
-                    Some(format!(
-                        "Не удалось прочитать настройки {}: {error}",
-                        path.display()
-                    )),
-                );
-            }
-        };
-
-        match Self::from_json(&bytes, default_dic_folder.clone()) {
-            Ok(settings) => (settings, None),
-            Err(error) => {
-                let backup = path.with_extension("json.corrupt");
-                let backup_note = match std::fs::copy(path, &backup) {
-                    Ok(_) => format!("Сохранена копия: {}", backup.display()),
-                    Err(copy_error) => format!(
-                        "Не удалось сохранить копию {}: {copy_error}",
-                        backup.display()
-                    ),
-                };
-                (
-                    Self::with_default_folder(default_dic_folder),
-                    Some(format!(
-                        "Не удалось прочитать настройки {}: {error}. {backup_note}",
-                        path.display()
-                    )),
-                )
-            }
-        }
-    }
-
-    fn with_default_folder(default_dic_folder: PathBuf) -> Self {
-        Self {
-            dic_folder: default_dic_folder,
-            ..Self::default()
-        }
-    }
-
-    fn from_json(bytes: &[u8], default_dic_folder: PathBuf) -> Result<Self, serde_json::Error> {
+    pub(crate) fn from_json(bytes: &[u8]) -> Result<Self, serde_json::Error> {
         let mut settings = serde_json::from_slice::<Self>(bytes)?;
         if let Some(theme) = legacy_theme(settings.dark_mode, settings.warm_mode) {
             settings.theme = theme;
             settings.dark_mode = None;
             settings.warm_mode = None;
-        }
-        let is_old_demagog = settings
-            .dic_folder
-            .to_string_lossy()
-            .contains("Demagog-x64-Piper");
-        if (!settings.dic_folder.is_dir() || is_old_demagog) && default_dic_folder.is_dir() {
-            settings.dic_folder = default_dic_folder;
         }
         settings.ui_font_size = settings.ui_font_size.clamp(12.0, 28.0);
         settings.editor_font_size = settings.editor_font_size.clamp(12.0, 36.0);
@@ -455,19 +389,6 @@ impl AppSettings {
         settings.split.min_chars = settings.split.min_chars.min(100_000);
         settings.split.start_number = settings.split.start_number.max(1);
         Ok(settings)
-    }
-
-    pub fn save(&self) -> Result<(), String> {
-        self.save_to_path(&Self::settings_path())
-    }
-
-    /// Writes via a temporary file + rename so a crash mid-write cannot leave
-    /// a truncated settings.json (which would reset the app to defaults).
-    pub fn save_to_path(&self, path: &Path) -> Result<(), String> {
-        let json = serde_json::to_string_pretty(self).map_err(|err| err.to_string())?;
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json).map_err(|err| format!("{}: {err}", tmp.display()))?;
-        std::fs::rename(&tmp, path).map_err(|err| format!("{}: {err}", path.display()))
     }
 
     pub fn is_dic_enabled(&self, name: &str) -> bool {
@@ -673,31 +594,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn save_to_path_roundtrips_and_leaves_no_temp_file() {
-        let dir = std::env::temp_dir().join(format!(
-            "demagog-save-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        let path = dir.join("settings.json");
-
-        let settings = AppSettings::default();
-        settings.save_to_path(&path).expect("atomic save");
-
-        assert!(path.exists());
-        assert!(!path.with_extension("json.tmp").exists());
-        let (loaded, warning) = AppSettings::load_from_path(&path, PathBuf::from("dic"));
-        assert!(warning.is_none());
-        assert_eq!(loaded.theme(), settings.theme());
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn sidebar_groups_start_collapsed_on_a_fresh_install() {
         let settings = AppSettings::default();
 
@@ -761,11 +657,8 @@ mod tests {
             .expect("settings object")
             .remove("theme");
 
-        let loaded = AppSettings::from_json(
-            &serde_json::to_vec(&value).expect("legacy JSON"),
-            PathBuf::from("dic"),
-        )
-        .expect("load legacy settings");
+        let loaded = AppSettings::from_json(&serde_json::to_vec(&value).expect("legacy JSON"))
+            .expect("load legacy settings");
 
         assert_eq!(loaded.theme(), ThemeMode::Warm);
         assert!(loaded.dark_mode.is_none());
@@ -781,11 +674,8 @@ mod tests {
             .expect("settings object")
             .remove("cleanup");
 
-        let loaded = AppSettings::from_json(
-            &serde_json::to_vec(&value).expect("legacy JSON"),
-            PathBuf::from("dic"),
-        )
-        .expect("load settings without cleanup");
+        let loaded = AppSettings::from_json(&serde_json::to_vec(&value).expect("legacy JSON"))
+            .expect("load settings without cleanup");
 
         assert_eq!(loaded.cleanup, TextCleanupConfig::default());
         assert!(!loaded.cleanup.remove_empty_lines);
@@ -814,11 +704,8 @@ mod tests {
             serde_json::to_value(AppSettings::default()).expect("serialize default settings");
         value["cleanup"] = serde_json::json!({ "remove_empty_lines": true });
 
-        let loaded = AppSettings::from_json(
-            &serde_json::to_vec(&value).expect("partial JSON"),
-            PathBuf::from("dic"),
-        )
-        .expect("load partial cleanup settings");
+        let loaded = AppSettings::from_json(&serde_json::to_vec(&value).expect("partial JSON"))
+            .expect("load partial cleanup settings");
 
         assert!(loaded.cleanup.remove_empty_lines);
         assert!(!loaded.cleanup.add_line_end_periods);
@@ -833,11 +720,8 @@ mod tests {
             .expect("settings object")
             .remove("batch");
 
-        let loaded = AppSettings::from_json(
-            &serde_json::to_vec(&value).expect("legacy JSON"),
-            PathBuf::from("dic"),
-        )
-        .expect("load settings without batch");
+        let loaded = AppSettings::from_json(&serde_json::to_vec(&value).expect("legacy JSON"))
+            .expect("load settings without batch");
 
         assert_eq!(loaded.batch, BatchSettings::default());
         assert!(loaded.batch.export_txt);
@@ -875,11 +759,8 @@ mod tests {
             serde_json::to_value(AppSettings::default()).expect("serialize default settings");
         value["batch"] = serde_json::json!({ "export_txt": false });
 
-        let loaded = AppSettings::from_json(
-            &serde_json::to_vec(&value).expect("partial JSON"),
-            PathBuf::from("dic"),
-        )
-        .expect("load partial batch settings");
+        let loaded = AppSettings::from_json(&serde_json::to_vec(&value).expect("partial JSON"))
+            .expect("load partial batch settings");
 
         assert!(!loaded.batch.export_txt);
         assert!(loaded.batch.export_chunks);
@@ -910,7 +791,7 @@ mod tests {
         settings.split.start_number = 0;
         settings.split.min_chars = 200_000;
         let json = serde_json::to_string(&settings).unwrap();
-        let restored = AppSettings::from_json(json.as_bytes(), PathBuf::from("dic")).unwrap();
+        let restored = AppSettings::from_json(json.as_bytes()).unwrap();
         assert_eq!(restored.split.max_chars, 1_000);
         assert_eq!(restored.split.start_number, 1);
         assert_eq!(restored.split.min_chars, 100_000);
@@ -939,36 +820,5 @@ mod tests {
         assert_eq!(tag, DictionaryTag::HardPronunciation);
         assert!(!plus);
         assert!(description.contains("э"));
-    }
-
-    #[test]
-    fn corrupt_settings_are_reported_and_backed_up() {
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "demagog-settings-{}-{stamp}.json",
-            std::process::id()
-        ));
-        std::fs::write(&path, b"{not valid json").expect("write corrupt settings");
-
-        let (settings, warning) =
-            AppSettings::load_from_path(&path, PathBuf::from("missing-dic-folder"));
-        assert_eq!(settings.theme(), ThemeMode::Dark);
-        let warning = warning.expect("corrupt settings must be reported");
-        assert!(warning.contains("настройки"), "{warning}");
-
-        let backup = path.with_extension("json.corrupt");
-        assert!(backup.exists(), "corrupt settings must be backed up");
-        assert_eq!(
-            std::fs::read(&backup).expect("read backup"),
-            b"{not valid json"
-        );
-
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(&backup);
     }
 }
