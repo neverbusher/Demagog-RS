@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 mod error;
-pub use error::{AppError, AppResult};
+#[cfg_attr(not(test), expect(unused_imports))]
+pub use error::{AppError, AppFailure, AppResult, FailureKind};
 
 mod dictionary;
 pub use dictionary::ProcessorFlavor;

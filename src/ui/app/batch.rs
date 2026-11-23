@@ -441,8 +441,8 @@ impl DemagogApp {
             );
             drop(btx);
             let _ = forwarder.join();
-            if let Err(AppError::Failed(error)) = result {
-                let _ = tx.send(WorkerMessage::BatchSetupError(error));
+            if let Err(error) = result {
+                let _ = tx.send(WorkerMessage::BatchSetupError(error.to_string()));
                 ctx.request_repaint();
             }
         });

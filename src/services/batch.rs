@@ -225,7 +225,8 @@ fn send(tx: Option<&Sender<BatchProgress>>, msg: BatchProgress) {
 mod tests {
     use super::*;
     use crate::domain::{
-        BookDocument, ChunkConfig, DictionaryKind, ProcessOutput, StressFormat, TextCleanupConfig,
+        BookDocument, ChunkConfig, DictionaryKind, FailureKind, ProcessOutput, StressFormat,
+        TextCleanupConfig,
     };
     use crate::io::book_reader::CompositeBookReader;
     use crate::services::chunker::SentenceAwareChunker;
@@ -847,8 +848,13 @@ mod tests {
             blocker.join("out").display()
         );
         match result {
-            Err(AppError::Failed(message)) => {
-                assert!(message.starts_with(&expected_prefix), "{message}");
+            Err(AppError::Failed(failure)) => {
+                assert_eq!(failure.kind, FailureKind::Other);
+                assert!(
+                    failure.message.starts_with(&expected_prefix),
+                    "{}",
+                    failure.message
+                );
             }
             Err(error) => panic!("setup failure must be a genuine AppError: {error:?}"),
             Ok(outcome) => panic!("setup unexpectedly succeeded: {outcome:?}"),

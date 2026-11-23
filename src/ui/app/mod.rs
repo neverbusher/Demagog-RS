@@ -2458,7 +2458,7 @@ mod worker_outcome_tests {
     #[test]
     fn cancellation_flag_wins_over_a_real_failure() {
         let cancel = AtomicBool::new(true);
-        let result = Err(AppError::Failed("Ошибка чтения книги".to_string()));
+        let result = Err(AppError::failed("Ошибка чтения книги"));
 
         assert_eq!(
             classify_worker_result::<()>(result, Some(&cancel)),
@@ -2469,7 +2469,7 @@ mod worker_outcome_tests {
     #[test]
     fn real_failure_is_preserved_when_flag_is_false() {
         let cancel = AtomicBool::new(false);
-        let error = AppError::Failed("Ошибка чтения книги".to_string());
+        let error = AppError::failed("Ошибка чтения книги");
 
         assert_eq!(
             classify_worker_result::<()>(Err(error.clone()), Some(&cancel)),

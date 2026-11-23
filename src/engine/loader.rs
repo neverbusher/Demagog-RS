@@ -56,15 +56,14 @@ pub fn load_dictionaries_parallel(dir: &Path) -> AppResult<DictionaryLoadReport>
 const DICTIONARY_CANCELLED: &str = "Загрузка словарей отменена";
 
 fn with_dictionary_name<T>(path: &Path, result: AppResult<T>) -> AppResult<T> {
-    result.map_err(|error| match error {
-        error @ AppError::Cancelled(_) => error,
-        AppError::Failed(message) => {
+    result.map_err(|error| {
+        error.map_failure_message(|message| {
             let name = path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("<unknown>");
-            AppError::failed(format!("{name}: {message}"))
-        }
+            format!("{name}: {message}")
+        })
     })
 }
 
@@ -149,6 +148,7 @@ pub fn compile_single_dictionary_with_cancel(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::FailureKind;
     use std::sync::atomic::AtomicBool;
     use std::time::Instant;
 
@@ -169,10 +169,25 @@ mod tests {
             Err::<(), _>(AppError::failed("compile failed")),
         );
 
-        assert!(matches!(
-            result,
-            Err(AppError::Failed(message)) if message == "literal.dic: compile failed"
-        ));
+        let Err(AppError::Failed(failure)) = result else {
+            panic!("dictionary failure must be preserved");
+        };
+        assert_eq!(failure.kind, FailureKind::Other);
+        assert_eq!(failure.message, "literal.dic: compile failed");
+    }
+
+    #[test]
+    fn with_dictionary_name_preserves_failure_kind() {
+        let result = with_dictionary_name(
+            Path::new("literal.dic"),
+            Err::<(), _>(AppError::archive("compile failed")),
+        );
+
+        let Err(AppError::Failed(failure)) = result else {
+            panic!("dictionary failure must be preserved");
+        };
+        assert_eq!(failure.kind, FailureKind::Archive);
+        assert_eq!(failure.message, "literal.dic: compile failed");
     }
 
     #[test]
@@ -188,10 +203,15 @@ mod tests {
         let result =
             with_dictionary_name(&path, compile_single_dictionary_with_cancel(&path, None));
 
-        assert!(matches!(
-            result,
-            Err(AppError::Failed(message)) if message.starts_with(&format!("{name}: "))
-        ));
+        let Err(AppError::Failed(failure)) = result else {
+            panic!("missing dictionary must produce a failure");
+        };
+        assert_eq!(failure.kind, FailureKind::Other);
+        assert!(
+            failure.message.starts_with(&format!("{name}: ")),
+            "{}",
+            failure.message
+        );
     }
 
     #[test]
