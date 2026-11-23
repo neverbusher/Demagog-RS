@@ -639,7 +639,7 @@ mod tests {
         let cancel = AtomicBool::new(true);
         let result = run_check_with_cancel(std::path::Path::new("dic"), Some(&cancel));
         assert!(
-            result.is_err(),
+            matches!(result, Err(AppError::Cancelled(_))),
             "cancelled dictionary check must report cancellation"
         );
     }

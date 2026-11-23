@@ -306,7 +306,12 @@ mod tests {
         std::fs::write(dir.join("67_author.dic"), "а=б\n").expect("write dictionary");
         let cancel = AtomicBool::new(true);
 
-        assert!(audit_dictionaries_with_cancel(&dir, Some(&cancel)).is_err());
+        let result = audit_dictionaries_with_cancel(&dir, Some(&cancel));
+
+        assert!(
+            matches!(result, Err(AppError::Cancelled(_))),
+            "cancelled dictionary audit must report cancellation"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

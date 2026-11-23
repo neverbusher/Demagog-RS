@@ -48,6 +48,19 @@ pub fn load_dictionaries_parallel(dir: &Path) -> AppResult<DictionaryLoadReport>
 
 const DICTIONARY_CANCELLED: &str = "Загрузка словарей отменена";
 
+fn with_dictionary_name<T>(path: &Path, result: AppResult<T>) -> AppResult<T> {
+    result.map_err(|error| match error {
+        error @ AppError::Cancelled(_) => error,
+        AppError::Failed(message) => {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("<unknown>");
+            AppError::failed(format!("{name}: {message}"))
+        }
+    })
+}
+
 pub fn load_dictionaries_parallel_with_cancel(
     dir: &Path,
     cancel: Option<&AtomicBool>,
@@ -63,16 +76,7 @@ pub fn load_dictionaries_parallel_with_cancel(
             if is_cancelled(cancel) {
                 return Err(AppError::cancelled(DICTIONARY_CANCELLED));
             }
-            compile_single_dictionary_with_cancel(path, cancel).map_err(|err| {
-                if err.is_cancelled() {
-                    return err;
-                }
-                let name = path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("<unknown>");
-                AppError::failed(format!("{name}: {err}"))
-            })
+            with_dictionary_name(path, compile_single_dictionary_with_cancel(path, cancel))
         })
         .collect();
 
@@ -182,6 +186,48 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
     use std::time::Instant;
+
+    #[test]
+    fn with_dictionary_name_preserves_cancellation() {
+        let result = with_dictionary_name(
+            Path::new("literal.dic"),
+            Err::<(), _>(AppError::cancelled("stop loading")),
+        );
+
+        assert!(matches!(result, Err(AppError::Cancelled("stop loading"))));
+    }
+
+    #[test]
+    fn with_dictionary_name_prefixes_failures() {
+        let result = with_dictionary_name(
+            Path::new("literal.dic"),
+            Err::<(), _>(AppError::failed("compile failed")),
+        );
+
+        assert!(matches!(
+            result,
+            Err(AppError::Failed(message)) if message == "literal.dic: compile failed"
+        ));
+    }
+
+    #[test]
+    fn with_dictionary_name_prefixes_real_compile_failures() {
+        let name = format!("demagog-loader-missing-{}.dic", std::process::id());
+        let path = std::env::temp_dir().join(&name);
+        assert!(
+            !path.exists(),
+            "test path must not exist: {}",
+            path.display()
+        );
+
+        let result =
+            with_dictionary_name(&path, compile_single_dictionary_with_cancel(&path, None));
+
+        assert!(matches!(
+            result,
+            Err(AppError::Failed(message)) if message.starts_with(&format!("{name}: "))
+        ));
+    }
 
     #[test]
     fn dictionary_compilation_honors_a_cancel_flag() {
