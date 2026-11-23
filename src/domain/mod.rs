@@ -5,7 +5,6 @@ mod error;
 pub use error::{AppError, AppResult};
 
 mod dictionary;
-#[allow(unused_imports)]
 pub use dictionary::ProcessorFlavor;
 pub use dictionary::{
     DictionaryProfile, DictionaryPurpose, DictionaryStage, classify_dictionary, describe_dictionary,

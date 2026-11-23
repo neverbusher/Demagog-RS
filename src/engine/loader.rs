@@ -6,9 +6,7 @@ use std::sync::atomic::AtomicBool;
 use crate::domain::{
     AppError, AppResult, DictionaryMeta, classify_dictionary, describe_dictionary,
 };
-use crate::engine::dic_processor::DicProcessor;
-use crate::engine::hard_e_processor::HardEProcessor;
-use crate::engine::rex_processor::RexProcessor;
+use crate::engine::processor_registry::compile_processor;
 use crate::io::encoding::decode_text_bytes;
 use crate::ports::{TextProcessor, is_cancelled};
 
@@ -126,25 +124,10 @@ pub fn compile_single_dictionary_with_cancel(
         return Err(AppError::cancelled(DICTIONARY_CANCELLED));
     }
 
-    let is_rex = path
-        .extension()
-        .and_then(|s| s.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("rex"));
-    let is_hard_e = name.to_lowercase().contains("(hard-e)");
-
-    let (processor, warnings): (Arc<dyn TextProcessor>, Vec<String>) = if is_hard_e {
-        let hard_e = HardEProcessor::compile(name.clone(), &content);
-        let warnings = hard_e.compile_warnings().to_vec();
-        (Arc::new(hard_e), warnings)
-    } else if is_rex {
-        let rex = RexProcessor::compile(name.clone(), &content, encoding);
-        let warnings = rex.compile_warnings().to_vec();
-        (Arc::new(rex), warnings)
-    } else {
-        let dic = DicProcessor::compile(name.clone(), &content, encoding);
-        let warnings = dic.compile_warnings().to_vec();
-        (Arc::new(dic), warnings)
-    };
+    let profile = classify_dictionary(&name);
+    let compiled = compile_processor(profile.processor, name.clone(), &content, encoding);
+    let processor = compiled.processor;
+    let warnings = compiled.warnings;
 
     let meta = DictionaryMeta {
         name,
@@ -268,6 +251,40 @@ mod tests {
                 "unnumbered.dic",
             ]
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn profile_flavor_selects_the_actual_processor_kind() {
+        use crate::domain::DictionaryKind;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "demagog-loader-flavors-{}-{stamp}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dic dir");
+
+        for (name, content, expected_kind) in [
+            ("96_(hard-e).dic", "тест=тэст\n", DictionaryKind::HardE),
+            ("10_nums.rex", "кот=к+от\n", DictionaryKind::RegexStandard),
+            ("35_custom.dic", "кот=к+от\n", DictionaryKind::DicStandard),
+        ] {
+            let path = dir.join(name);
+            std::fs::write(&path, content).expect("write temp dictionary");
+
+            let compiled =
+                compile_single_dictionary_with_cancel(&path, None).expect("compile dictionary");
+
+            assert_eq!(compiled.meta.kind, expected_kind, "{name}");
+            assert_eq!(compiled.processor.kind(), expected_kind, "{name}");
+            assert_eq!(compiled.meta.rule_count, 1, "{name}");
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }
