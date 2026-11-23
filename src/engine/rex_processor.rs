@@ -5,6 +5,7 @@ use regex::{Regex, RegexBuilder};
 use rustc_hash::FxHashSet;
 
 use crate::domain::{DictionaryKind, ProcessOutput, ReplacementEvent};
+use crate::engine::common::{push_warning, trim_rule_line};
 use crate::engine::rex_normalizer::{normalize_rex_pattern, normalize_rex_replacement};
 use crate::ports::{TextProcessor, is_cancelled};
 
@@ -52,7 +53,7 @@ impl RexProcessor {
         let cleanup_yo_tags = content.contains("<:yo:>") || content.contains("<:ye:>");
 
         for raw_line in content.lines() {
-            let trimmed = raw_line.trim().trim_start_matches('\u{feff}');
+            let trimmed = trim_rule_line(raw_line);
             if trimmed.is_empty() || trimmed.starts_with("--") {
                 continue;
             }
@@ -126,9 +127,7 @@ impl RexProcessor {
         for (block, warnings) in compiled_blocks {
             indexed_blocks.push(block);
             for warning in warnings {
-                if compile_warnings.len() < 50 {
-                    compile_warnings.push(warning);
-                }
+                push_warning(&mut compile_warnings, warning);
             }
         }
 
@@ -410,11 +409,7 @@ fn compile_rex_rules(pending: Vec<PendingRexRule>) -> (Vec<CompiledRexRule>, Vec
     for result in results {
         match result {
             Ok(rule) => rules.push(rule),
-            Err(warning) => {
-                if warnings.len() < 50 {
-                    warnings.push(warning);
-                }
-            }
+            Err(warning) => push_warning(&mut warnings, warning),
         }
     }
     (rules, warnings)

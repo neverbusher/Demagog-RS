@@ -6,6 +6,9 @@ use regex::RegexBuilder;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::domain::{DictionaryKind, ProcessOutput, ReplacementEvent};
+use crate::engine::common::{
+    is_lower_cyrillic, is_upper_cyrillic_vowel, push_warning, strip_bom, trim_rule_line,
+};
 use crate::engine::rex_processor::CompiledRexRule;
 use crate::ports::{TextProcessor, is_cancelled};
 
@@ -111,8 +114,7 @@ impl DicProcessor {
         let mut compile_warnings = Vec::new();
 
         for raw_line in content.lines() {
-            let line = raw_line.trim_start_matches('\u{feff}');
-            let trimmed = line.trim();
+            let trimmed = trim_rule_line(raw_line);
             if trimmed.is_empty() {
                 continue;
             }
@@ -120,7 +122,7 @@ impl DicProcessor {
                 continue;
             }
 
-            let Some((raw_lhs, raw_rhs)) = split_dic_rule(line) else {
+            let Some((raw_lhs, raw_rhs)) = split_dic_rule(strip_bom(raw_line)) else {
                 continue;
             };
 
@@ -226,9 +228,7 @@ impl DicProcessor {
 
         for (compiled, warnings) in compiled_wildcards {
             for warning in warnings {
-                if compile_warnings.len() < 50 {
-                    compile_warnings.push(warning);
-                }
+                push_warning(&mut compile_warnings, warning);
             }
             if let Some((compiled, required_words, sub_filter)) = compiled {
                 if let Some(anchor) = required_words.iter().max_by_key(|w| w.len()).cloned() {
@@ -317,9 +317,7 @@ impl DicProcessor {
         self.sort_phrases();
         self.rule_count += part.rule_count;
         for warning in part.compile_warnings {
-            if self.compile_warnings.len() < 50 {
-                self.compile_warnings.push(warning);
-            }
+            push_warning(&mut self.compile_warnings, warning);
         }
     }
 
@@ -777,16 +775,6 @@ fn is_single_word_token(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_alphabetic() || c == '+')
 }
 
-#[inline]
-fn is_lower_cyrillic(c: char) -> bool {
-    matches!(c, 'а'..='я' | 'ё')
-}
-
-#[inline]
-fn is_upper_cyrillic_vowel(c: char) -> bool {
-    matches!(c, 'А' | 'Е' | 'Ё' | 'И' | 'О' | 'У' | 'Ы' | 'Э' | 'Ю' | 'Я')
-}
-
 fn extract_alpha_words(s: &str) -> Vec<String> {
     s.split(|c: char| !c.is_alphabetic())
         .filter(|w| w.chars().count() >= 2)
@@ -1031,9 +1019,7 @@ fn compile_dic_wildcard_rule(
     {
         Ok(regex) => regex,
         Err(err) => {
-            if warnings.len() < 50 {
-                warnings.push(format!("{lhs}={rhs} → {err}"));
-            }
+            push_warning(warnings, format!("{lhs}={rhs} → {err}"));
             return None;
         }
     };

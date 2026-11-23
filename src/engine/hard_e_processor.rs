@@ -1,6 +1,7 @@
 use rustc_hash::FxHashMap;
 
 use crate::domain::{DictionaryKind, ProcessOutput, ReplacementEvent};
+use crate::engine::common::{is_cyrillic_letter, push_warning, trim_rule_line};
 use crate::ports::TextProcessor;
 
 pub struct HardEProcessor {
@@ -22,7 +23,7 @@ impl HardEProcessor {
         let mut compile_warnings = Vec::new();
 
         for raw_line in content.lines() {
-            let line = raw_line.trim_start_matches('\u{feff}').trim();
+            let line = trim_rule_line(raw_line);
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
@@ -300,22 +301,12 @@ fn push_event(
     }
 }
 
-fn push_warning(warnings: &mut Vec<String>, message: String) {
-    if warnings.len() < 50 {
-        warnings.push(message);
-    }
-}
-
 fn is_rule_char(c: char) -> bool {
     c.is_alphabetic() || c == '-'
 }
 
 fn is_run_char(c: char) -> bool {
     is_cyrillic_letter(c) || c == '+' || c == '-'
-}
-
-fn is_cyrillic_letter(c: char) -> bool {
-    matches!(c, 'а'..='я' | 'ё' | 'А'..='Я' | 'Ё')
 }
 
 #[cfg(test)]

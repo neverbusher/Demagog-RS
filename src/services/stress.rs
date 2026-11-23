@@ -1,4 +1,5 @@
 use crate::domain::StressFormat;
+use crate::engine::common::{is_cyrillic_vowel, is_lower_cyrillic, is_upper_cyrillic_vowel};
 use crate::ports::StressFormatter;
 
 pub struct RussianStressFormatter;
@@ -67,42 +68,6 @@ fn strip_stress_marks(text: &str) -> String {
         }
     }
     out
-}
-
-#[inline]
-fn is_cyrillic_vowel(c: char) -> bool {
-    matches!(
-        c,
-        'а' | 'е'
-            | 'ё'
-            | 'и'
-            | 'о'
-            | 'у'
-            | 'ы'
-            | 'э'
-            | 'ю'
-            | 'я'
-            | 'А'
-            | 'Е'
-            | 'Ё'
-            | 'И'
-            | 'О'
-            | 'У'
-            | 'Ы'
-            | 'Э'
-            | 'Ю'
-            | 'Я'
-    )
-}
-
-#[inline]
-fn is_lower_cyrillic(c: char) -> bool {
-    matches!(c, 'а'..='я' | 'ё')
-}
-
-#[inline]
-fn is_upper_cyrillic_vowel(c: char) -> bool {
-    matches!(c, 'А' | 'Е' | 'Ё' | 'И' | 'О' | 'У' | 'Ы' | 'Э' | 'Ю' | 'Я')
 }
 
 #[cfg(test)]
