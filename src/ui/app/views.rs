@@ -194,7 +194,7 @@ impl DemagogApp {
                     }
                     if ui
                         .add_enabled(!self.is_busy, egui::Button::new("🔄 Сброс"))
-                        .on_hover_text("Сбросить приложение в состояние свежего запуска")
+                        .on_hover_text("Сбросить состояние")
                         .clicked()
                     {
                         self.reset_app(ctx.clone());
