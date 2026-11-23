@@ -6,9 +6,9 @@ pub use error::{AppError, AppResult};
 
 mod dictionary;
 #[allow(unused_imports)]
+pub use dictionary::ProcessorFlavor;
 pub use dictionary::{
-    DictionaryProfile, DictionaryPurpose, DictionaryStage, ProcessorFlavor, classify_dictionary,
-    describe_dictionary,
+    DictionaryProfile, DictionaryPurpose, DictionaryStage, classify_dictionary, describe_dictionary,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

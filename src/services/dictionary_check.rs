@@ -1,3 +1,5 @@
+use crate::domain::{DictionaryStage, classify_dictionary};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrderedDictionary {
     pub name: String,
@@ -11,101 +13,25 @@ pub struct OrderReport {
     pub failures: Vec<String>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Stage {
-    Rex,
-    YoBase,
-    YoAdditions,
-    User,
-    Homographs,
-    Cleanup,
-    Author,
-    Converters,
-    StressWords,
-    PhrasesImport,
-    NamesImport,
-    Orthoepy,
-    HardE,
-    Unknown,
-    Unnumbered,
-}
-
-impl Stage {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Rex => "REX",
-            Self::YoBase => "Ё: БАЗА",
-            Self::YoAdditions => "Ё: ДОПОЛНЕНИЯ",
-            Self::User => "ПОЛЬЗОВАТЕЛЬСКИЙ",
-            Self::Homographs => "ОМОГРАФЫ",
-            Self::Cleanup => "ЧИСТКА",
-            Self::Author => "АВТОР",
-            Self::Converters => "КОНВЕРТЕРЫ",
-            Self::StressWords => "УДАРЕНИЯ",
-            Self::PhrasesImport => "ИМПОРТ: ФРАЗЫ",
-            Self::NamesImport => "ИМПОРТ: ИМЕНА",
-            Self::Orthoepy => "БАЗА",
-            Self::HardE => "HARD-E",
-            Self::Unknown => "НЕИЗВЕСТНО",
-            Self::Unnumbered => "БЕЗ НОМЕРА",
-        }
-    }
-}
-
-fn leading_number(name: &str) -> Option<u32> {
-    let digits: String = name.chars().take_while(|c| c.is_ascii_digit()).collect();
-    digits.parse().ok()
-}
-
-fn classify(name: &str) -> Stage {
-    let lower = name.to_lowercase();
-    if lower.ends_with(".rex") {
-        return Stage::Rex;
-    }
-    let Some(number) = leading_number(name) else {
-        // Mirrors pipeline_sort_key: unnumbered yo dictionaries load before numbered ones.
-        return if lower.contains("yo") {
-            Stage::YoBase
-        } else {
-            Stage::Unnumbered
-        };
-    };
-    match number {
-        33 => Stage::YoAdditions,
-        35 => Stage::User,
-        40..=42 | 50..=53 => Stage::Homographs,
-        60 | 65 => Stage::Cleanup,
-        67 => Stage::Author,
-        69 | 70 => Stage::Converters,
-        71..=75 => Stage::StressWords,
-        76 => Stage::PhrasesImport,
-        77 => Stage::NamesImport,
-        95 => Stage::Orthoepy,
-        96 => Stage::HardE,
-        _ => Stage::Unknown,
-    }
-}
-
 pub fn validate_order(names: &[String]) -> OrderReport {
     let mut report = OrderReport::default();
-    let mut previous: Option<(Stage, &str)> = None;
+    let mut previous: Option<(DictionaryStage, &str)> = None;
     let mut hard_e_index: Option<usize> = None;
     let mut yo_base_index: Option<usize> = None;
     let mut last_rex: Option<usize> = None;
     let mut first_dic: Option<usize> = None;
 
     for (index, name) in names.iter().enumerate() {
-        let stage = classify(name);
-        let lower = name.to_lowercase();
-        let has_hard_marker = lower.contains("(hard-e)");
+        let profile = classify_dictionary(name);
+        let stage = profile.stage;
         report.ordered.push(OrderedDictionary {
             name: name.clone(),
             stage: stage.label(),
         });
 
-        if stage == Stage::Rex {
+        if stage == DictionaryStage::Rex {
             last_rex = Some(index);
-            if leading_number(name).is_none() {
+            if profile.number.is_none() {
                 report
                     .warnings
                     .push(format!("{name}: .rex без номера — проверьте порядок"));
@@ -115,26 +41,26 @@ pub fn validate_order(names: &[String]) -> OrderReport {
         }
 
         match stage {
-            Stage::Unnumbered => report.failures.push(format!(
+            DictionaryStage::Unnumbered => report.failures.push(format!(
                 "{name}: .dic без номера — загрузчик поставит его после HARD-E"
             )),
-            Stage::Unknown => report.warnings.push(format!(
+            DictionaryStage::Unknown => report.warnings.push(format!(
                 "{name}: неизвестный этап — проверьте порядок вручную"
             )),
-            Stage::HardE => {
+            DictionaryStage::HardE => {
                 if hard_e_index.is_some() {
                     report
                         .warnings
                         .push(format!("{name}: второй словарь HARD-E"));
                 }
                 hard_e_index = Some(index);
-                if !has_hard_marker {
+                if !profile.has_hard_marker {
                     report.warnings.push(format!(
                         "{name}: номер 96 без маркера (hard-e) — это не HARD-E"
                     ));
                 }
             }
-            Stage::YoBase => {
+            DictionaryStage::YoBase => {
                 if yo_base_index.is_some() {
                     report
                         .warnings
@@ -145,13 +71,16 @@ pub fn validate_order(names: &[String]) -> OrderReport {
             _ => {}
         }
 
-        if has_hard_marker && stage != Stage::HardE {
+        if profile.has_hard_marker && stage != DictionaryStage::HardE {
             report.failures.push(format!(
                 "{name}: HARD-E должен называться 96_... (hard-e).dic"
             ));
         }
 
-        if !matches!(stage, Stage::Unknown | Stage::Unnumbered) {
+        if !matches!(
+            stage,
+            DictionaryStage::Unknown | DictionaryStage::Unnumbered
+        ) {
             if let Some((previous_stage, previous_name)) = previous
                 && stage < previous_stage
             {

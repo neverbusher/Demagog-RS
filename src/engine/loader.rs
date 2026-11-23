@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use crate::domain::{AppError, AppResult, DictionaryMeta, describe_dictionary};
+use crate::domain::{
+    AppError, AppResult, DictionaryMeta, classify_dictionary, describe_dictionary,
+};
 use crate::engine::dic_processor::DicProcessor;
 use crate::engine::hard_e_processor::HardEProcessor;
 use crate::engine::rex_processor::RexProcessor;
@@ -38,7 +40,14 @@ pub fn sorted_dictionary_paths(dir: &Path) -> AppResult<Vec<PathBuf>> {
         })
         .collect();
 
-    paths.sort_by_key(|p| pipeline_sort_key(p));
+    paths.sort_by_cached_key(|path| {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        let profile = classify_dictionary(name);
+        profile.sort_key(name)
+    });
     Ok(paths)
 }
 
@@ -152,33 +161,6 @@ pub fn compile_single_dictionary_with_cancel(
     };
 
     Ok(CompiledDictionary { meta, processor })
-}
-
-fn pipeline_sort_key(path: &Path) -> (u8, u32, String) {
-    let name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_string();
-    let lower = name.to_lowercase();
-    let is_rex = lower.ends_with(".rex");
-
-    let leading_num: Option<u32> = name
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect::<String>()
-        .parse()
-        .ok();
-
-    if is_rex {
-        (0, leading_num.unwrap_or(500), lower)
-    } else if lower.contains("yo") && leading_num.is_none() {
-        (1, 32, lower)
-    } else if let Some(n) = leading_num {
-        (2, n, lower)
-    } else {
-        (3, 999, lower)
-    }
 }
 
 #[cfg(test)]
@@ -308,7 +290,14 @@ mod tests {
                     )
             })
             .collect();
-        paths.sort_by_key(|p| pipeline_sort_key(p));
+        paths.sort_by_cached_key(|path| {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            let profile = classify_dictionary(name);
+            profile.sort_key(name)
+        });
 
         let started = Instant::now();
         let mut timings: Vec<(String, u128, usize, u64)> = paths

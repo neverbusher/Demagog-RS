@@ -1,7 +1,9 @@
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
-use crate::domain::{AppError, AppResult};
+use crate::domain::{
+    AppError, AppResult, DictionaryProfile, DictionaryPurpose, classify_dictionary,
+};
 use crate::engine::dic_processor::split_dic_rule as split_rule;
 use crate::engine::loader::sorted_dictionary_paths;
 use crate::io::encoding::decode_text_bytes;
@@ -87,71 +89,6 @@ impl AuditReport {
     }
 }
 
-pub fn dictionary_purpose(name: &str) -> &'static str {
-    let lower = name.to_lowercase();
-    if lower.contains("edge_yo") || lower.starts_with("33_") {
-        "ё-фикация"
-    } else if lower.starts_with("41_1")
-        || lower.starts_with("41_2")
-        || lower.starts_with("42_1")
-        || lower.starts_with("42_2")
-    {
-        "все/всё: звёзды"
-    } else if lower.starts_with("41_") || lower.starts_with("42_") {
-        "все/всё"
-    } else if lower.starts_with("40.") {
-        "омографы: звёзды"
-    } else if lower.starts_with("50_")
-        || lower.starts_with("51_")
-        || lower.starts_with("52_")
-        || lower.starts_with("53_")
-    {
-        "омографы: фразы"
-    } else if lower.starts_with("60_") {
-        "пост-обработка"
-    } else if lower.starts_with("65_") {
-        "транслитерация"
-    } else if lower.starts_with("67_") {
-        "автор"
-    } else if lower.starts_with("69_") || lower.starts_with("70_") {
-        "конвертеры"
-    } else if lower.starts_with("71_") || lower.starts_with("72_") {
-        "ударения"
-    } else if lower.starts_with("73_") {
-        "аббревиатуры"
-    } else if lower.starts_with("74_") {
-        "мат"
-    } else if lower.starts_with("75_") || lower.starts_with("77_") {
-        "имена"
-    } else if lower.starts_with("76_") {
-        "импорт: фразы"
-    } else if lower.starts_with("95.") {
-        "база"
-    } else if lower.contains("(hard-e)") || lower.starts_with("96_") {
-        "твёрдое э"
-    } else if lower.starts_with("35_") {
-        "пользовательский"
-    } else {
-        "прочее"
-    }
-}
-
-pub fn expected_by_design(purpose: &str) -> bool {
-    matches!(
-        purpose,
-        "ё-фикация"
-            | "база"
-            | "омографы: звёзды"
-            | "все/всё: звёзды"
-            | "транслитерация"
-            | "конвертеры"
-            | "аббревиатуры"
-            | "мат"
-            | "имена"
-            | "твёрдое э"
-    )
-}
-
 pub fn audit_dictionaries_with_cancel(
     dir: &Path,
     cancel: Option<&AtomicBool>,
@@ -175,8 +112,10 @@ pub fn audit_dictionaries_with_cancel(
             .and_then(|name| name.to_str())
             .unwrap_or("<unknown>")
             .to_string();
-        let purpose = dictionary_purpose(&name);
-        if expected_by_design(purpose) {
+        let profile: DictionaryProfile = classify_dictionary(&name);
+        let purpose_kind: DictionaryPurpose = profile.purpose;
+        let purpose = purpose_kind.label();
+        if profile.purpose.expected_by_design() {
             report.skipped.push((name, purpose));
             continue;
         }

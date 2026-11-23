@@ -20,7 +20,6 @@ pub enum DictionaryStage {
     Unnumbered,
 }
 
-#[allow(dead_code)]
 impl DictionaryStage {
     pub fn label(self) -> &'static str {
         match self {
@@ -65,7 +64,6 @@ pub enum DictionaryPurpose {
     Other,
 }
 
-#[allow(dead_code)]
 impl DictionaryPurpose {
     pub fn label(self) -> &'static str {
         match self {
@@ -126,7 +124,6 @@ pub struct DictionaryProfile {
     pub has_hard_marker: bool,
 }
 
-#[allow(dead_code)]
 impl DictionaryProfile {
     pub fn sort_key(&self, name: &str) -> (u8, u32, String) {
         let lower = name.to_lowercase();
