@@ -21,8 +21,12 @@ pub struct DictionaryLoadReport {
 }
 
 pub fn sorted_dictionary_paths(dir: &Path) -> AppResult<Vec<PathBuf>> {
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| format!("Не удалось открыть папку словарей {}: {e}", dir.display()))?;
+    let entries = std::fs::read_dir(dir).map_err(|e| {
+        AppError::io(format!(
+            "Не удалось открыть папку словарей {}: {e}",
+            dir.display()
+        ))
+    })?;
 
     let mut paths: Vec<PathBuf> = entries
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -109,7 +113,7 @@ pub fn compile_single_dictionary_with_cancel(
     if is_cancelled(cancel) {
         return Err(AppError::cancelled(DICTIONARY_CANCELLED));
     }
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let bytes = std::fs::read(path).map_err(|e| AppError::io(e.to_string()))?;
     let (content, encoding) = decode_text_bytes(&bytes);
     let name = path
         .file_name()
@@ -206,11 +210,39 @@ mod tests {
         let Err(AppError::Failed(failure)) = result else {
             panic!("missing dictionary must produce a failure");
         };
-        assert_eq!(failure.kind, FailureKind::Other);
+        assert_eq!(failure.kind, FailureKind::Io);
         assert!(
             failure.message.starts_with(&format!("{name}: ")),
             "{}",
             failure.message
+        );
+    }
+
+    #[test]
+    fn missing_dictionary_directory_is_io() {
+        let path = std::env::temp_dir().join(format!(
+            "demagog-loader-missing-dir-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        assert!(
+            !path.exists(),
+            "test path must not exist: {}",
+            path.display()
+        );
+
+        let error = sorted_dictionary_paths(&path).expect_err("missing directory must fail");
+
+        assert_eq!(error.failure_kind(), Some(FailureKind::Io));
+        assert!(
+            error.to_string().starts_with(&format!(
+                "Не удалось открыть папку словарей {}: ",
+                path.display()
+            )),
+            "{error}"
         );
     }
 

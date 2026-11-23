@@ -120,7 +120,7 @@ pub(super) fn extract_xml_paragraphs(
                 }
             }
             Ok(Event::Eof) => break,
-            Err(e) => return Err(format!("Ошибка разбора XML: {e}").into()),
+            Err(e) => return Err(AppError::xml(format!("Ошибка разбора XML: {e}"))),
             _ => {}
         }
     }
@@ -208,6 +208,19 @@ fn declared_xml_encoding(bytes: &[u8]) -> Option<&'static encoding_rs::Encoding>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::FailureKind;
+
+    #[test]
+    fn malformed_xml_has_xml_failure_kind() {
+        let error = extract_xml_paragraphs("<body><p>Текст</body>", &["p"], &[], None, None)
+            .expect_err("malformed XML must fail");
+
+        assert_eq!(error.failure_kind(), Some(FailureKind::Xml));
+        assert!(
+            error.to_string().starts_with("Ошибка разбора XML: "),
+            "{error}"
+        );
+    }
 
     #[test]
     fn declared_koi8r_encoding_is_honored() {

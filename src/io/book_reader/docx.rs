@@ -6,7 +6,7 @@ use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 use zip::ZipArchive;
 
-use crate::domain::{AppResult, BookDocument};
+use crate::domain::{AppError, AppResult, BookDocument};
 use crate::io::encoding::decode_text_bytes;
 use crate::ports::{DocumentReader, is_cancelled as book_cancelled};
 
@@ -38,9 +38,10 @@ impl DocumentReader for DocxDocumentReader {
             return cancelled_book();
         }
 
-        let file = File::open(path).map_err(|e| format!("Ошибка открытия DOCX: {e}"))?;
-        let mut archive =
-            ZipArchive::new(file).map_err(|e| format!("Ошибка чтения ZIP/DOCX: {e}"))?;
+        let file =
+            File::open(path).map_err(|e| AppError::io(format!("Ошибка открытия DOCX: {e}")))?;
+        let mut archive = ZipArchive::new(file)
+            .map_err(|e| AppError::archive(format!("Ошибка чтения ZIP/DOCX: {e}")))?;
         if book_cancelled(cancel) {
             return cancelled_book();
         }
@@ -54,14 +55,19 @@ impl DocumentReader for DocxDocumentReader {
         }
 
         let doc_xml = {
-            let entry = archive
-                .by_name("word/document.xml")
-                .map_err(|_| "Не найден word/document.xml в DOCX")?;
+            let entry = match archive.by_name("word/document.xml") {
+                Ok(entry) => entry,
+                Err(zip::result::ZipError::FileNotFound) => {
+                    return Err(AppError::invalid_data("Не найден word/document.xml в DOCX"));
+                }
+                Err(_) => {
+                    return Err(AppError::archive("Не найден word/document.xml в DOCX"));
+                }
+            };
             if entry.size() > MAX_ARCHIVE_ENTRY_BYTES {
-                return Err(format!(
+                return Err(AppError::limit_exceeded(format!(
                     "word/document.xml больше допустимых {MAX_ARCHIVE_ENTRY_BYTES} байт"
-                )
-                .into());
+                )));
             }
             read_limited_with_cancel(entry, "word/document.xml", MAX_ARCHIVE_ENTRY_BYTES, cancel)?
         };
@@ -116,14 +122,16 @@ impl DocumentReader for DocxDocumentReader {
                     Err(_) => out.push_str(&String::from_utf8_lossy(&t)),
                 },
                 Ok(Event::Eof) => break,
-                Err(e) => return Err(format!("Ошибка разбора document.xml: {e}").into()),
+                Err(e) => {
+                    return Err(AppError::xml(format!("Ошибка разбора document.xml: {e}")));
+                }
                 _ => {}
             }
         }
 
         let text = out.trim().to_string();
         if text.is_empty() {
-            return Err("В DOCX не найден текст.".into());
+            return Err(AppError::invalid_data("В DOCX не найден текст."));
         }
         Ok(BookDocument {
             title,
@@ -139,6 +147,9 @@ impl DocumentReader for DocxDocumentReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::FailureKind;
+    use crate::io::book_reader::limits::{write_zip_entry, write_zip_entry_with_declared_size};
+    use crate::io::book_reader::test_temp_path;
 
     fn write_docx_fixture(path: &Path, document_xml: &str) {
         let file = File::create(path).expect("create docx");
@@ -154,6 +165,95 @@ mod tests {
             .write_all(document_xml.as_bytes())
             .expect("write document.xml");
         archive.finish().expect("finish docx");
+    }
+
+    #[test]
+    fn broken_docx_zip_is_an_archive_failure() {
+        let path = test_temp_path("docx-broken-zip", "docx");
+        std::fs::write(&path, b"not a ZIP archive").expect("write broken DOCX fixture");
+
+        let error = DocxDocumentReader
+            .read_document(&path)
+            .expect_err("broken DOCX ZIP must fail");
+
+        assert_eq!(error.failure_kind(), Some(FailureKind::Archive));
+        assert!(
+            error.to_string().starts_with("Ошибка чтения ZIP/DOCX: "),
+            "{error}"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn missing_docx_document_is_invalid_data() {
+        let path = test_temp_path("docx-missing-document", "docx");
+        write_zip_entry(&path, "docProps/core.xml", b"<core/>");
+
+        let error = DocxDocumentReader
+            .read_document(&path)
+            .expect_err("missing document.xml must fail");
+
+        assert_eq!(error.failure_kind(), Some(FailureKind::InvalidData));
+        assert_eq!(error.to_string(), "Не найден word/document.xml в DOCX");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn oversized_docx_document_is_a_limit_failure() {
+        let path = test_temp_path("docx-oversized", "docx");
+        write_zip_entry_with_declared_size(
+            &path,
+            "word/document.xml",
+            b"<document/>",
+            MAX_ARCHIVE_ENTRY_BYTES + 1,
+        );
+
+        let error = DocxDocumentReader
+            .read_document(&path)
+            .expect_err("oversized document.xml must fail");
+
+        assert_eq!(error.failure_kind(), Some(FailureKind::LimitExceeded));
+        assert_eq!(
+            error.to_string(),
+            format!("word/document.xml больше допустимых {MAX_ARCHIVE_ENTRY_BYTES} байт")
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn malformed_docx_document_has_xml_failure_kind() {
+        let path = test_temp_path("docx-malformed", "docx");
+        write_docx_fixture(
+            &path,
+            "<w:document><w:body><w:p><w:t>Текст</w:body></w:document>",
+        );
+
+        let error = DocxDocumentReader
+            .read_document(&path)
+            .expect_err("malformed document.xml must fail");
+
+        assert_eq!(error.failure_kind(), Some(FailureKind::Xml));
+        assert!(
+            error
+                .to_string()
+                .starts_with("Ошибка разбора document.xml: "),
+            "{error}"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn empty_docx_text_is_invalid_data() {
+        let path = test_temp_path("docx-empty", "docx");
+        write_docx_fixture(&path, "<w:document><w:body/></w:document>");
+
+        let error = DocxDocumentReader
+            .read_document(&path)
+            .expect_err("empty DOCX text must fail");
+
+        assert_eq!(error.failure_kind(), Some(FailureKind::InvalidData));
+        assert_eq!(error.to_string(), "В DOCX не найден текст.");
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

@@ -4,7 +4,7 @@ use std::sync::atomic::AtomicBool;
 
 use zip::ZipArchive;
 
-use crate::domain::{AppResult, BookDocument};
+use crate::domain::{AppError, AppResult, BookDocument};
 use crate::ports::{DocumentReader, is_cancelled as book_cancelled};
 
 use super::document_title_from_path;
@@ -39,21 +39,24 @@ impl DocumentReader for Fb2DocumentReader {
             .unwrap_or("")
             .to_ascii_lowercase();
         let bytes = if name.ends_with(".zip") {
-            let file = File::open(path).map_err(|e| format!("Ошибка открытия архива: {e}"))?;
-            let mut archive = ZipArchive::new(file).map_err(|e| format!("Ошибка ZIP: {e}"))?;
+            let file = File::open(path)
+                .map_err(|e| AppError::io(format!("Ошибка открытия архива: {e}")))?;
+            let mut archive =
+                ZipArchive::new(file).map_err(|e| AppError::archive(format!("Ошибка ZIP: {e}")))?;
             let mut fb2_bytes = Vec::new();
             for i in 0..archive.len() {
                 if book_cancelled(cancel) {
                     return cancelled_book();
                 }
-                let entry = archive.by_index(i).map_err(|e| e.to_string())?;
+                let entry = archive
+                    .by_index(i)
+                    .map_err(|e| AppError::archive(e.to_string()))?;
                 let entry_name = entry.name().to_string();
                 if entry_name.to_ascii_lowercase().ends_with(".fb2") {
                     if entry.size() > MAX_ARCHIVE_ENTRY_BYTES {
-                        return Err(format!(
+                        return Err(AppError::limit_exceeded(format!(
                             "FB2 в архиве больше допустимых {MAX_ARCHIVE_ENTRY_BYTES} байт"
-                        )
-                        .into());
+                        )));
                     }
                     fb2_bytes = read_limited_with_cancel(
                         entry,
@@ -65,14 +68,15 @@ impl DocumentReader for Fb2DocumentReader {
                 }
             }
             if fb2_bytes.is_empty() {
-                return Err("Внутри архива не найден .fb2 файл".into());
+                return Err(AppError::invalid_data("Внутри архива не найден .fb2 файл"));
             }
             fb2_bytes
         } else {
             if book_cancelled(cancel) {
                 return cancelled_book();
             }
-            let file = std::fs::File::open(path).map_err(|e| format!("Ошибка чтения FB2: {e}"))?;
+            let file = std::fs::File::open(path)
+                .map_err(|e| AppError::io(format!("Ошибка чтения FB2: {e}")))?;
             read_stream_with_cancel(
                 file,
                 &path.display().to_string(),
@@ -94,7 +98,7 @@ impl DocumentReader for Fb2DocumentReader {
             Some(&mut headings),
         )?;
         if text.trim().is_empty() {
-            return Err("В FB2 не найден текст книги.".into());
+            return Err(AppError::invalid_data("В FB2 не найден текст книги."));
         }
         let title =
             xml_element_text(&xml, b"book-title").unwrap_or_else(|| document_title_from_path(path));
@@ -112,6 +116,74 @@ impl DocumentReader for Fb2DocumentReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::FailureKind;
+    use crate::io::book_reader::limits::{write_zip_entry, write_zip_entry_with_declared_size};
+    use crate::io::book_reader::test_temp_path;
+
+    #[test]
+    fn broken_fb2_zip_is_an_archive_failure() {
+        let path = test_temp_path("fb2-broken-zip", "zip");
+        std::fs::write(&path, b"not a ZIP archive").expect("write broken ZIP fixture");
+
+        let error = Fb2DocumentReader
+            .read_document(&path)
+            .expect_err("broken ZIP must fail");
+
+        assert_eq!(error.failure_kind(), Some(FailureKind::Archive));
+        assert!(error.to_string().starts_with("Ошибка ZIP: "), "{error}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn missing_fb2_archive_member_is_invalid_data() {
+        let path = test_temp_path("fb2-missing-member", "zip");
+        write_zip_entry(&path, "notes.txt", b"no FB2 here");
+
+        let error = Fb2DocumentReader
+            .read_document(&path)
+            .expect_err("missing FB2 member must fail");
+
+        assert_eq!(error.failure_kind(), Some(FailureKind::InvalidData));
+        assert_eq!(error.to_string(), "Внутри архива не найден .fb2 файл");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn oversized_fb2_archive_member_is_a_limit_failure() {
+        let path = test_temp_path("fb2-oversized", "zip");
+        write_zip_entry_with_declared_size(
+            &path,
+            "book.fb2",
+            b"<FictionBook/>",
+            MAX_ARCHIVE_ENTRY_BYTES + 1,
+        );
+
+        let error = Fb2DocumentReader
+            .read_document(&path)
+            .expect_err("oversized FB2 member must fail");
+
+        assert_eq!(error.failure_kind(), Some(FailureKind::LimitExceeded));
+        assert_eq!(
+            error.to_string(),
+            format!("FB2 в архиве больше допустимых {MAX_ARCHIVE_ENTRY_BYTES} байт")
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn empty_fb2_text_is_invalid_data() {
+        let path = test_temp_path("fb2-empty", "fb2");
+        std::fs::write(&path, b"<FictionBook><body/></FictionBook>")
+            .expect("write empty FB2 fixture");
+
+        let error = Fb2DocumentReader
+            .read_document(&path)
+            .expect_err("empty FB2 text must fail");
+
+        assert_eq!(error.failure_kind(), Some(FailureKind::InvalidData));
+        assert_eq!(error.to_string(), "В FB2 не найден текст книги.");
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn fb2_xml_parsing_honors_cancel_flag() {
@@ -148,9 +220,12 @@ mod tests {
     #[test]
     fn malformed_fb2_reports_an_error_instead_of_empty_text() {
         let xml = "<FictionBook><body><p>Текст</body></FictionBook>";
+        let error = extract_xml_paragraphs(xml, &["p"], &["description"], None, None)
+            .expect_err("broken XML must not silently become an empty book");
+        assert_eq!(error.failure_kind(), Some(FailureKind::Xml));
         assert!(
-            extract_xml_paragraphs(xml, &["p"], &["description"], None, None).is_err(),
-            "broken XML must not silently become an empty book"
+            error.to_string().starts_with("Ошибка разбора XML: "),
+            "{error}"
         );
     }
 

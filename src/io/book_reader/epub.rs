@@ -7,7 +7,7 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::reader::Reader;
 use zip::ZipArchive;
 
-use crate::domain::{AppResult, BookDocument, BookHeading};
+use crate::domain::{AppError, AppResult, BookDocument, BookHeading};
 use crate::ports::{DocumentReader, is_cancelled as book_cancelled};
 
 use super::document_title_from_path;
@@ -38,8 +38,10 @@ impl DocumentReader for EpubDocumentReader {
         if book_cancelled(cancel) {
             return cancelled_book();
         }
-        let file = File::open(path).map_err(|e| format!("Ошибка открытия EPUB: {e}"))?;
-        let mut archive = ZipArchive::new(file).map_err(|e| format!("Ошибка чтения EPUB: {e}"))?;
+        let file =
+            File::open(path).map_err(|e| AppError::io(format!("Ошибка открытия EPUB: {e}")))?;
+        let mut archive = ZipArchive::new(file)
+            .map_err(|e| AppError::archive(format!("Ошибка чтения EPUB: {e}")))?;
         let EpubContents { entries, title } = epub_contents(&mut archive, cancel)?;
         let title = title.unwrap_or_else(|| document_title_from_path(path));
 
@@ -53,12 +55,7 @@ impl DocumentReader for EpubDocumentReader {
             let bytes = read_epub_zip_entry(&mut archive, &name, cancel)?;
 
             total_bytes = total_bytes.saturating_add(bytes.len() as u64);
-            if total_bytes > MAX_ARCHIVE_TOTAL_BYTES {
-                return Err(format!(
-                    "Суммарный размер распакованных глав больше допустимых {MAX_ARCHIVE_TOTAL_BYTES} байт"
-                )
-                .into());
-            }
+            check_epub_total_size(total_bytes)?;
             let chapter_xml = decode_xml_with_declared_encoding(&bytes);
             let part = match extract_xml_paragraphs(
                 &chapter_xml,
@@ -71,7 +68,11 @@ impl DocumentReader for EpubDocumentReader {
                 Err(error) if book_cancelled(cancel) || error.is_cancelled() => {
                     return cancelled_book();
                 }
-                Err(error) => return Err(format!("Ошибка разбора главы «{name}»: {error}").into()),
+                Err(error) => {
+                    return Err(error.map_failure_message(|message| {
+                        format!("Ошибка разбора главы «{name}»: {message}")
+                    }));
+                }
             };
             if !part.trim().is_empty() {
                 let offset = full_text.len() + if full_text.is_empty() { 0 } else { 2 };
@@ -85,7 +86,9 @@ impl DocumentReader for EpubDocumentReader {
         }
 
         if full_text.trim().is_empty() {
-            return Err("В EPUB не найден текст: файлы внутри повреждены или пусты.".into());
+            return Err(AppError::invalid_data(
+                "В EPUB не найден текст: файлы внутри повреждены или пусты.",
+            ));
         }
         Ok(BookDocument {
             title,
@@ -103,16 +106,34 @@ fn read_epub_zip_entry(
     name: &str,
     cancel: Option<&AtomicBool>,
 ) -> AppResult<Vec<u8>> {
-    let entry = archive
-        .by_name(name)
-        .map_err(|e| format!("В EPUB не найден файл «{name}»: {e}"))?;
+    let entry = match archive.by_name(name) {
+        Ok(entry) => entry,
+        Err(error @ zip::result::ZipError::FileNotFound) => {
+            return Err(AppError::invalid_data(format!(
+                "В EPUB не найден файл «{name}»: {error}"
+            )));
+        }
+        Err(error) => {
+            return Err(AppError::archive(format!(
+                "В EPUB не найден файл «{name}»: {error}"
+            )));
+        }
+    };
     if entry.size() > MAX_ARCHIVE_ENTRY_BYTES {
-        return Err(format!(
+        return Err(AppError::limit_exceeded(format!(
             "В EPUB файл «{name}» больше допустимых {MAX_ARCHIVE_ENTRY_BYTES} байт"
-        )
-        .into());
+        )));
     }
     read_limited_with_cancel(entry, name, MAX_ARCHIVE_ENTRY_BYTES, cancel)
+}
+
+fn check_epub_total_size(total_bytes: u64) -> AppResult<()> {
+    if total_bytes > MAX_ARCHIVE_TOTAL_BYTES {
+        return Err(AppError::limit_exceeded(format!(
+            "Суммарный размер распакованных глав больше допустимых {MAX_ARCHIVE_TOTAL_BYTES} байт"
+        )));
+    }
+    Ok(())
 }
 
 fn epub_contents(
@@ -127,11 +148,11 @@ fn epub_contents(
         });
     };
     let opf_path = epub_rootfile_path(&container)?
-        .ok_or_else(|| "В META-INF/container.xml не указан rootfile".to_string())?;
+        .ok_or_else(|| AppError::invalid_data("В META-INF/container.xml не указан rootfile"))?;
     let opf = read_epub_zip_entry(archive, &opf_path, cancel)?;
     let entries = epub_spine_paths(&opf, &opf_path)?;
     if entries.is_empty() {
-        return Err("В OPF не найден spine с главами".into());
+        return Err(AppError::invalid_data("В OPF не найден spine с главами"));
     }
     Ok(EpubContents {
         entries,
@@ -157,7 +178,7 @@ fn fallback_epub_entries(archive: &mut ZipArchive<File>) -> Vec<String> {
     entries
 }
 
-fn epub_rootfile_path(bytes: &[u8]) -> Result<Option<String>, String> {
+fn epub_rootfile_path(bytes: &[u8]) -> AppResult<Option<String>> {
     let xml = decode_xml_with_declared_encoding(bytes);
     let mut reader = Reader::from_str(&xml);
 
@@ -172,7 +193,11 @@ fn epub_rootfile_path(bytes: &[u8]) -> Result<Option<String>, String> {
                 }
             }
             Ok(Event::Eof) => break,
-            Err(e) => return Err(format!("Ошибка разбора META-INF/container.xml: {e}")),
+            Err(e) => {
+                return Err(AppError::xml(format!(
+                    "Ошибка разбора META-INF/container.xml: {e}"
+                )));
+            }
             _ => {}
         }
     }
@@ -180,7 +205,7 @@ fn epub_rootfile_path(bytes: &[u8]) -> Result<Option<String>, String> {
     Ok(None)
 }
 
-fn epub_spine_paths(bytes: &[u8], opf_path: &str) -> Result<Vec<String>, String> {
+fn epub_spine_paths(bytes: &[u8], opf_path: &str) -> AppResult<Vec<String>> {
     let xml = decode_xml_with_declared_encoding(bytes);
     let mut reader = Reader::from_str(&xml);
     let mut manifest: HashMap<String, (String, bool)> = HashMap::new();
@@ -199,23 +224,25 @@ fn epub_spine_paths(bytes: &[u8], opf_path: &str) -> Result<Vec<String>, String>
             Ok(Event::End(_)) => {
                 depth = depth
                     .checked_sub(1)
-                    .ok_or_else(|| "Лишний закрывающий тег в OPF".to_string())?;
+                    .ok_or_else(|| AppError::invalid_data("Лишний закрывающий тег в OPF"))?;
             }
             Ok(Event::Eof) => break,
-            Err(e) => return Err(format!("Ошибка разбора OPF: {e}")),
+            Err(e) => {
+                return Err(AppError::xml(format!("Ошибка разбора OPF: {e}")));
+            }
             _ => {}
         }
     }
 
     if depth != 0 {
-        return Err("OPF содержит незакрытые теги".to_string());
+        return Err(AppError::invalid_data("OPF содержит незакрытые теги"));
     }
 
     let mut entries = Vec::new();
     for idref in spine_ids {
-        let (path, is_document) = manifest
-            .get(&idref)
-            .ok_or_else(|| format!("В spine указан отсутствующий id «{idref}»"))?;
+        let (path, is_document) = manifest.get(&idref).ok_or_else(|| {
+            AppError::invalid_data(format!("В spine указан отсутствующий id «{idref}»"))
+        })?;
         if *is_document && !is_epub_navigation(path) {
             entries.push(path.clone());
         }
@@ -228,7 +255,7 @@ fn collect_opf_element(
     manifest: &mut HashMap<String, (String, bool)>,
     spine_ids: &mut Vec<String>,
     opf_path: &str,
-) -> Result<(), String> {
+) -> AppResult<()> {
     match event.local_name().as_ref() {
         b"item" => {
             let Some(id) = xml_attribute(event, b"id")? else {
@@ -256,13 +283,14 @@ fn collect_opf_element(
     Ok(())
 }
 
-fn xml_attribute(event: &BytesStart<'_>, name: &[u8]) -> Result<Option<String>, String> {
+fn xml_attribute(event: &BytesStart<'_>, name: &[u8]) -> AppResult<Option<String>> {
     for attribute in event.attributes().with_checks(false) {
-        let attribute = attribute.map_err(|e| format!("Ошибка атрибута XML: {e}"))?;
+        let attribute =
+            attribute.map_err(|e| AppError::xml(format!("Ошибка атрибута XML: {e}")))?;
         if attribute.key.local_name().as_ref() == name {
             let value = attribute
                 .unescape_value()
-                .map_err(|e| format!("Ошибка значения атрибута XML: {e}"))?;
+                .map_err(|e| AppError::xml(format!("Ошибка значения атрибута XML: {e}")))?;
             return Ok(Some(value.into_owned()));
         }
     }
@@ -343,6 +371,9 @@ fn is_epub_navigation(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::FailureKind;
+    use crate::io::book_reader::limits::write_zip_entry_with_declared_size;
+    use crate::io::book_reader::test_temp_path;
 
     #[test]
     fn epub_reading_honors_a_cancel_flag() {
@@ -495,7 +526,65 @@ mod tests {
 
     #[test]
     fn malformed_epub_opf_reports_an_error() {
-        assert!(epub_spine_paths(b"<package><manifest>", "content.opf").is_err());
+        let error = epub_spine_paths(b"<package><manifest>", "content.opf")
+            .expect_err("unclosed OPF must fail");
+
+        assert_eq!(error.failure_kind(), Some(FailureKind::InvalidData));
+        assert_eq!(error.to_string(), "OPF содержит незакрытые теги");
+    }
+
+    #[test]
+    fn malformed_epub_metadata_has_xml_failure_kind() {
+        let container_error =
+            epub_rootfile_path(b"<container><").expect_err("malformed container must fail");
+        assert_eq!(container_error.failure_kind(), Some(FailureKind::Xml));
+        assert!(
+            container_error
+                .to_string()
+                .starts_with("Ошибка разбора META-INF/container.xml: "),
+            "{container_error}"
+        );
+
+        let opf_error =
+            epub_spine_paths(b"<package><", "content.opf").expect_err("malformed OPF must fail");
+        assert_eq!(opf_error.failure_kind(), Some(FailureKind::Xml));
+        assert!(
+            opf_error.to_string().starts_with("Ошибка разбора OPF: "),
+            "{opf_error}"
+        );
+    }
+
+    #[test]
+    fn missing_epub_spine_id_is_invalid_data() {
+        let error = epub_spine_paths(
+            b"<package><spine><itemref idref=\"missing\"/></spine></package>",
+            "content.opf",
+        )
+        .expect_err("missing manifest id must fail");
+
+        assert_eq!(error.failure_kind(), Some(FailureKind::InvalidData));
+        assert_eq!(
+            error.to_string(),
+            "В spine указан отсутствующий id «missing»"
+        );
+    }
+
+    #[test]
+    fn malformed_epub_attribute_has_xml_failure_kind() {
+        let mut reader = Reader::from_str("<item href=\"broken&unknown;\"/>");
+        let Event::Empty(event) = reader.read_event().expect("read item event") else {
+            panic!("fixture must contain an empty item element");
+        };
+
+        let error = xml_attribute(&event, b"href").expect_err("malformed attribute must fail");
+
+        assert_eq!(error.failure_kind(), Some(FailureKind::Xml));
+        assert!(
+            error
+                .to_string()
+                .starts_with("Ошибка значения атрибута XML: "),
+            "{error}"
+        );
     }
 
     struct TempEpub(std::path::PathBuf);
@@ -538,6 +627,142 @@ mod tests {
     <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
   </rootfiles>
 </container>"#;
+
+    #[test]
+    fn broken_epub_zip_is_an_archive_failure() {
+        let path = test_temp_path("epub-broken-zip", "epub");
+        std::fs::write(&path, b"not a ZIP archive").expect("write broken EPUB fixture");
+
+        let error = EpubDocumentReader
+            .read_document(&path)
+            .expect_err("broken EPUB ZIP must fail");
+
+        assert_eq!(error.failure_kind(), Some(FailureKind::Archive));
+        assert!(
+            error.to_string().starts_with("Ошибка чтения EPUB: "),
+            "{error}"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn missing_epub_rootfile_is_invalid_data() {
+        let epub = write_test_epub(&[(
+            "META-INF/container.xml",
+            "<container><rootfiles/></container>",
+        )]);
+
+        let error = EpubDocumentReader
+            .read_document(&epub.0)
+            .expect_err("missing rootfile must fail");
+
+        assert_eq!(error.failure_kind(), Some(FailureKind::InvalidData));
+        assert_eq!(
+            error.to_string(),
+            "В META-INF/container.xml не указан rootfile"
+        );
+    }
+
+    #[test]
+    fn missing_epub_spine_is_invalid_data() {
+        let epub = write_test_epub(&[
+            ("META-INF/container.xml", TEST_EPUB_CONTAINER),
+            ("OEBPS/content.opf", "<package><manifest/></package>"),
+        ]);
+
+        let error = EpubDocumentReader
+            .read_document(&epub.0)
+            .expect_err("missing spine must fail");
+
+        assert_eq!(error.failure_kind(), Some(FailureKind::InvalidData));
+        assert_eq!(error.to_string(), "В OPF не найден spine с главами");
+    }
+
+    #[test]
+    fn empty_epub_text_is_invalid_data() {
+        let opf = r#"<package><manifest><item id="chapter" href="Text/chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>"#;
+        let epub = write_test_epub(&[
+            ("META-INF/container.xml", TEST_EPUB_CONTAINER),
+            ("OEBPS/content.opf", opf),
+            (
+                "OEBPS/Text/chapter.xhtml",
+                "<html><body><p> \n </p></body></html>",
+            ),
+        ]);
+
+        let error = EpubDocumentReader
+            .read_document(&epub.0)
+            .expect_err("empty EPUB text must fail");
+
+        assert_eq!(error.failure_kind(), Some(FailureKind::InvalidData));
+        assert_eq!(
+            error.to_string(),
+            "В EPUB не найден текст: файлы внутри повреждены или пусты."
+        );
+    }
+
+    #[test]
+    fn malformed_epub_chapter_preserves_xml_kind_with_context() {
+        let opf = r#"<package><manifest><item id="chapter" href="Text/chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>"#;
+        let epub = write_test_epub(&[
+            ("META-INF/container.xml", TEST_EPUB_CONTAINER),
+            ("OEBPS/content.opf", opf),
+            (
+                "OEBPS/Text/chapter.xhtml",
+                "<html><body><p>Текст</body></html>",
+            ),
+        ]);
+
+        let error = EpubDocumentReader
+            .read_document(&epub.0)
+            .expect_err("malformed chapter must fail");
+
+        assert_eq!(error.failure_kind(), Some(FailureKind::Xml));
+        assert!(
+            error.to_string().starts_with(
+                "Ошибка разбора главы «OEBPS/Text/chapter.xhtml»: Ошибка разбора XML: "
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn oversized_epub_chapter_is_a_limit_failure() {
+        let path = test_temp_path("epub-oversized", "epub");
+        write_zip_entry_with_declared_size(
+            &path,
+            "chapter.xhtml",
+            b"<html/>",
+            MAX_ARCHIVE_ENTRY_BYTES + 1,
+        );
+
+        let error = EpubDocumentReader
+            .read_document(&path)
+            .expect_err("oversized EPUB chapter must fail");
+
+        assert_eq!(error.failure_kind(), Some(FailureKind::LimitExceeded));
+        assert_eq!(
+            error.to_string(),
+            format!("В EPUB файл «chapter.xhtml» больше допустимых {MAX_ARCHIVE_ENTRY_BYTES} байт")
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn epub_total_limit_preserves_message_and_kind() {
+        check_epub_total_size(MAX_ARCHIVE_TOTAL_BYTES).expect("total exactly at the limit");
+
+        let error = check_epub_total_size(MAX_ARCHIVE_TOTAL_BYTES + 1)
+            .expect_err("total above the limit must fail");
+
+        assert_eq!(error.failure_kind(), Some(FailureKind::LimitExceeded));
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "Суммарный размер распакованных глав больше допустимых {MAX_ARCHIVE_TOTAL_BYTES} байт"
+            )
+        );
+    }
 
     #[test]
     fn reads_epub_chapters_in_spine_order() {
@@ -600,6 +825,13 @@ mod tests {
             .read_document(&epub.0)
             .expect_err("missing chapter must not be ignored");
         assert!(error.to_string().contains("не найден файл"), "{error}");
+        assert_eq!(error.failure_kind(), Some(FailureKind::InvalidData));
+        assert!(
+            error
+                .to_string()
+                .starts_with("В EPUB не найден файл «OEBPS/Text/missing.xhtml»: "),
+            "{error}"
+        );
     }
 
     #[test]

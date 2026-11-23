@@ -1,7 +1,6 @@
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), expect(dead_code))]
 pub enum FailureKind {
     Io,
     Archive,
@@ -43,32 +42,26 @@ impl AppError {
         Self::typed_failure(FailureKind::Other, message)
     }
 
-    #[cfg_attr(not(test), expect(dead_code))]
     pub fn io(message: impl Into<String>) -> Self {
         Self::typed_failure(FailureKind::Io, message)
     }
 
-    #[cfg_attr(not(test), expect(dead_code))]
     pub fn archive(message: impl Into<String>) -> Self {
         Self::typed_failure(FailureKind::Archive, message)
     }
 
-    #[cfg_attr(not(test), expect(dead_code))]
     pub fn xml(message: impl Into<String>) -> Self {
         Self::typed_failure(FailureKind::Xml, message)
     }
 
-    #[cfg_attr(not(test), expect(dead_code))]
     pub fn limit_exceeded(message: impl Into<String>) -> Self {
         Self::typed_failure(FailureKind::LimitExceeded, message)
     }
 
-    #[cfg_attr(not(test), expect(dead_code))]
     pub fn unsupported_format(message: impl Into<String>) -> Self {
         Self::typed_failure(FailureKind::UnsupportedFormat, message)
     }
 
-    #[cfg_attr(not(test), expect(dead_code))]
     pub fn invalid_data(message: impl Into<String>) -> Self {
         Self::typed_failure(FailureKind::InvalidData, message)
     }

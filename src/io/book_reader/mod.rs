@@ -13,7 +13,7 @@ mod xml;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
-use crate::domain::{AppResult, BookDocument};
+use crate::domain::{AppError, AppResult, BookDocument};
 use crate::io::paths::book_stem;
 use crate::ports::{DocumentReader, is_cancelled as book_cancelled};
 
@@ -35,6 +35,25 @@ fn document_title_from_path(path: &Path) -> String {
     book_stem(path)
         .filter(|stem| !stem.is_empty())
         .unwrap_or_else(|| "Без названия".to_string())
+}
+
+#[cfg(test)]
+fn test_temp_path(label: &str, extension: &str) -> std::path::PathBuf {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let suffix = if extension.is_empty() {
+        String::new()
+    } else {
+        format!(".{extension}")
+    };
+    std::env::temp_dir().join(format!(
+        "demagog-{label}-{}-{stamp}{suffix}",
+        std::process::id()
+    ))
 }
 
 pub struct CompositeBookReader {
@@ -72,13 +91,60 @@ impl DocumentReader for CompositeBookReader {
                 return r.read_document_with_cancel(path, cancel);
             }
         }
-        Err(format!("Формат файла не поддерживается. {SUPPORTED_BOOK_FORMATS}").into())
+        Err(AppError::unsupported_format(format!(
+            "Формат файла не поддерживается. {SUPPORTED_BOOK_FORMATS}"
+        )))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::FailureKind;
+
+    #[test]
+    fn unsupported_format_preserves_message_and_kind() {
+        let path = test_temp_path("unsupported", "rtf");
+        std::fs::write(&path, b"not a supported book").expect("write unsupported fixture");
+
+        let error = CompositeBookReader::new()
+            .read_document(&path)
+            .expect_err("unsupported format must fail");
+
+        assert_eq!(error.failure_kind(), Some(FailureKind::UnsupportedFormat));
+        assert_eq!(
+            error.to_string(),
+            format!("Формат файла не поддерживается. {SUPPORTED_BOOK_FORMATS}")
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn missing_book_files_are_io_failures() {
+        let readers: [(&dyn DocumentReader, &str, &str); 5] = [
+            (&TxtDocumentReader, "txt", "Ошибка чтения файла: "),
+            (&Fb2DocumentReader, "fb2", "Ошибка чтения FB2: "),
+            (&Fb2DocumentReader, "zip", "Ошибка открытия архива: "),
+            (&EpubDocumentReader, "epub", "Ошибка открытия EPUB: "),
+            (&DocxDocumentReader, "docx", "Ошибка открытия DOCX: "),
+        ];
+
+        for (reader, extension, message_prefix) in readers {
+            let path = test_temp_path(&format!("missing-{extension}"), extension);
+            assert!(
+                !path.exists(),
+                "test path must not exist: {}",
+                path.display()
+            );
+
+            let error = reader
+                .read_document(&path)
+                .expect_err("missing book file must fail");
+
+            assert_eq!(error.failure_kind(), Some(FailureKind::Io), "{path:?}");
+            assert!(error.to_string().starts_with(message_prefix), "{error}");
+        }
+    }
 
     #[test]
     fn recognizes_supported_book_paths_case_insensitively() {
