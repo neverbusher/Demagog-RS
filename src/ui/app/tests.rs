@@ -952,11 +952,12 @@ fn editors_are_disabled_while_processing() {
 
 #[test]
 fn settings_show_dictionary_check_button_and_report() {
+    use crate::domain::{DictionaryPurpose, DictionaryStage};
     use crate::services::dictionary_audit::{
         AuditCandidate, AuditKind, AuditReport, DictionaryAudit,
     };
     use crate::services::dictionary_check::{
-        CheckReport, GOLDEN_CASES, OrderReport, OrderedDictionary,
+        CheckDiagnostic, CheckReport, GOLDEN_CASES, OrderDiagnostic, OrderReport, OrderedDictionary,
     };
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
@@ -964,15 +965,19 @@ fn settings_show_dictionary_check_button_and_report() {
     let order = OrderReport {
         ordered: vec![OrderedDictionary {
             name: "10_REX_числа(chisla).rex".to_string(),
-            stage: "REX",
+            stage: DictionaryStage::Rex,
         }],
-        warnings: Vec::new(),
-        failures: Vec::new(),
+        warnings: vec![CheckDiagnostic::Order(OrderDiagnostic::RexWithoutNumber {
+            name: "numbers.rex".to_string(),
+        })],
+        failures: vec![CheckDiagnostic::Order(OrderDiagnostic::Unnumbered {
+            name: "custom.dic".to_string(),
+        })],
     };
     let audit = AuditReport {
         dictionaries: vec![DictionaryAudit {
             name: "67_TTS_Offline АВТОР(phoneme).dic".to_string(),
-            purpose: "автор",
+            purpose: DictionaryPurpose::Author,
             total_rules: 10,
             candidates: vec![AuditCandidate {
                 line: 1,
@@ -981,7 +986,10 @@ fn settings_show_dictionary_check_button_and_report() {
                 kind: AuditKind::Letters,
             }],
         }],
-        skipped: vec![("65_ЛАТИНИЦА@.dic".to_string(), "транслитерация")],
+        skipped: vec![(
+            "65_ЛАТИНИЦА@.dic".to_string(),
+            DictionaryPurpose::Transliteration,
+        )],
         scanned_rules: 10,
         total_candidates: 1,
     };
@@ -1007,7 +1015,12 @@ fn settings_show_dictionary_check_button_and_report() {
     harness.get_by_label_contains("🔎 Проверка словарей");
     harness.get_by_label_contains("Фонетические кандидаты");
     harness.get_by_label_contains("Кандидатов: 1 из 10");
-    harness.get_by_label_contains("67_TTS_Offline АВТОР(phoneme).dic");
+    harness.get_by_label_contains("1. [REX] 10_REX_числа(chisla).rex");
+    harness.get_by_label_contains("• numbers.rex: .rex без номера — проверьте порядок");
+    harness.get_by_label_contains(
+        "• custom.dic: .dic без номера — загрузчик поставит его после HARD-E",
+    );
+    harness.get_by_label_contains("67_TTS_Offline АВТОР(phoneme).dic — 1 из 10 [автор]");
 }
 
 #[test]

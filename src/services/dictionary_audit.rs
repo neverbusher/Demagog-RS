@@ -28,7 +28,7 @@ pub struct AuditCandidate {
 #[derive(Debug, Clone)]
 pub struct DictionaryAudit {
     pub name: String,
-    pub purpose: &'static str,
+    pub purpose: DictionaryPurpose,
     pub total_rules: usize,
     pub candidates: Vec<AuditCandidate>,
 }
@@ -36,7 +36,7 @@ pub struct DictionaryAudit {
 #[derive(Debug, Clone, Default)]
 pub struct AuditReport {
     pub dictionaries: Vec<DictionaryAudit>,
-    pub skipped: Vec<(String, &'static str)>,
+    pub skipped: Vec<(String, DictionaryPurpose)>,
     pub scanned_rules: usize,
     pub total_candidates: usize,
 }
@@ -65,8 +65,7 @@ pub fn audit_dictionaries_with_cancel(
             .unwrap_or("<unknown>")
             .to_string();
         let profile: DictionaryProfile = classify_dictionary(&name);
-        let purpose_kind: DictionaryPurpose = profile.purpose;
-        let purpose = purpose_kind.label();
+        let purpose = profile.purpose;
         if profile.purpose.expected_by_design() {
             report.skipped.push((name, purpose));
             continue;
@@ -260,15 +259,16 @@ mod tests {
         assert_eq!(report.scanned_rules, 6);
         assert_eq!(report.total_candidates, 4);
         assert_eq!(report.dictionaries.len(), 1);
-        assert!(
-            report
-                .skipped
-                .iter()
-                .any(|(name, purpose)| name.starts_with("65_") && *purpose == "транслитерация")
+        assert_eq!(
+            report.skipped,
+            vec![(
+                "65_ЛАТИНИЦА@.dic".to_string(),
+                DictionaryPurpose::Transliteration
+            )]
         );
 
         let post = &report.dictionaries[0];
-        assert_eq!(post.purpose, "пост-обработка");
+        assert_eq!(post.purpose, DictionaryPurpose::PostProcessing);
         assert_eq!(post.total_rules, 6);
         assert_eq!(post.candidates.len(), 4);
         assert_eq!(post.candidates[0].line, 1);
@@ -293,11 +293,12 @@ mod tests {
         assert_eq!(report.scanned_rules, 0);
         assert_eq!(report.total_candidates, 0);
         assert!(report.dictionaries.is_empty());
-        assert!(
-            report
-                .skipped
-                .iter()
-                .any(|(name, purpose)| name.starts_with("95.") && *purpose == "база")
+        assert_eq!(
+            report.skipped,
+            vec![(
+                "95.NEW_Орфоэпия(phoneme).dic".to_string(),
+                DictionaryPurpose::Base
+            )]
         );
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -117,10 +117,18 @@ fn run_dictionary_check() -> i32 {
         Ok(report) => {
             println!("Порядок обработки:");
             for (index, item) in report.order.ordered.iter().enumerate() {
-                println!("{:2}. [{}] {}", index + 1, item.stage, item.name);
+                println!(
+                    "{:2}. [{}] {}",
+                    index + 1,
+                    presentation::dictionary_stage_label(item.stage),
+                    item.name
+                );
             }
             for warning in &report.order.warnings {
-                println!("ПРЕДУПРЕЖДЕНИЕ: {warning}");
+                println!(
+                    "ПРЕДУПРЕЖДЕНИЕ: {}",
+                    presentation::check_diagnostic_text(warning)
+                );
             }
             println!(
                 "Загружено {} словарей ({} правил).",
@@ -152,7 +160,7 @@ fn run_dictionary_check() -> i32 {
                     println!(
                         "  {} [{}]: {}",
                         dictionary.name,
-                        dictionary.purpose,
+                        presentation::dictionary_purpose_label(dictionary.purpose),
                         dictionary.candidates.len()
                     );
                 }
@@ -172,7 +180,7 @@ fn run_dictionary_check() -> i32 {
                 0
             } else {
                 for failure in &report.order.failures {
-                    eprintln!("ОШИБКА: {failure}");
+                    eprintln!("ОШИБКА: {}", presentation::check_diagnostic_text(failure));
                 }
                 1
             }

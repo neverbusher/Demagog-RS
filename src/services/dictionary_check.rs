@@ -1,16 +1,93 @@
 use crate::domain::{DictionaryStage, classify_dictionary};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OrderDiagnostic {
+    RexWithoutNumber {
+        name: String,
+    },
+    Unnumbered {
+        name: String,
+    },
+    UnknownStage {
+        name: String,
+    },
+    DuplicateHardE {
+        name: String,
+    },
+    HardEMissingMarker {
+        name: String,
+    },
+    DuplicateYoBase {
+        name: String,
+    },
+    HardEStageName {
+        name: String,
+    },
+    StageRegression {
+        name: String,
+        stage: DictionaryStage,
+        previous_name: String,
+        previous_stage: DictionaryStage,
+    },
+    RexAfterDic {
+        name: String,
+    },
+    AfterHardE {
+        name: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManifestDrift {
+    MissingFromManifest { name: String },
+    Changed { name: String },
+    MissingOnDisk { name: String },
+}
+
+impl ManifestDrift {
+    fn sort_key(&self) -> (&str, u8) {
+        let name = match self {
+            Self::MissingFromManifest { name }
+            | Self::Changed { name }
+            | Self::MissingOnDisk { name } => name,
+        };
+        let rank = match self {
+            Self::MissingFromManifest { .. } => 0,
+            Self::MissingOnDisk { .. } => 1,
+            Self::Changed { .. } => 2,
+        };
+        (name, rank)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckDiagnostic {
+    Order(OrderDiagnostic),
+    Manifest(ManifestDrift),
+    LoadFailed(String),
+    CompileWarning {
+        dictionary: String,
+        warning: String,
+    },
+    AuditFailed(String),
+    GoldenMismatch {
+        case: &'static str,
+        expected: &'static str,
+        actual: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrderedDictionary {
     pub name: String,
-    pub stage: &'static str,
+    pub stage: DictionaryStage,
 }
 
 #[derive(Debug, Default)]
 pub struct OrderReport {
     pub ordered: Vec<OrderedDictionary>,
-    pub warnings: Vec<String>,
-    pub failures: Vec<String>,
+    pub warnings: Vec<CheckDiagnostic>,
+    pub failures: Vec<CheckDiagnostic>,
 }
 
 pub fn validate_order(names: &[String]) -> OrderReport {
@@ -26,7 +103,7 @@ pub fn validate_order(names: &[String]) -> OrderReport {
         let stage = profile.stage;
         report.ordered.push(OrderedDictionary {
             name: name.clone(),
-            stage: stage.label(),
+            stage,
         });
 
         if stage == DictionaryStage::Rex {
@@ -34,37 +111,49 @@ pub fn validate_order(names: &[String]) -> OrderReport {
             if profile.number.is_none() {
                 report
                     .warnings
-                    .push(format!("{name}: .rex без номера — проверьте порядок"));
+                    .push(CheckDiagnostic::Order(OrderDiagnostic::RexWithoutNumber {
+                        name: name.clone(),
+                    }));
             }
         } else if first_dic.is_none() {
             first_dic = Some(index);
         }
 
         match stage {
-            DictionaryStage::Unnumbered => report.failures.push(format!(
-                "{name}: .dic без номера — загрузчик поставит его после HARD-E"
-            )),
-            DictionaryStage::Unknown => report.warnings.push(format!(
-                "{name}: неизвестный этап — проверьте порядок вручную"
-            )),
+            DictionaryStage::Unnumbered => {
+                report
+                    .failures
+                    .push(CheckDiagnostic::Order(OrderDiagnostic::Unnumbered {
+                        name: name.clone(),
+                    }))
+            }
+            DictionaryStage::Unknown => {
+                report
+                    .warnings
+                    .push(CheckDiagnostic::Order(OrderDiagnostic::UnknownStage {
+                        name: name.clone(),
+                    }))
+            }
             DictionaryStage::HardE => {
                 if hard_e_index.is_some() {
                     report
                         .warnings
-                        .push(format!("{name}: второй словарь HARD-E"));
+                        .push(CheckDiagnostic::Order(OrderDiagnostic::DuplicateHardE {
+                            name: name.clone(),
+                        }));
                 }
                 hard_e_index = Some(index);
                 if !profile.has_hard_marker {
-                    report.warnings.push(format!(
-                        "{name}: номер 96 без маркера (hard-e) — это не HARD-E"
+                    report.warnings.push(CheckDiagnostic::Order(
+                        OrderDiagnostic::HardEMissingMarker { name: name.clone() },
                     ));
                 }
             }
             DictionaryStage::YoBase => {
                 if yo_base_index.is_some() {
-                    report
-                        .warnings
-                        .push(format!("{name}: второй базовый ё-словарь"));
+                    report.warnings.push(CheckDiagnostic::Order(
+                        OrderDiagnostic::DuplicateYoBase { name: name.clone() },
+                    ));
                 }
                 yo_base_index = Some(index);
             }
@@ -72,9 +161,11 @@ pub fn validate_order(names: &[String]) -> OrderReport {
         }
 
         if profile.has_hard_marker && stage != DictionaryStage::HardE {
-            report.failures.push(format!(
-                "{name}: HARD-E должен называться 96_... (hard-e).dic"
-            ));
+            report
+                .failures
+                .push(CheckDiagnostic::Order(OrderDiagnostic::HardEStageName {
+                    name: name.clone(),
+                }));
         }
 
         if !matches!(
@@ -84,11 +175,14 @@ pub fn validate_order(names: &[String]) -> OrderReport {
             if let Some((previous_stage, previous_name)) = previous
                 && stage < previous_stage
             {
-                report.failures.push(format!(
-                    "{name} ({}) идёт после {previous_name} ({}), но должен быть раньше",
-                    stage.label(),
-                    previous_stage.label()
-                ));
+                report
+                    .failures
+                    .push(CheckDiagnostic::Order(OrderDiagnostic::StageRegression {
+                        name: name.clone(),
+                        stage,
+                        previous_name: previous_name.to_string(),
+                        previous_stage,
+                    }));
             }
             previous = Some((stage, name));
         }
@@ -97,15 +191,20 @@ pub fn validate_order(names: &[String]) -> OrderReport {
     if let (Some(last_rex), Some(first_dic)) = (last_rex, first_dic)
         && last_rex > first_dic
     {
-        report.failures.push(format!(
-            "{}: .rex должен обрабатываться до .dic",
-            names[last_rex]
-        ));
+        report
+            .failures
+            .push(CheckDiagnostic::Order(OrderDiagnostic::RexAfterDic {
+                name: names[last_rex].clone(),
+            }));
     }
 
     if let Some(hard_e_index) = hard_e_index {
         for name in &names[hard_e_index + 1..] {
-            report.failures.push(format!("{name}: идёт после HARD-E"));
+            report
+                .failures
+                .push(CheckDiagnostic::Order(OrderDiagnostic::AfterHardE {
+                    name: name.clone(),
+                }));
         }
     }
 
@@ -315,7 +414,7 @@ pub fn write_manifest(dir: &Path, manifest: &Path) -> AppResult<usize> {
 /// Warns when the on-disk dictionary set drifts from the committed manifest.
 /// Returns no warnings when the manifest is absent (e.g. a fresh checkout
 /// without dictionaries).
-pub fn manifest_drift(dir: &Path, manifest: &Path) -> Vec<String> {
+pub fn manifest_drift(dir: &Path, manifest: &Path) -> Vec<ManifestDrift> {
     let Ok(body) = std::fs::read_to_string(manifest) else {
         return Vec::new();
     };
@@ -333,19 +432,19 @@ pub fn manifest_drift(dir: &Path, manifest: &Path) -> Vec<String> {
     let mut warnings = Vec::new();
     for (name, hash) in &actual {
         match expected.get(name) {
-            None => warnings.push(format!("Словарь {name} отсутствует в манифесте")),
+            None => warnings.push(ManifestDrift::MissingFromManifest { name: name.clone() }),
             Some(want) if want != hash => {
-                warnings.push(format!("Словарь {name} изменился относительно манифеста"));
+                warnings.push(ManifestDrift::Changed { name: name.clone() })
             }
             Some(_) => {}
         }
     }
     for name in expected.keys() {
         if !actual.contains_key(name) {
-            warnings.push(format!("Словарь {name} из манифеста отсутствует на диске"));
+            warnings.push(ManifestDrift::MissingOnDisk { name: name.clone() });
         }
     }
-    warnings.sort();
+    warnings.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
     warnings
 }
 
@@ -391,7 +490,7 @@ pub fn run_check_with_cancel(dir: &Path, cancel: Option<&AtomicBool>) -> AppResu
         .collect();
     let mut order = validate_order(&names);
     for warning in manifest_drift(dir, &manifest_path()) {
-        order.warnings.push(warning);
+        order.warnings.push(CheckDiagnostic::Manifest(warning));
     }
     let report = load_dictionaries_parallel_with_cancel(dir, cancel)?;
     if is_cancelled() {
@@ -405,13 +504,14 @@ pub fn run_check_with_cancel(dir: &Path, cancel: Option<&AtomicBool>) -> AppResu
         .sum();
 
     for error in report.errors {
-        order.failures.push(format!("Словарь не загружен: {error}"));
+        order.failures.push(CheckDiagnostic::LoadFailed(error));
     }
     for dictionary in &report.compiled {
         for warning in &dictionary.meta.warnings {
-            order
-                .warnings
-                .push(format!("{}: {warning}", dictionary.meta.name));
+            order.warnings.push(CheckDiagnostic::CompileWarning {
+                dictionary: dictionary.meta.name.clone(),
+                warning: warning.clone(),
+            });
         }
     }
     let audit = match audit_dictionaries_with_cancel(dir, cancel) {
@@ -422,7 +522,7 @@ pub fn run_check_with_cancel(dir: &Path, cancel: Option<&AtomicBool>) -> AppResu
             }
             order
                 .warnings
-                .push(format!("Аудит фонетики не выполнен: {error}"));
+                .push(CheckDiagnostic::AuditFailed(error.to_string()));
             AuditReport::default()
         }
     };
@@ -462,10 +562,11 @@ pub fn run_check_with_cancel(dir: &Path, cancel: Option<&AtomicBool>) -> AppResu
         );
         match result {
             Ok(result) if result.processed_text == case.expected => passed += 1,
-            Ok(result) => order.failures.push(format!(
-                "{}: ожидалось «{}», получено «{}»",
-                case.name, case.expected, result.processed_text
-            )),
+            Ok(result) => order.failures.push(CheckDiagnostic::GoldenMismatch {
+                case: case.name,
+                expected: case.expected,
+                actual: result.processed_text,
+            }),
             Err(error) if error.is_cancelled() => return Err(check_cancelled()),
             Err(error) => return Err(error),
         }
@@ -534,14 +635,24 @@ mod tests {
         ];
         let report = validate_order(&names);
         assert!(report.failures.is_empty(), "{:?}", report.failures);
-        assert_eq!(report.ordered[1].stage, "Ё: БАЗА");
+        assert_eq!(report.ordered[1].stage, DictionaryStage::YoBase);
     }
 
     #[test]
     fn unnumbered_non_yo_dictionary_still_fails_order_check() {
         let names = vec!["96_hard(hard-e).dic".to_string(), "custom.dic".to_string()];
         let report = validate_order(&names);
-        assert!(!report.failures.is_empty());
+        assert_eq!(
+            report.failures,
+            vec![
+                CheckDiagnostic::Order(OrderDiagnostic::Unnumbered {
+                    name: "custom.dic".to_string(),
+                }),
+                CheckDiagnostic::Order(OrderDiagnostic::AfterHardE {
+                    name: "custom.dic".to_string(),
+                }),
+            ]
+        );
     }
 
     #[test]
@@ -590,12 +701,41 @@ mod tests {
         assert!(manifest_drift(&dir, &manifest).is_empty());
 
         std::fs::write(dir.join("20_b.dic"), "в=г изменено\n").expect("modify b");
-        let drift = manifest_drift(&dir, &manifest);
-        assert!(drift.iter().any(|w| w.contains("20_b.dic")));
+        assert_eq!(
+            manifest_drift(&dir, &manifest),
+            vec![ManifestDrift::Changed {
+                name: "20_b.dic".to_string(),
+            }]
+        );
 
         std::fs::remove_file(dir.join("10_a.dic")).expect("remove a");
-        let drift = manifest_drift(&dir, &manifest);
-        assert!(drift.iter().any(|w| w.contains("10_a.dic")));
+        assert_eq!(
+            manifest_drift(&dir, &manifest),
+            vec![
+                ManifestDrift::MissingOnDisk {
+                    name: "10_a.dic".to_string(),
+                },
+                ManifestDrift::Changed {
+                    name: "20_b.dic".to_string(),
+                },
+            ]
+        );
+
+        std::fs::write(dir.join("30_c.dic"), "д=е\n").expect("write c");
+        assert_eq!(
+            manifest_drift(&dir, &manifest),
+            vec![
+                ManifestDrift::MissingOnDisk {
+                    name: "10_a.dic".to_string(),
+                },
+                ManifestDrift::Changed {
+                    name: "20_b.dic".to_string(),
+                },
+                ManifestDrift::MissingFromManifest {
+                    name: "30_c.dic".to_string(),
+                },
+            ]
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -707,6 +847,114 @@ mod tests {
     }
 
     #[test]
+    fn emits_every_order_diagnostic_in_the_existing_sequence() {
+        let input = names(&[
+            "numbers.rex",
+            "yo.dic",
+            "custom.dic",
+            "78_custom.dic",
+            "96_first.dic",
+            "96_second(hard-e).dic",
+            "other_yo.dic",
+            "33_bad(hard-e).dic",
+            "76_phrases.dic",
+            "77_names.dic",
+            "20_again.rex",
+            "90_after.dic",
+        ]);
+        let report = validate_order(&input);
+
+        assert_eq!(
+            report
+                .ordered
+                .iter()
+                .map(|dictionary| (dictionary.name.as_str(), dictionary.stage))
+                .collect::<Vec<_>>(),
+            vec![
+                ("numbers.rex", DictionaryStage::Rex),
+                ("yo.dic", DictionaryStage::YoBase),
+                ("custom.dic", DictionaryStage::Unnumbered),
+                ("78_custom.dic", DictionaryStage::Unknown),
+                ("96_first.dic", DictionaryStage::HardE),
+                ("96_second(hard-e).dic", DictionaryStage::HardE),
+                ("other_yo.dic", DictionaryStage::YoBase),
+                ("33_bad(hard-e).dic", DictionaryStage::YoAdditions),
+                ("76_phrases.dic", DictionaryStage::PhrasesImport),
+                ("77_names.dic", DictionaryStage::NamesImport),
+                ("20_again.rex", DictionaryStage::Rex),
+                ("90_after.dic", DictionaryStage::Unknown),
+            ]
+        );
+        assert_eq!(
+            report.warnings,
+            vec![
+                CheckDiagnostic::Order(OrderDiagnostic::RexWithoutNumber {
+                    name: "numbers.rex".to_string(),
+                }),
+                CheckDiagnostic::Order(OrderDiagnostic::UnknownStage {
+                    name: "78_custom.dic".to_string(),
+                }),
+                CheckDiagnostic::Order(OrderDiagnostic::HardEMissingMarker {
+                    name: "96_first.dic".to_string(),
+                }),
+                CheckDiagnostic::Order(OrderDiagnostic::DuplicateHardE {
+                    name: "96_second(hard-e).dic".to_string(),
+                }),
+                CheckDiagnostic::Order(OrderDiagnostic::DuplicateYoBase {
+                    name: "other_yo.dic".to_string(),
+                }),
+                CheckDiagnostic::Order(OrderDiagnostic::UnknownStage {
+                    name: "90_after.dic".to_string(),
+                }),
+            ]
+        );
+        assert_eq!(
+            report.failures,
+            vec![
+                CheckDiagnostic::Order(OrderDiagnostic::Unnumbered {
+                    name: "custom.dic".to_string(),
+                }),
+                CheckDiagnostic::Order(OrderDiagnostic::StageRegression {
+                    name: "other_yo.dic".to_string(),
+                    stage: DictionaryStage::YoBase,
+                    previous_name: "96_second(hard-e).dic".to_string(),
+                    previous_stage: DictionaryStage::HardE,
+                }),
+                CheckDiagnostic::Order(OrderDiagnostic::HardEStageName {
+                    name: "33_bad(hard-e).dic".to_string(),
+                }),
+                CheckDiagnostic::Order(OrderDiagnostic::StageRegression {
+                    name: "20_again.rex".to_string(),
+                    stage: DictionaryStage::Rex,
+                    previous_name: "77_names.dic".to_string(),
+                    previous_stage: DictionaryStage::NamesImport,
+                }),
+                CheckDiagnostic::Order(OrderDiagnostic::RexAfterDic {
+                    name: "20_again.rex".to_string(),
+                }),
+                CheckDiagnostic::Order(OrderDiagnostic::AfterHardE {
+                    name: "other_yo.dic".to_string(),
+                }),
+                CheckDiagnostic::Order(OrderDiagnostic::AfterHardE {
+                    name: "33_bad(hard-e).dic".to_string(),
+                }),
+                CheckDiagnostic::Order(OrderDiagnostic::AfterHardE {
+                    name: "76_phrases.dic".to_string(),
+                }),
+                CheckDiagnostic::Order(OrderDiagnostic::AfterHardE {
+                    name: "77_names.dic".to_string(),
+                }),
+                CheckDiagnostic::Order(OrderDiagnostic::AfterHardE {
+                    name: "20_again.rex".to_string(),
+                }),
+                CheckDiagnostic::Order(OrderDiagnostic::AfterHardE {
+                    name: "90_after.dic".to_string(),
+                }),
+            ]
+        );
+    }
+
+    #[test]
     fn accepts_stage_order() {
         let report = validate_order(&names(&[
             "10_REX_числа.rex",
@@ -725,8 +973,8 @@ mod tests {
 
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         assert!(report.warnings.is_empty(), "{:?}", report.warnings);
-        assert_eq!(report.ordered.first().unwrap().stage, "REX");
-        assert_eq!(report.ordered.last().unwrap().stage, "HARD-E");
+        assert_eq!(report.ordered.first().unwrap().stage, DictionaryStage::Rex);
+        assert_eq!(report.ordered.last().unwrap().stage, DictionaryStage::HardE);
     }
 
     #[test]
@@ -742,13 +990,14 @@ mod tests {
             "96_Твёрдое Э(hard-e).dic",
         ]));
 
-        assert!(
-            report
-                .failures
-                .iter()
-                .any(|failure| failure.contains("76_ruvoice_фразы.dic")),
-            "{:?}",
-            report.failures
+        assert_eq!(
+            report.failures,
+            vec![CheckDiagnostic::Order(OrderDiagnostic::StageRegression {
+                name: "76_ruvoice_фразы.dic".to_string(),
+                stage: DictionaryStage::PhrasesImport,
+                previous_name: "77_ruvoice_имена.dic".to_string(),
+                previous_stage: DictionaryStage::NamesImport,
+            })]
         );
     }
 
@@ -762,13 +1011,11 @@ mod tests {
             "96_Твёрдое Э(hard-e).dic",
         ]));
 
-        assert!(
-            report
-                .failures
-                .iter()
-                .any(|failure| failure.contains("custom.dic")),
-            "{:?}",
-            report.failures
+        assert_eq!(
+            report.failures,
+            vec![CheckDiagnostic::Order(OrderDiagnostic::Unnumbered {
+                name: "custom.dic".to_string(),
+            })]
         );
     }
 
@@ -782,21 +1029,17 @@ mod tests {
             "97_custom.dic",
         ]));
 
-        assert!(
-            report
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("97_custom.dic")),
-            "{:?}",
-            report.warnings
+        assert_eq!(
+            report.warnings,
+            vec![CheckDiagnostic::Order(OrderDiagnostic::UnknownStage {
+                name: "97_custom.dic".to_string(),
+            })]
         );
-        assert!(
-            report
-                .failures
-                .iter()
-                .any(|failure| failure.contains("97_custom.dic")),
-            "{:?}",
-            report.failures
+        assert_eq!(
+            report.failures,
+            vec![CheckDiagnostic::Order(OrderDiagnostic::AfterHardE {
+                name: "97_custom.dic".to_string(),
+            })]
         );
     }
 
@@ -810,15 +1053,87 @@ mod tests {
             "96_Твёрдое Э(hard-e).dic",
         ]));
 
-        assert!(
-            report
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("78_custom.dic")),
-            "{:?}",
-            report.warnings
+        assert_eq!(
+            report.warnings,
+            vec![CheckDiagnostic::Order(OrderDiagnostic::UnknownStage {
+                name: "78_custom.dic".to_string(),
+            })]
         );
         assert!(report.failures.is_empty(), "{:?}", report.failures);
+    }
+
+    #[test]
+    fn run_check_keeps_manifest_compile_and_golden_diagnostics_typed() {
+        let dir = temp_dir("typed-check");
+        let dictionary = "96_hard(hard-e).dic";
+        std::fs::write(dir.join(dictionary), "а темпо=а тэмпо\n").expect("write dictionary");
+
+        let report = run_check(&dir).expect("check dictionaries");
+
+        assert_eq!(report.passed, 0);
+        assert_eq!(report.order.failures.len(), GOLDEN_CASES.len());
+        for (diagnostic, case) in report.order.failures.iter().zip(GOLDEN_CASES) {
+            let CheckDiagnostic::GoldenMismatch {
+                case: actual_case,
+                expected,
+                actual,
+            } = diagnostic
+            else {
+                panic!("expected a typed golden mismatch, got {diagnostic:?}");
+            };
+            assert_eq!(*actual_case, case.name);
+            assert_eq!(*expected, case.expected);
+            assert!(!actual.is_empty());
+        }
+        assert!(report.order.warnings.contains(&CheckDiagnostic::Manifest(
+            ManifestDrift::MissingFromManifest {
+                name: dictionary.to_string(),
+            }
+        )));
+        assert!(
+            report
+                .order
+                .warnings
+                .contains(&CheckDiagnostic::CompileWarning {
+                    dictionary: dictionary.to_string(),
+                    warning: "а темпо=а тэмпо: многословные правила не поддерживаются".to_string(),
+                })
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn run_check_keeps_load_and_audit_failures_typed() {
+        let dir = temp_dir("typed-load-audit-errors");
+        let name = "60_пост обработка@.dic";
+        let dictionary = dir.join(name);
+        std::fs::write(&dictionary, "дренажом=дренажем\n").expect("write dictionary");
+        let lock = lock_for_read(&dictionary);
+        let io_error = std::fs::read(&dictionary).expect_err("locked dictionary is unreadable");
+
+        let report = run_check(&dir).expect("check dictionaries");
+
+        assert_eq!(report.loaded, 0);
+        assert_eq!(report.total_rules, 0);
+        assert_eq!(report.passed, 0);
+        assert_eq!(
+            report.order.failures,
+            vec![CheckDiagnostic::LoadFailed(format!("{name}: {io_error}"))]
+        );
+        assert!(
+            report
+                .order
+                .warnings
+                .contains(&CheckDiagnostic::AuditFailed(format!(
+                    "Не удалось прочитать {}: {io_error}",
+                    dictionary.display()
+                )))
+        );
+
+        drop(lock);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -826,7 +1141,7 @@ mod tests {
     fn checks_bundled_dictionaries() {
         let report = run_check(std::path::Path::new("dic")).expect("check bundled dictionaries");
         for warning in &report.order.warnings {
-            eprintln!("warning: {warning}");
+            eprintln!("warning: {warning:?}");
         }
         assert!(
             report.order.failures.is_empty(),

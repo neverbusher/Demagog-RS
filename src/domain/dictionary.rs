@@ -20,28 +20,6 @@ pub enum DictionaryStage {
     Unnumbered,
 }
 
-impl DictionaryStage {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Rex => "REX",
-            Self::YoBase => "Ё: БАЗА",
-            Self::YoAdditions => "Ё: ДОПОЛНЕНИЯ",
-            Self::User => "ПОЛЬЗОВАТЕЛЬСКИЙ",
-            Self::Homographs => "ОМОГРАФЫ",
-            Self::Cleanup => "ЧИСТКА",
-            Self::Author => "АВТОР",
-            Self::Converters => "КОНВЕРТЕРЫ",
-            Self::StressWords => "УДАРЕНИЯ",
-            Self::PhrasesImport => "ИМПОРТ: ФРАЗЫ",
-            Self::NamesImport => "ИМПОРТ: ИМЕНА",
-            Self::Orthoepy => "БАЗА",
-            Self::HardE => "HARD-E",
-            Self::Unknown => "НЕИЗВЕСТНО",
-            Self::Unnumbered => "БЕЗ НОМЕРА",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DictionaryPurpose {
     YoFication,
@@ -65,29 +43,6 @@ pub enum DictionaryPurpose {
 }
 
 impl DictionaryPurpose {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::YoFication => "ё-фикация",
-            Self::AllVsYoStars => "все/всё: звёзды",
-            Self::AllVsYo => "все/всё",
-            Self::HomographsStars => "омографы: звёзды",
-            Self::HomographsPhrases => "омографы: фразы",
-            Self::PostProcessing => "пост-обработка",
-            Self::Transliteration => "транслитерация",
-            Self::Author => "автор",
-            Self::Converters => "конвертеры",
-            Self::StressWords => "ударения",
-            Self::Abbreviations => "аббревиатуры",
-            Self::Profanity => "мат",
-            Self::Names => "имена",
-            Self::PhrasesImport => "импорт: фразы",
-            Self::Base => "база",
-            Self::HardE => "твёрдое э",
-            Self::User => "пользовательский",
-            Self::Other => "прочее",
-        }
-    }
-
     pub fn expected_by_design(self) -> bool {
         matches!(
             self,
@@ -468,59 +423,29 @@ mod tests {
     };
 
     #[test]
-    fn stage_labels_match_the_dictionary_check() {
+    fn purpose_design_expectations_match_the_audit() {
         let cases = [
-            (DictionaryStage::Rex, "REX"),
-            (DictionaryStage::YoBase, "Ё: БАЗА"),
-            (DictionaryStage::YoAdditions, "Ё: ДОПОЛНЕНИЯ"),
-            (DictionaryStage::User, "ПОЛЬЗОВАТЕЛЬСКИЙ"),
-            (DictionaryStage::Homographs, "ОМОГРАФЫ"),
-            (DictionaryStage::Cleanup, "ЧИСТКА"),
-            (DictionaryStage::Author, "АВТОР"),
-            (DictionaryStage::Converters, "КОНВЕРТЕРЫ"),
-            (DictionaryStage::StressWords, "УДАРЕНИЯ"),
-            (DictionaryStage::PhrasesImport, "ИМПОРТ: ФРАЗЫ"),
-            (DictionaryStage::NamesImport, "ИМПОРТ: ИМЕНА"),
-            (DictionaryStage::Orthoepy, "БАЗА"),
-            (DictionaryStage::HardE, "HARD-E"),
-            (DictionaryStage::Unknown, "НЕИЗВЕСТНО"),
-            (DictionaryStage::Unnumbered, "БЕЗ НОМЕРА"),
+            (DictionaryPurpose::YoFication, true),
+            (DictionaryPurpose::AllVsYoStars, true),
+            (DictionaryPurpose::AllVsYo, false),
+            (DictionaryPurpose::HomographsStars, true),
+            (DictionaryPurpose::HomographsPhrases, false),
+            (DictionaryPurpose::PostProcessing, false),
+            (DictionaryPurpose::Transliteration, true),
+            (DictionaryPurpose::Author, false),
+            (DictionaryPurpose::Converters, true),
+            (DictionaryPurpose::StressWords, false),
+            (DictionaryPurpose::Abbreviations, true),
+            (DictionaryPurpose::Profanity, true),
+            (DictionaryPurpose::Names, true),
+            (DictionaryPurpose::PhrasesImport, false),
+            (DictionaryPurpose::Base, true),
+            (DictionaryPurpose::HardE, true),
+            (DictionaryPurpose::User, false),
+            (DictionaryPurpose::Other, false),
         ];
 
-        for (stage, expected) in cases {
-            assert_eq!(stage.label(), expected, "{stage:?}");
-        }
-    }
-
-    #[test]
-    fn purpose_labels_and_design_expectations_match_the_audit() {
-        let cases = [
-            (DictionaryPurpose::YoFication, "ё-фикация", true),
-            (DictionaryPurpose::AllVsYoStars, "все/всё: звёзды", true),
-            (DictionaryPurpose::AllVsYo, "все/всё", false),
-            (DictionaryPurpose::HomographsStars, "омографы: звёзды", true),
-            (
-                DictionaryPurpose::HomographsPhrases,
-                "омографы: фразы",
-                false,
-            ),
-            (DictionaryPurpose::PostProcessing, "пост-обработка", false),
-            (DictionaryPurpose::Transliteration, "транслитерация", true),
-            (DictionaryPurpose::Author, "автор", false),
-            (DictionaryPurpose::Converters, "конвертеры", true),
-            (DictionaryPurpose::StressWords, "ударения", false),
-            (DictionaryPurpose::Abbreviations, "аббревиатуры", true),
-            (DictionaryPurpose::Profanity, "мат", true),
-            (DictionaryPurpose::Names, "имена", true),
-            (DictionaryPurpose::PhrasesImport, "импорт: фразы", false),
-            (DictionaryPurpose::Base, "база", true),
-            (DictionaryPurpose::HardE, "твёрдое э", true),
-            (DictionaryPurpose::User, "пользовательский", false),
-            (DictionaryPurpose::Other, "прочее", false),
-        ];
-
-        for (purpose, expected_label, expected_by_design) in cases {
-            assert_eq!(purpose.label(), expected_label, "{purpose:?}");
+        for (purpose, expected_by_design) in cases {
             assert_eq!(
                 purpose.expected_by_design(),
                 expected_by_design,

@@ -313,7 +313,11 @@ impl DemagogApp {
                         for failure in &report.order.failures {
                             ui.add(
                                 egui::Label::new(
-                                    RichText::new(format!("• {failure}")).color(error_color),
+                                    RichText::new(format!(
+                                        "• {}",
+                                        presentation::check_diagnostic_text(failure)
+                                    ))
+                                    .color(error_color),
                                 )
                                 .selectable(true),
                             );
@@ -321,7 +325,11 @@ impl DemagogApp {
                         for warning in &report.order.warnings {
                             ui.add(
                                 egui::Label::new(
-                                    RichText::new(format!("• {warning}")).color(warn_color),
+                                    RichText::new(format!(
+                                        "• {}",
+                                        presentation::check_diagnostic_text(warning)
+                                    ))
+                                    .color(warn_color),
                                 )
                                 .selectable(true),
                             );
@@ -339,7 +347,7 @@ impl DemagogApp {
                             ui.label(format!(
                                 "{:2}. [{}] {}",
                                 index + 1,
-                                dictionary.stage,
+                                presentation::dictionary_stage_label(dictionary.stage),
                                 dictionary.name
                             ));
                         }
@@ -364,7 +372,10 @@ impl DemagogApp {
                     .default_open(false)
                     .show(ui, |ui| {
                         for (name, purpose) in &report.audit.skipped {
-                            ui.label(format!("{name} [{purpose}]"));
+                            ui.label(format!(
+                                "{name} [{}]",
+                                presentation::dictionary_purpose_label(*purpose)
+                            ));
                         }
                     });
                 }
@@ -391,7 +402,7 @@ impl DemagogApp {
                                 dictionary.name,
                                 dictionary.candidates.len(),
                                 dictionary.total_rules,
-                                dictionary.purpose
+                                presentation::dictionary_purpose_label(dictionary.purpose)
                             );
                             egui::CollapsingHeader::new(title)
                                 .default_open(false)
