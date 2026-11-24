@@ -259,3 +259,81 @@ impl DiffState {
         self.diff_cache_valid = false;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn search_state_defaults_are_empty_and_clean() {
+        let state = SearchState::default();
+
+        assert!(!state.find_open);
+        assert!(state.find_query.is_empty());
+        assert!(state.find_matches.ranges.is_empty());
+        assert!(!state.find_matches.truncated);
+        assert_eq!(state.find_for_tab, None);
+        assert!(!state.find_dirty);
+        assert!(state.find_last_edit <= Instant::now());
+        assert_eq!(state.find_current, 0);
+        assert_eq!(state.find_go_to, None);
+    }
+
+    #[test]
+    fn search_state_reset_clears_matches_and_navigation() {
+        let old_edit = Instant::now() - Duration::from_secs(1);
+        let mut state = SearchState {
+            find_open: true,
+            find_query: "запрос".to_string(),
+            find_matches: FindMatches {
+                ranges: vec![(0, 3), (4, 7)],
+                truncated: true,
+            },
+            find_for_tab: Some(ActiveTab::ProcessedText),
+            find_dirty: false,
+            find_last_edit: old_edit,
+            find_current: 1,
+            find_go_to: Some(7),
+        };
+
+        state.reset();
+
+        assert!(!state.find_open);
+        assert!(state.find_query.is_empty());
+        assert!(state.find_matches.ranges.is_empty());
+        assert!(!state.find_matches.truncated);
+        assert_eq!(state.find_for_tab, None);
+        assert!(state.find_dirty);
+        assert!(state.find_last_edit > old_edit);
+        assert_eq!(state.find_current, 0);
+        assert_eq!(state.find_go_to, None);
+    }
+
+    #[test]
+    fn diff_state_defaults_are_empty_and_invalid() {
+        let state = DiffState::default();
+
+        assert!(state.diff_filter.is_empty());
+        assert!(state.diff_filter_cache.is_empty());
+        assert!(state.diff_visible.is_empty());
+        assert!(!state.diff_cache_valid);
+    }
+
+    #[test]
+    fn diff_state_reset_clears_filter_cache_and_visibility() {
+        let mut state = DiffState {
+            diff_filter: "замены".to_string(),
+            diff_filter_cache: "замены".to_string(),
+            diff_visible: vec![1, 3, 5],
+            diff_cache_valid: true,
+        };
+
+        state.reset();
+
+        assert!(state.diff_filter.is_empty());
+        assert!(state.diff_filter_cache.is_empty());
+        assert!(state.diff_visible.is_empty());
+        assert!(!state.diff_cache_valid);
+    }
+}

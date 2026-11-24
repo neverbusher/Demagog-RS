@@ -504,3 +504,70 @@ impl DemagogApp {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::AppSettings;
+    use crate::ui::app::ProcessingSnapshot;
+
+    fn test_app() -> DemagogApp {
+        DemagogApp::from_parts(AppSettings::default(), BookDocument::default())
+    }
+
+    #[test]
+    fn empty_receiver_restores_pending_worker_state() {
+        let (tx, rx) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut app = test_app();
+        app.worker.rx = Some(rx);
+        app.worker.is_busy = true;
+        app.worker.cancel_flag = Some(Arc::clone(&cancel));
+        app.worker.progress_ratio = 0.4;
+        app.processing.processing_snapshot = Some(ProcessingSnapshot::capture("исходник"));
+        app.set_status(StatusLevel::Info, "В работе".to_string());
+
+        app.poll_worker();
+
+        assert!(app.worker.rx.is_some());
+        assert!(app.worker.is_busy);
+        assert!(Arc::ptr_eq(
+            app.worker.cancel_flag.as_ref().expect("cancel flag"),
+            &cancel
+        ));
+        assert_eq!(app.worker.progress_ratio, 0.4);
+        assert!(app.processing.processing_snapshot.is_some());
+        assert_eq!(app.view.status_line, "В работе");
+        assert_eq!(app.view.status_level, StatusLevel::Info);
+        assert!(
+            tx.send(WorkerMessage::Pipeline(PipelineProgress::Cancelled))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn disconnected_receiver_clears_worker_state_and_reports_error() {
+        let (tx, rx) = mpsc::channel();
+        drop(tx);
+        let mut app = test_app();
+        app.worker.rx = Some(rx);
+        app.worker.is_busy = true;
+        app.worker.cancel_flag = Some(Arc::new(AtomicBool::new(false)));
+        app.worker.progress_ratio = 0.7;
+        app.processing.processing_snapshot = Some(ProcessingSnapshot::capture("исходник"));
+
+        app.poll_worker();
+
+        assert!(app.worker.rx.is_none());
+        assert!(app.worker.cancel_flag.is_none());
+        assert!(!app.worker.is_busy);
+        assert_eq!(app.worker.progress_ratio, 0.0);
+        assert!(app.processing.processing_snapshot.is_none());
+        assert_eq!(app.view.status_level, StatusLevel::Error);
+        assert_eq!(
+            app.view.status_line,
+            "Рабочий поток завершился неожиданно — попробуйте ещё раз"
+        );
+        assert_eq!(app.view.last_error, Some(app.view.status_line.clone()));
+    }
+}

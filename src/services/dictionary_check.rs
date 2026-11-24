@@ -474,6 +474,17 @@ fn check_cancelled() -> AppError {
 }
 
 pub fn run_check_with_cancel(dir: &Path, cancel: Option<&AtomicBool>) -> AppResult<CheckReport> {
+    if is_cancelled(cancel) {
+        return Err(check_cancelled());
+    }
+    run_check_with_manifest(dir, &manifest_path(), cancel)
+}
+
+fn run_check_with_manifest(
+    dir: &Path,
+    manifest: &Path,
+    cancel: Option<&AtomicBool>,
+) -> AppResult<CheckReport> {
     let is_cancelled = || is_cancelled(cancel);
     if is_cancelled() {
         return Err(check_cancelled());
@@ -489,7 +500,7 @@ pub fn run_check_with_cancel(dir: &Path, cancel: Option<&AtomicBool>) -> AppResu
         })
         .collect();
     let mut order = validate_order(&names);
-    for warning in manifest_drift(dir, &manifest_path()) {
+    for warning in manifest_drift(dir, manifest) {
         order.warnings.push(CheckDiagnostic::Manifest(warning));
     }
     let report = load_dictionaries_parallel_with_cancel(dir, cancel)?;
@@ -1067,8 +1078,10 @@ mod tests {
         let dir = temp_dir("typed-check");
         let dictionary = "96_hard(hard-e).dic";
         std::fs::write(dir.join(dictionary), "а темпо=а тэмпо\n").expect("write dictionary");
+        let manifest = dir.join("manifest.sha256");
+        std::fs::write(&manifest, "").expect("write isolated manifest");
 
-        let report = run_check(&dir).expect("check dictionaries");
+        let report = run_check_with_manifest(&dir, &manifest, None).expect("check dictionaries");
 
         assert_eq!(report.passed, 0);
         assert_eq!(report.order.failures.len(), GOLDEN_CASES.len());

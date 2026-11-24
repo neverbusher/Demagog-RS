@@ -213,7 +213,7 @@ fn editor_state_reset_document_clears_transient_state() {
         title: "Новая книга".to_string(),
         source_path: Some(PathBuf::from("new.fb2")),
         raw_text: "Новый\nтекст".to_string(),
-        processed_text: String::new(),
+        processed_text: "Новый результат".to_string(),
         chunks: Vec::new(),
         headings: Vec::new(),
     };
@@ -223,7 +223,7 @@ fn editor_state_reset_document_clears_transient_state() {
     assert_eq!(state.document.title, "Новая книга");
     assert_eq!(state.document.source_path, Some(PathBuf::from("new.fb2")));
     assert_eq!(state.document.raw_text, "Новый\nтекст");
-    assert!(state.document.processed_text.is_empty());
+    assert_eq!(state.document.processed_text, "Новый результат");
     assert!(state.document.chunks.is_empty());
     assert!(state.document.headings.is_empty());
     assert_eq!(state.raw_char_count, raw_char_count);
@@ -620,9 +620,9 @@ fn settings_expose_theme_hotkeys_and_about() {
 
     let app_version = format!("Demagog-RS {APP_VERSION}");
     for label in [
-        crate::presentation::theme_label(ThemeMode::Dark),
-        crate::presentation::theme_label(ThemeMode::Light),
-        crate::presentation::theme_label(ThemeMode::Warm),
+        "Тёмная",
+        "Светлая",
+        "Тёплая",
         "Горячие клавиши",
         "О программе",
         app_version.as_str(),
@@ -1859,10 +1859,43 @@ fn knigorez_batch_completion_uses_service_counts_and_renders_summary() {
 
 #[test]
 fn reset_button_returns_app_to_launch_state() {
+    use crate::domain::{NormalizationStats, ReplacementEvent, StepReport};
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
 
     let mut app = ui_test_app("Текст", "Результат", Vec::new());
+    app.editor.raw_pipeline_output = "Вывод конвейера".to_string();
+    app.editor.source_dirty = true;
+    app.editor.chunk_apply_pending = true;
+    app.editor
+        .result_state
+        .mark_computed(StressFormat::CleanYoOnly);
+    app.editor.result_state.mark_edited();
+    app.editor.result_state.mark_stale();
+    app.processing.report = PipelineReport {
+        steps: vec![StepReport {
+            dictionary_name: "dict".to_string(),
+            kind: DictionaryKind::DicStandard,
+            rule_count: 2,
+            elapsed_ms: 3,
+            replacements_count: 4,
+        }],
+        total_ms: 5,
+        total_replacements: 6,
+        events: vec![ReplacementEvent {
+            dictionary_name: "dict".to_string(),
+            rule_summary: "rule".to_string(),
+            before_snippet: "before".to_string(),
+            after_snippet: "after".to_string(),
+        }],
+        events_truncated: true,
+        cleanup: NormalizationStats {
+            removed_empty_lines: 7,
+            added_periods: 8,
+        },
+    };
+    app.processing.processing_snapshot = Some(ProcessingSnapshot::capture("Текст"));
+    app.processing.capture_diff_on_run = true;
     app.splitter
         .batch_queue
         .add_files([std::env::temp_dir().join("demagog-reset-test.txt")]);
@@ -1877,6 +1910,30 @@ fn reset_button_returns_app_to_launch_state() {
     assert_eq!(state.editor.document.title, "Пример текста");
     assert!(state.editor.document.source_path.is_none());
     assert!(state.editor.document.raw_text.contains("В 1995 году"));
+    assert!(state.editor.document.processed_text.is_empty());
+    assert_eq!(state.editor.processed_char_count, 0);
+    assert!(state.editor.raw_pipeline_output.is_empty());
+    assert!(!state.editor.source_dirty);
+    assert!(!state.editor.chunk_apply_pending);
+    assert!(!state.editor.result_state.is_dirty());
+    assert!(!state.editor.result_state.is_stale());
+    assert!(!state.editor.result_state.is_edited());
+    assert!(!state.editor.result_state.is_chunks_stale());
+    assert_eq!(
+        state.editor.result_state.format(),
+        StressFormat::CleanYoOnly
+    );
+    assert!(state.processing.report.steps.is_empty());
+    assert_eq!(state.processing.report.total_ms, 0);
+    assert_eq!(state.processing.report.total_replacements, 0);
+    assert!(state.processing.report.events.is_empty());
+    assert!(!state.processing.report.events_truncated);
+    assert_eq!(
+        state.processing.report.cleanup,
+        NormalizationStats::default()
+    );
+    assert!(state.processing.processing_snapshot.is_none());
+    assert!(!state.processing.capture_diff_on_run);
     assert_eq!(state.view.active_tab, ActiveTab::RawText);
     assert!(state.splitter.batch_queue.files.is_empty());
 }
