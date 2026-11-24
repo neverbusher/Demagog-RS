@@ -20,16 +20,6 @@ pub enum ThemeMode {
     Warm,
 }
 
-impl ThemeMode {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Dark => "Тёмная",
-            Self::Light => "Светлая",
-            Self::Warm => "Тёплая",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StressFormat {
     /// Знак '+' перед ударной гласной: з+амок, +Август (для TTS)
@@ -41,19 +31,12 @@ pub enum StressFormat {
 }
 
 impl StressFormat {
-    pub fn label(&self) -> &'static str {
+    // This text is part of the chunks JSON export contract.
+    pub fn export_label(&self) -> &'static str {
         match self {
             Self::PlusBeforeVowel => "+ перед гласной (з+амок)",
             Self::AcuteAccent => "Ударение Юникода (за́мок) [U+0301]",
             Self::CleanYoOnly => "Без ударений — только Ё (замок)",
-        }
-    }
-
-    pub fn short_label(&self) -> &'static str {
-        match self {
-            Self::PlusBeforeVowel => "+ перед гласной",
-            Self::AcuteAccent => "Ударение Юникода",
-            Self::CleanYoOnly => "Только Ё",
         }
     }
 }
@@ -184,18 +167,6 @@ pub enum DictionaryKind {
     HardE,
 }
 
-impl DictionaryKind {
-    pub fn badge(&self) -> &'static str {
-        match self {
-            Self::RegexStandard => "REX",
-            Self::RegexIndexed => "REX-IDX",
-            Self::DicStandard => "DIC",
-            Self::DicStressConverter => "DIC-STRESS",
-            Self::HardE => "HARD-E",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DictionaryTag {
     NumbersAndDates,
@@ -221,16 +192,44 @@ impl DictionaryTag {
         Self::CleanupAndTranslit,
     ];
 
-    pub fn label(&self) -> &'static str {
+    pub fn key(self) -> &'static str {
         match self {
-            Self::NumbersAndDates => "ЧИСЛА И ДАТЫ",
-            Self::YoFication => "Ё-ФИКАЦИЯ",
-            Self::HomographsCap => "ОМОГРАФЫ (загл.)",
-            Self::CapToPlusConverter => "ЗАГЛАВНЫЕ -> '+'",
-            Self::PlusStressWords => "УДАРЕНИЯ '+'",
-            Self::PlusStressOrthoepy => "ОРФОЭПИЯ '+' (2.9М)",
-            Self::HardPronunciation => "ТВЁРДОЕ «Э»",
-            Self::CleanupAndTranslit => "ЧИСТКА / ТРАНСЛИТ",
+            Self::NumbersAndDates => "numbers-dates",
+            Self::YoFication => "yo",
+            Self::HomographsCap => "homographs",
+            Self::CapToPlusConverter => "cap-to-plus",
+            Self::PlusStressWords => "stress-words",
+            Self::PlusStressOrthoepy => "orthoepy",
+            Self::HardPronunciation => "hard-e",
+            Self::CleanupAndTranslit => "cleanup",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "numbers-dates" => Some(Self::NumbersAndDates),
+            "yo" => Some(Self::YoFication),
+            "homographs" => Some(Self::HomographsCap),
+            "cap-to-plus" => Some(Self::CapToPlusConverter),
+            "stress-words" => Some(Self::PlusStressWords),
+            "orthoepy" => Some(Self::PlusStressOrthoepy),
+            "hard-e" => Some(Self::HardPronunciation),
+            "cleanup" => Some(Self::CleanupAndTranslit),
+            _ => None,
+        }
+    }
+
+    pub fn from_legacy_label(label: &str) -> Option<Self> {
+        match label {
+            "ЧИСЛА И ДАТЫ" => Some(Self::NumbersAndDates),
+            "Ё-ФИКАЦИЯ" => Some(Self::YoFication),
+            "ОМОГРАФЫ (загл.)" => Some(Self::HomographsCap),
+            "ЗАГЛАВНЫЕ -> '+'" => Some(Self::CapToPlusConverter),
+            "УДАРЕНИЯ '+'" => Some(Self::PlusStressWords),
+            "ОРФОЭПИЯ '+' (2.9М)" => Some(Self::PlusStressOrthoepy),
+            "ТВЁРДОЕ «Э»" => Some(Self::HardPronunciation),
+            "ЧИСТКА / ТРАНСЛИТ" => Some(Self::CleanupAndTranslit),
+            _ => None,
         }
     }
 }
@@ -372,7 +371,7 @@ impl Default for AppSettings {
             group_dictionaries_by_type: true,
             collapsed_dictionary_groups: DictionaryTag::ALL
                 .iter()
-                .map(|tag| tag.label().to_string())
+                .map(|tag| tag.key().to_string())
                 .collect(),
         }
     }
@@ -394,6 +393,13 @@ impl AppSettings {
             settings.dark_mode = None;
             settings.warm_mode = None;
         }
+        for group in &mut settings.collapsed_dictionary_groups {
+            if DictionaryTag::from_key(group).is_none()
+                && let Some(tag) = DictionaryTag::from_legacy_label(group)
+            {
+                *group = tag.key().to_string();
+            }
+        }
         settings.ui_font_size = settings.ui_font_size.clamp(12.0, 28.0);
         settings.editor_font_size = settings.editor_font_size.clamp(12.0, 36.0);
         settings.split.max_chars = settings.split.max_chars.clamp(1_000, 500_000);
@@ -412,20 +418,148 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sidebar_groups_start_collapsed_on_a_fresh_install() {
+    fn sidebar_groups_start_collapsed_with_stable_keys_on_a_fresh_install() {
         let settings = AppSettings::default();
 
         assert_eq!(
-            settings.collapsed_dictionary_groups.len(),
-            DictionaryTag::ALL.len()
+            settings.collapsed_dictionary_groups,
+            vec![
+                "numbers-dates",
+                "yo",
+                "homographs",
+                "cap-to-plus",
+                "stress-words",
+                "orthoepy",
+                "hard-e",
+                "cleanup",
+            ]
         );
-        for tag in DictionaryTag::ALL {
-            assert!(
-                settings
-                    .collapsed_dictionary_groups
-                    .iter()
-                    .any(|group| group == tag.label())
+    }
+
+    #[test]
+    fn dictionary_tag_keys_and_legacy_labels_are_stable() {
+        let cases = [
+            (
+                DictionaryTag::NumbersAndDates,
+                "numbers-dates",
+                "ЧИСЛА И ДАТЫ",
+            ),
+            (DictionaryTag::YoFication, "yo", "Ё-ФИКАЦИЯ"),
+            (
+                DictionaryTag::HomographsCap,
+                "homographs",
+                "ОМОГРАФЫ (загл.)",
+            ),
+            (
+                DictionaryTag::CapToPlusConverter,
+                "cap-to-plus",
+                "ЗАГЛАВНЫЕ -> '+'",
+            ),
+            (
+                DictionaryTag::PlusStressWords,
+                "stress-words",
+                "УДАРЕНИЯ '+'",
+            ),
+            (
+                DictionaryTag::PlusStressOrthoepy,
+                "orthoepy",
+                "ОРФОЭПИЯ '+' (2.9М)",
+            ),
+            (DictionaryTag::HardPronunciation, "hard-e", "ТВЁРДОЕ «Э»"),
+            (
+                DictionaryTag::CleanupAndTranslit,
+                "cleanup",
+                "ЧИСТКА / ТРАНСЛИТ",
+            ),
+        ];
+
+        for (tag, expected_key, legacy_label) in cases {
+            assert_eq!(tag.key(), expected_key, "{tag:?}");
+            assert_eq!(DictionaryTag::from_key(expected_key), Some(tag), "{tag:?}");
+            assert_eq!(
+                DictionaryTag::from_legacy_label(legacy_label),
+                Some(tag),
+                "{tag:?}"
             );
+            assert_eq!(DictionaryTag::from_legacy_label(expected_key), None);
+        }
+        assert_eq!(DictionaryTag::from_key("unknown"), None);
+        assert_eq!(DictionaryTag::from_legacy_label("НЕИЗВЕСТНО"), None);
+    }
+
+    #[test]
+    fn collapsed_dictionary_groups_migrate_legacy_labels() {
+        let mut value =
+            serde_json::to_value(AppSettings::default()).expect("serialize default settings");
+        value["collapsed_dictionary_groups"] = serde_json::json!([
+            "ЧИСЛА И ДАТЫ",
+            "Ё-ФИКАЦИЯ",
+            "ОМОГРАФЫ (загл.)",
+            "ЗАГЛАВНЫЕ -> '+'",
+            "УДАРЕНИЯ '+'",
+            "ОРФОЭПИЯ '+' (2.9М)",
+            "ТВЁРДОЕ «Э»",
+            "ЧИСТКА / ТРАНСЛИТ",
+        ]);
+
+        let loaded = AppSettings::from_json(&serde_json::to_vec(&value).expect("legacy JSON"))
+            .expect("load legacy dictionary groups");
+
+        assert_eq!(
+            loaded.collapsed_dictionary_groups,
+            vec![
+                "numbers-dates",
+                "yo",
+                "homographs",
+                "cap-to-plus",
+                "stress-words",
+                "orthoepy",
+                "hard-e",
+                "cleanup",
+            ]
+        );
+    }
+
+    #[test]
+    fn collapsed_dictionary_groups_preserve_known_keys_and_unknown_strings() {
+        let mut value =
+            serde_json::to_value(AppSettings::default()).expect("serialize default settings");
+        value["collapsed_dictionary_groups"] = serde_json::json!([
+            "numbers-dates",
+            "plugin:group",
+            "ЧИСЛА И ДАТЫ ",
+            " ё-фикация",
+            "",
+        ]);
+
+        let loaded = AppSettings::from_json(&serde_json::to_vec(&value).expect("custom JSON"))
+            .expect("load custom dictionary groups");
+
+        assert_eq!(
+            loaded.collapsed_dictionary_groups,
+            vec![
+                "numbers-dates",
+                "plugin:group",
+                "ЧИСЛА И ДАТЫ ",
+                " ё-фикация",
+                "",
+            ]
+        );
+    }
+
+    #[test]
+    fn stress_format_export_labels_match_the_chunks_json_contract() {
+        let cases = [
+            (StressFormat::PlusBeforeVowel, "+ перед гласной (з+амок)"),
+            (
+                StressFormat::AcuteAccent,
+                "Ударение Юникода (за́мок) [U+0301]",
+            ),
+            (StressFormat::CleanYoOnly, "Без ударений — только Ё (замок)"),
+        ];
+
+        for (format, expected) in cases {
+            assert_eq!(format.export_label(), expected, "{format:?}");
         }
     }
 

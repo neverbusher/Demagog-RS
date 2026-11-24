@@ -204,7 +204,7 @@ fn process_one(
         );
         let payload = ChunksExportPayload {
             title: &doc.title,
-            stress_format: options.pipeline.stress_format.label(),
+            stress_format: options.pipeline.stress_format.export_label(),
             chunk_count: result.chunks.len(),
             chunks: &result.chunks,
         };
@@ -406,7 +406,7 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(out.join("alpha_chunks.json")).unwrap())
                 .expect("valid JSON");
         assert_eq!(json["title"], "alpha");
-        assert_eq!(json["stress_format"], StressFormat::PlusBeforeVowel.label());
+        assert_eq!(json["stress_format"], "+ перед гласной (з+амок)");
         assert_eq!(
             json["chunk_count"],
             json["chunks"].as_array().unwrap().len()

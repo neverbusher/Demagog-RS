@@ -88,8 +88,10 @@ impl DemagogApp {
                     ui.separator();
                     let prev_fmt = self.settings.stress_format;
                     ui.add_enabled_ui(!self.worker.is_busy, |ui| {
-                        let format_label =
-                            format!("Формат: {} ▼", self.settings.stress_format.short_label());
+                        let format_label = format!(
+                            "Формат: {} ▼",
+                            presentation::stress_format_short_label(self.settings.stress_format)
+                        );
                         ui.menu_button(format_label, |ui| {
                             for fmt in [
                                 StressFormat::PlusBeforeVowel,
@@ -100,7 +102,7 @@ impl DemagogApp {
                                     .selectable_value(
                                         &mut self.settings.stress_format,
                                         fmt,
-                                        fmt.label(),
+                                        presentation::stress_format_label(fmt),
                                     )
                                     .clicked()
                                 {
@@ -143,7 +145,11 @@ impl DemagogApp {
                     ui.separator();
                     let theme_menu = ui.menu_button(theme_icon(theme), |ui| {
                         for candidate in [ThemeMode::Dark, ThemeMode::Light, ThemeMode::Warm] {
-                            let label = format!("{} {}", theme_icon(candidate), candidate.label());
+                            let label = format!(
+                                "{} {}",
+                                theme_icon(candidate),
+                                presentation::theme_label(candidate)
+                            );
                             if ui.selectable_label(candidate == theme, label).clicked() {
                                 self.settings.set_theme(candidate);
                                 apply_style_settings(ui.ctx(), &self.settings);
@@ -156,7 +162,7 @@ impl DemagogApp {
                         egui::WidgetInfo::labeled(
                             egui::WidgetType::Button,
                             true,
-                            format!("Тема: {}", theme.label()),
+                            format!("Тема: {}", presentation::theme_label(theme)),
                         )
                     });
                     theme_menu.response.on_hover_text("Тема оформления");
@@ -250,7 +256,7 @@ impl DemagogApp {
                                     .selectable_value(
                                         &mut self.settings.stress_format,
                                         fmt,
-                                        fmt.label(),
+                                        presentation::stress_format_label(fmt),
                                     )
                                     .clicked()
                                 {
@@ -285,7 +291,11 @@ impl DemagogApp {
                         }
                         ui.separator();
                         for candidate in [ThemeMode::Dark, ThemeMode::Light, ThemeMode::Warm] {
-                            let label = format!("{} {}", theme_icon(candidate), candidate.label());
+                            let label = format!(
+                                "{} {}",
+                                theme_icon(candidate),
+                                presentation::theme_label(candidate)
+                            );
                             if ui.selectable_label(candidate == theme, label).clicked() {
                                 self.settings.set_theme(candidate);
                                 apply_style_settings(ui.ctx(), &self.settings);
@@ -438,7 +448,9 @@ impl DemagogApp {
                         filter_low.is_empty()
                             || d.meta.name.to_lowercase().contains(&filter_low)
                             || d.meta.description.to_lowercase().contains(&filter_low)
-                            || d.meta.tag.label().to_lowercase().contains(&filter_low)
+                            || presentation::dictionary_tag_label(d.meta.tag)
+                                .to_lowercase()
+                                .contains(&filter_low)
                     })
                     .map(|(idx, _)| idx)
                     .collect();
@@ -504,7 +516,8 @@ impl DemagogApp {
                                     .iter()
                                     .filter(|&&i| self.dictionaries[i].meta.enabled)
                                     .count();
-                                let group_key = tag.label();
+                                let group_key = tag.key();
+                                let group_label = presentation::dictionary_tag_label(tag);
                                 let collapsed = self
                                     .settings
                                     .collapsed_dictionary_groups
@@ -541,13 +554,13 @@ impl DemagogApp {
                                             egui::WidgetType::Button,
                                             !self.worker.is_busy,
                                             format!(
-                                                "Группа {group_key}: {state_label}. Включить или отключить всю группу"
+                                                "Группа {group_label}: {state_label}. Включить или отключить всю группу"
                                             ),
                                         )
                                     });
                                     ui.add_space(4.0);
                                     let tag_response = ui.label(
-                                        RichText::new(format!("[{}]", group_key))
+                                        RichText::new(format!("[{group_label}]"))
                                             .color(palette::tag_color(tag, theme))
                                             .strong(),
                                     );
@@ -1116,7 +1129,7 @@ impl DemagogApp {
 
                                 for s in &self.processing.report.steps {
                                     ui.label(&s.dictionary_name);
-                                    ui.label(s.kind.badge());
+                                    ui.label(presentation::dictionary_kind_badge(s.kind));
                                     ui.label(format_num(s.rule_count));
                                     ui.label(format!("{} мс", s.elapsed_ms));
                                     ui.label(format_num(s.replacements_count));
@@ -1349,7 +1362,7 @@ impl DemagogApp {
                 let theme = self.settings.theme();
                 for candidate in [ThemeMode::Dark, ThemeMode::Light, ThemeMode::Warm] {
                     if ui
-                        .selectable_label(theme == candidate, candidate.label())
+                        .selectable_label(theme == candidate, presentation::theme_label(candidate))
                         .labelled_by(theme_label.id)
                         .clicked()
                     {
@@ -1427,7 +1440,7 @@ fn dictionary_card(
     let mut details = d.description.clone();
     details.push_str(&format!(
         "\n{} • {} правил • {}",
-        d.kind.badge(),
+        presentation::dictionary_kind_badge(d.kind),
         format_num(d.rule_count),
         d.encoding
     ));
@@ -1447,7 +1460,7 @@ fn dictionary_card(
 
                 if show_tag {
                     ui.label(
-                        RichText::new(format!("[{}]", d.tag.label()))
+                        RichText::new(format!("[{}]", presentation::dictionary_tag_label(d.tag)))
                             .color(palette::tag_color(d.tag, theme))
                             .strong(),
                     );

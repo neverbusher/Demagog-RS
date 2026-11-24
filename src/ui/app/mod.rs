@@ -13,6 +13,7 @@ use crate::engine::loader::{DictionaryLoadReport, load_dictionaries_parallel_wit
 use crate::io::book_reader::{CompositeBookReader, SUPPORTED_BOOK_FORMATS, can_read_book};
 use crate::io::settings_store;
 use crate::ports::{DocumentReader, StressFormatter, TextChunker, TextProcessor};
+use crate::presentation;
 use crate::services::chunker::SentenceAwareChunker;
 use crate::services::dictionary_check::{self, CheckReport};
 use crate::services::pipeline::{PipelineOptions, ProcessingPipeline};
@@ -402,7 +403,7 @@ impl DemagogApp {
                                                 candidate.line,
                                                 candidate.lhs,
                                                 candidate.rhs,
-                                                candidate.kind.label()
+                                                presentation::audit_kind_label(candidate.kind)
                                             ))
                                             .selectable(true),
                                         );
@@ -421,7 +422,7 @@ impl DemagogApp {
                 ui.separator();
                 ui.horizontal(|ui| {
                     if ui.button("📋 Скопировать аудит").clicked() {
-                        copy_text = Some(report.audit.to_text());
+                        copy_text = Some(presentation::audit_report_text(&report.audit));
                     }
                     if ui.button("Закрыть").clicked() {
                         close_requested = true;
@@ -1026,7 +1027,7 @@ impl DemagogApp {
         {
             let payload = ChunksExportPayload {
                 title: &self.editor.document.title,
-                stress_format: self.editor.result_state.format().label(),
+                stress_format: self.editor.result_state.format().export_label(),
                 chunk_count: self.editor.document.chunks.len(),
                 chunks: &self.editor.document.chunks,
             };

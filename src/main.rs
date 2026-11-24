@@ -4,6 +4,7 @@ mod domain;
 mod engine;
 mod io;
 mod ports;
+mod presentation;
 mod services;
 mod ui;
 
@@ -251,7 +252,7 @@ fn run_cli_or_bench(args: &[String]) {
         println!(
             "{:42} | {:10} | {:8} правил | {:5} мс | {:6} замен",
             s.dictionary_name,
-            s.kind.badge(),
+            presentation::dictionary_kind_badge(s.kind),
             s.rule_count,
             s.elapsed_ms,
             s.replacements_count

@@ -17,17 +17,6 @@ pub enum AuditKind {
     Mask,
 }
 
-impl AuditKind {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Letters => "буквы",
-            Self::Boundary => "границы слов",
-            Self::Punctuation => "пунктуация",
-            Self::Mask => "маска",
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct AuditCandidate {
     pub line: usize,
@@ -50,43 +39,6 @@ pub struct AuditReport {
     pub skipped: Vec<(String, &'static str)>,
     pub scanned_rules: usize,
     pub total_candidates: usize,
-}
-
-impl AuditReport {
-    pub fn to_text(&self) -> String {
-        let mut out = format!(
-            "Аудит фонетических кандидатов: {} из {} правил\n",
-            self.total_candidates, self.scanned_rules
-        );
-        if !self.skipped.is_empty() {
-            out.push_str("\nНе аудировались по назначению:\n");
-            for (name, purpose) in &self.skipped {
-                out.push_str(&format!("  {name} [{purpose}]\n"));
-            }
-        }
-        for dictionary in &self.dictionaries {
-            if dictionary.candidates.is_empty() {
-                continue;
-            }
-            out.push_str(&format!(
-                "\n== {} [{}] — {} из {} правил\n",
-                dictionary.name,
-                dictionary.purpose,
-                dictionary.candidates.len(),
-                dictionary.total_rules
-            ));
-            for candidate in &dictionary.candidates {
-                out.push_str(&format!(
-                    "  стр. {}: {} → {} [{}]\n",
-                    candidate.line,
-                    candidate.lhs,
-                    candidate.rhs,
-                    candidate.kind.label()
-                ));
-            }
-        }
-        out
-    }
 }
 
 pub fn audit_dictionaries_with_cancel(
@@ -324,11 +276,6 @@ mod tests {
         assert_eq!(post.candidates[1].kind, AuditKind::Boundary);
         assert_eq!(post.candidates[2].kind, AuditKind::Punctuation);
         assert_eq!(post.candidates[3].kind, AuditKind::Mask);
-
-        let text = report.to_text();
-        assert!(text.contains("Аудит фонетических кандидатов"));
-        assert!(text.contains("дренажом"));
-        assert!(text.contains("65_ЛАТИНИЦА@.dic"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

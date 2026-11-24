@@ -620,9 +620,9 @@ fn settings_expose_theme_hotkeys_and_about() {
 
     let app_version = format!("Demagog-RS {APP_VERSION}");
     for label in [
-        "Тёмная",
-        "Светлая",
-        "Тёплая",
+        crate::presentation::theme_label(ThemeMode::Dark),
+        crate::presentation::theme_label(ThemeMode::Light),
+        crate::presentation::theme_label(ThemeMode::Warm),
         "Горячие клавиши",
         "О программе",
         app_version.as_str(),
