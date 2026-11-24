@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 mod error;
 pub use error::{AppError, AppResult};
-#[cfg_attr(not(test), expect(unused_imports))]
+#[cfg(test)]
 pub use error::{AppFailure, FailureKind};
 
 mod dictionary;
