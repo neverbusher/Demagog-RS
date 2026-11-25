@@ -1,14 +1,15 @@
 use super::*;
+use crate::domain::{AppError, AppResult};
 use crate::io::book_reader::can_read_book;
 use crate::services::batch::{BatchInput, BatchOutcome};
-use crate::services::book_splitter::{self, BookPart, validate_config};
+use crate::services::book_splitter::{self, BookPart};
 
 #[derive(Debug, Clone)]
 pub(super) enum BatchSplitStatus {
     Queued,
     Running,
     Done(usize),
-    Failed(String),
+    Partial { saved: usize, error: String },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -17,6 +18,7 @@ pub(super) struct BatchQueueState {
     pub statuses: Vec<BatchSplitStatus>,
     pub running: bool,
     pub summary: Option<BatchOutcome>,
+    pub cancel_requested: bool,
     pub error: Option<String>,
     pub warning: Option<String>,
 }
@@ -38,6 +40,7 @@ impl BatchQueueState {
         self.statuses.clear();
         self.running = false;
         self.summary = None;
+        self.cancel_requested = false;
         self.error = None;
         self.warning = None;
     }
@@ -64,8 +67,18 @@ impl BatchQueueState {
     pub(super) fn failed_count(&self) -> usize {
         self.statuses
             .iter()
-            .filter(|status| matches!(status, BatchSplitStatus::Failed(_)))
+            .filter(|status| matches!(status, BatchSplitStatus::Partial { .. }))
             .count()
+    }
+
+    pub(super) fn saved_count(&self) -> usize {
+        self.statuses
+            .iter()
+            .map(|status| match status {
+                BatchSplitStatus::Done(saved) | BatchSplitStatus::Partial { saved, .. } => *saved,
+                _ => 0,
+            })
+            .sum()
     }
 }
 
@@ -97,23 +110,25 @@ impl DemagogApp {
             return;
         }
         if !self.splitter.has_preview && !self.splitter.stale {
-            self.run_split_preview();
+            self.run_split_preview(ui.ctx().clone());
         }
 
         let changed = self.show_splitter_settings(ui);
         self.persist_split_change(ui, changed);
 
-        let example_part = self.splitter.preview.first().cloned().unwrap_or(BookPart {
-            title: None,
-            text: "Глава первая\nТекст части…".to_string(),
+        let example = self.splitter.names.first().cloned().unwrap_or_else(|| {
+            let example_part = self.splitter.preview.first().cloned().unwrap_or(BookPart {
+                title: None,
+                text: "Глава первая\nТекст части…".to_string(),
+            });
+            book_splitter::part_file_name(
+                &self.settings.split,
+                &example_part,
+                0,
+                self.splitter.preview.len().max(1),
+                &self.split_source_name(),
+            )
         });
-        let example = book_splitter::part_file_name(
-            &self.settings.split,
-            &example_part,
-            0,
-            self.splitter.preview.len().max(1),
-            &self.split_source_name(),
-        );
         ui.label(RichText::new(format!("Пример имени: {example}.txt")).weak());
         ui.add_space(4.0);
 
@@ -122,16 +137,16 @@ impl DemagogApp {
                 .add_enabled(!self.worker.is_busy, egui::Button::new("🔍 Тест"))
                 .clicked()
             {
-                self.run_split_preview();
+                self.run_split_preview(ui.ctx().clone());
             }
             let can_export = !self.worker.is_busy
                 && self.settings.split.output_dir.is_some()
-                && book_splitter::validate_config(&self.settings.split).is_ok();
+                && self.validate_split_document().is_ok();
             if ui
                 .add_enabled(can_export, egui::Button::new("💾 Нарезать"))
                 .clicked()
             {
-                self.export_split_parts();
+                self.export_split_parts(ui.ctx().clone());
             }
         });
         ui.separator();
@@ -354,6 +369,17 @@ impl DemagogApp {
         }
     }
 
+    fn validate_split_document(&self) -> AppResult<()> {
+        book_splitter::validate_config(&self.settings.split)?;
+        let config = &self.settings.split;
+        let has_non_toc_method =
+            config.by_size || config.by_keywords || config.by_blank_lines || config.by_all_caps;
+        if config.by_toc && !has_non_toc_method && self.editor.document.headings.is_empty() {
+            return Err(AppError::invalid_data("В этой книге нет структуры глав"));
+        }
+        Ok(())
+    }
+
     fn split_source_name(&self) -> String {
         match &self.editor.document.source_path {
             Some(path) => crate::services::batch::output_stem(path),
@@ -361,93 +387,277 @@ impl DemagogApp {
         }
     }
 
-    fn run_split_preview(&mut self) {
-        if let Err(err) = validate_config(&self.settings.split) {
+    fn run_split_preview(&mut self, ctx: egui::Context) {
+        if self.worker.is_busy {
+            return;
+        }
+        if let Err(err) = self.validate_split_document() {
             self.set_status(StatusLevel::Warning, err.to_string());
             self.splitter.stale = true;
             return;
         }
-        let parts = book_splitter::split_book(
-            &self.editor.document.raw_text,
-            &self.editor.document.headings,
-            &self.settings.split,
-        );
-        self.store_split_preview(parts);
+        self.splitter.stale = true;
+        self.worker.is_busy = true;
+        self.worker.progress_ratio = 0.0;
+        self.set_status(StatusLevel::Info, "Подготовка превью…");
+        let text = self.editor.document.raw_text.clone();
+        let headings = self.editor.document.headings.clone();
+        let config = self.settings.split.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.worker.cancel_flag = Some(Arc::clone(&cancel));
+        let (tx, rx) = mpsc::channel();
+        self.worker.rx = Some(rx);
+        std::thread::spawn(move || {
+            let result =
+                book_splitter::split_book_with_cancel(&text, &headings, &config, Some(&cancel));
+            let message = match classify_worker_result(result, Some(cancel.as_ref())) {
+                WorkerOutcome::Completed(parts) => WorkerMessage::SplitPreview(Ok(parts)),
+                WorkerOutcome::Cancelled => {
+                    WorkerMessage::SplitPreview(Err(AppError::cancelled("Превью отменено")))
+                }
+                WorkerOutcome::Failed(error) => WorkerMessage::SplitPreview(Err(error)),
+            };
+            let _ = tx.send(message);
+            ctx.request_repaint();
+        });
     }
 
-    fn store_split_preview(&mut self, parts: Vec<BookPart>) {
+    pub(super) fn store_split_preview(&mut self, parts: Vec<BookPart>) {
         let source_name = self.split_source_name();
-        self.splitter.names = parts
-            .iter()
-            .enumerate()
-            .map(|(index, part)| {
-                book_splitter::part_file_name(
-                    &self.settings.split,
-                    part,
-                    index,
-                    parts.len(),
-                    &source_name,
-                )
-            })
-            .collect();
+        let names = book_splitter::planned_part_names(&parts, &self.settings.split, &source_name);
+        self.store_split_preview_with_names(parts, names);
+    }
+
+    fn store_split_preview_with_names(&mut self, parts: Vec<BookPart>, names: Vec<String>) {
+        self.splitter.names = names;
         self.splitter.preview = parts;
         self.splitter.has_preview = true;
         self.splitter.stale = false;
     }
 
-    fn export_split_parts(&mut self) {
-        if let Err(err) = validate_config(&self.settings.split) {
+    fn export_split_parts(&mut self, ctx: egui::Context) {
+        if self.worker.is_busy {
+            return;
+        }
+        if let Err(err) = self.validate_split_document() {
             self.set_status(StatusLevel::Error, err.to_string());
             return;
         }
-        let parts = book_splitter::split_book(
-            &self.editor.document.raw_text,
-            &self.editor.document.headings,
-            &self.settings.split,
-        );
-        if parts.is_empty() {
-            self.set_status(StatusLevel::Warning, "Нечего сохранять: текст пуст");
-            return;
-        }
-        if parts.len() > 200
-            && !confirm_destructive(&format!(
-                "Будет создано {} файлов в папке назначения. Продолжить?",
-                parts.len()
-            ))
-        {
-            return;
-        }
+        self.splitter.stale = true;
+        self.worker.is_busy = true;
+        self.worker.progress_ratio = 0.0;
+        self.set_status(StatusLevel::Info, "Подготовка частей к записи…");
+        let text = self.editor.document.raw_text.clone();
+        let headings = self.editor.document.headings.clone();
+        let config = self.settings.split.clone();
         let source_name = self.split_source_name();
-        match book_splitter::export_parts(&parts, &self.settings.split, &source_name) {
-            Ok(summary) => {
-                self.store_split_preview(parts);
-                if summary.errors.is_empty() {
-                    self.set_status(
-                        StatusLevel::Success,
-                        format!(
-                            "Сохранено {} частей в {}",
-                            summary.saved,
-                            summary.dir.display()
-                        ),
-                    );
-                } else {
-                    self.set_status(
-                        StatusLevel::Warning,
-                        format!(
-                            "Сохранено {} частей, ошибок: {}. {}",
-                            summary.saved,
-                            summary.errors.len(),
-                            summary
-                                .errors
-                                .iter()
-                                .map(ToString::to_string)
-                                .collect::<Vec<_>>()
-                                .join("; ")
-                        ),
-                    );
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.worker.cancel_flag = Some(Arc::clone(&cancel));
+        let (tx, rx) = mpsc::channel();
+        self.worker.rx = Some(rx);
+        let (confirm_tx, confirm_rx) = mpsc::channel();
+        self.worker.split_confirm_tx = Some(confirm_tx);
+        std::thread::spawn(move || {
+            let confirm_tx = tx.clone();
+            let confirm = move |parts: usize| {
+                if confirm_tx
+                    .send(WorkerMessage::BookSplit(
+                        book_splitter::BatchSplitProgress::ConfirmLargeExport { parts },
+                    ))
+                    .is_err()
+                {
+                    return false;
                 }
-            }
-            Err(err) => self.set_status(StatusLevel::Error, err.to_string()),
+                confirm_rx.recv().unwrap_or(false)
+            };
+            let result = (|| {
+                let parts = book_splitter::split_book_with_cancel(
+                    &text,
+                    &headings,
+                    &config,
+                    Some(cancel.as_ref()),
+                )?;
+                if parts.is_empty() {
+                    return Err(AppError::invalid_data("Нечего сохранять: текст пуст"));
+                }
+                if parts.len() > 200 && !confirm(parts.len()) {
+                    return Err(AppError::cancelled("Экспорт отменён"));
+                }
+                let summary = book_splitter::export_parts_with_cancel(
+                    &parts,
+                    &config,
+                    &source_name,
+                    Some(cancel.as_ref()),
+                )?;
+                Ok(super::worker::SingleSplitExport { parts, summary })
+            })();
+            let _ = tx.send(WorkerMessage::SplitExport(result));
+            ctx.request_repaint();
+        });
+    }
+
+    pub(super) fn apply_split_export(
+        &mut self,
+        mut parts: Vec<BookPart>,
+        summary: book_splitter::ExportSummary,
+        pending_status: &mut Option<(StatusLevel, String)>,
+    ) -> bool {
+        let attempted = summary.targets.len().min(parts.len());
+        parts.truncate(attempted);
+        let names = summary
+            .targets
+            .iter()
+            .take(attempted)
+            .map(|target| {
+                target
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .and_then(|name| name.strip_suffix(".txt").map(str::to_string))
+                    .unwrap_or_else(|| "часть".to_string())
+            })
+            .collect();
+        self.store_split_preview_with_names(parts, names);
+        if summary.errors.is_empty() {
+            *pending_status = Some((
+                StatusLevel::Success,
+                format!(
+                    "Сохранено {} частей в {}",
+                    summary.saved,
+                    summary.dir.display()
+                ),
+            ));
+        } else {
+            *pending_status = Some((
+                StatusLevel::Warning,
+                format!(
+                    "Сохранено {} частей, ошибок: {}. {}",
+                    summary.saved,
+                    summary.errors.len(),
+                    summary
+                        .errors
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+            ));
         }
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_app(text: &str, output_dir: Option<PathBuf>) -> DemagogApp {
+        let mut settings = AppSettings::default();
+        settings.split.by_size = false;
+        settings.split.by_keywords = true;
+        settings.split.output_dir = output_dir;
+        let document = BookDocument {
+            raw_text: text.to_string(),
+            source_path: Some(PathBuf::from("book.txt")),
+            ..Default::default()
+        };
+        DemagogApp::from_parts(settings, document)
+    }
+
+    #[test]
+    fn single_preview_starts_a_worker() {
+        let mut app = test_app("Глава 1\nТекст.", None);
+
+        app.run_split_preview(egui::Context::default());
+
+        assert!(app.worker.is_busy);
+        assert!(app.worker.rx.is_some());
+        assert!(!app.splitter.has_preview);
+    }
+
+    #[test]
+    fn single_preview_names_include_collision_suffixes() {
+        let mut app = test_app("Глава 1\nОдинаково.\nГлава 2\nОдинаково.", None);
+        app.settings.split.remove_heading = true;
+        app.settings.split.template = "%FirstLine%".to_string();
+        app.settings.split.add_number = false;
+
+        app.run_split_preview(egui::Context::default());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app.worker.is_busy && std::time::Instant::now() < deadline {
+            app.poll_worker();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert_eq!(
+            app.splitter.names,
+            vec!["Одинаково".to_string(), "Одинаково (2)".to_string()]
+        );
+    }
+
+    #[test]
+    fn single_export_starts_a_worker() {
+        let dir = std::env::temp_dir().join(format!(
+            "demagog-single-export-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = test_app("Глава 1\nТекст.", Some(dir.clone()));
+
+        app.export_split_parts(egui::Context::default());
+        let started_async = app.worker.rx.is_some();
+        if started_async {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while app.worker.is_busy && std::time::Instant::now() < deadline {
+                app.poll_worker();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(started_async);
+        assert!(!app.worker.is_busy);
+        assert!(app.splitter.has_preview);
+    }
+
+    #[test]
+    fn cancelled_single_export_preview_contains_only_attempted_parts() {
+        let dir = std::env::temp_dir().join(format!(
+            "demagog-single-cancel-preview-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut app = test_app("Глава 1\nПервый.\nГлава 2\nВторой.", Some(dir.clone()));
+        let parts = vec![
+            BookPart {
+                title: Some("Глава 1".to_string()),
+                text: "Глава 1\nПервый.".to_string(),
+            },
+            BookPart {
+                title: Some("Глава 2".to_string()),
+                text: "Глава 2\nВторой.".to_string(),
+            },
+        ];
+        let summary = book_splitter::ExportSummary {
+            saved: 1,
+            dir: dir.clone(),
+            targets: vec![dir.join("01 Глава 1.txt")],
+            errors: vec![AppError::cancelled("Экспорт частей отменён")],
+        };
+        let mut pending_status = None;
+
+        app.apply_split_export(parts, summary, &mut pending_status);
+
+        assert_eq!(app.splitter.preview.len(), 1);
+        assert_eq!(app.splitter.names, vec!["01 Глава 1".to_string()]);
+        assert_eq!(app.splitter.preview[0].text, "Глава 1\nПервый.");
+        assert!(matches!(pending_status, Some((StatusLevel::Warning, _))));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,7 +1,7 @@
 use super::*;
 use crate::domain::{DictionaryKind, ProcessOutput};
 use crate::services::batch::{BatchCounts, BatchOutcome, BatchProgress};
-use crate::services::book_splitter::BatchSplitProgress;
+use crate::services::book_splitter::{BatchSplitFileResult, BatchSplitProgress};
 
 #[test]
 fn text_would_be_lost_for_non_empty_text() {
@@ -1656,12 +1656,22 @@ fn knigorez_tab_previews_parts_on_open() {
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1100.0, 800.0))
         .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
-    harness.run();
+    harness.run_steps(2);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !harness.state().splitter.has_preview && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+        harness.run_steps(1);
+    }
 
     assert_eq!(harness.get_all_by_label_contains("Частей: 3").count(), 1);
     assert!(harness.get_all_by_label_contains("01 Вступление").count() >= 1);
     harness.get_by_label("🔍 Тест").click();
-    harness.run();
+    harness.run_steps(1);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while harness.state().worker.is_busy && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+        harness.run_steps(1);
+    }
     assert_eq!(harness.get_all_by_label_contains("Частей: 3").count(), 1);
 }
 
@@ -1679,6 +1689,60 @@ fn knigorez_empty_keywords_show_validation_error() {
     harness.run();
 
     assert!(harness.get_all_by_label_contains("ключевых слов").count() >= 1);
+}
+
+#[test]
+fn knigorez_toc_only_is_disabled_for_document_without_headings() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::{NodeT, Queryable};
+
+    let mut app = ui_test_app("Глава 1\nТекст.", "", Vec::new());
+    app.settings.split.by_size = false;
+    app.settings.split.by_keywords = false;
+    app.settings.split.by_toc = true;
+    app.settings.split.output_dir = Some(std::env::temp_dir());
+    app.view.active_tab = ActiveTab::BookCutter;
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1100.0, 800.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+    harness.run_steps(2);
+
+    assert!(
+        harness
+            .get_by_label("💾 Нарезать")
+            .accesskit_node()
+            .is_disabled()
+    );
+    assert!(harness.state().settings.split.by_toc);
+}
+
+#[test]
+fn saving_source_as_marks_existing_splitter_preview_stale() {
+    let dir = std::env::temp_dir().join(format!(
+        "demagog-splitter-save-as-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let saved_path = dir.join("renamed.txt");
+    let mut app = ui_test_app("Глава 1\nТекст.", "", Vec::new());
+    app.editor.document.source_path = Some(dir.join("old.txt"));
+    app.splitter.has_preview = true;
+    app.splitter.stale = false;
+
+    app.save_source_to(saved_path.clone());
+
+    assert_eq!(app.editor.document.source_path, Some(saved_path.clone()));
+    assert!(app.splitter.has_preview);
+    assert!(app.splitter.stale);
+    assert_eq!(
+        std::fs::read_to_string(saved_path).unwrap(),
+        "Глава 1\nТекст."
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -1714,6 +1778,96 @@ fn knigorez_tab_has_batch_queue_section() {
 }
 
 #[test]
+fn knigorez_batch_clear_is_disabled_while_running() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::{NodeT, Queryable};
+
+    let mut app = ui_test_app("", "", Vec::new());
+    app.editor.document.source_path = None;
+    app.view.active_tab = ActiveTab::BookCutter;
+    app.splitter
+        .batch_queue
+        .add_files([std::env::temp_dir().join("demagog-knigorez-clear.txt")]);
+    app.splitter.batch_queue.running = true;
+    app.worker.is_busy = true;
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1100.0, 800.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+    harness.run_steps(2);
+
+    assert!(
+        harness
+            .get_by_label("🗑 Очистить")
+            .accesskit_node()
+            .is_disabled()
+    );
+}
+
+#[test]
+fn knigorez_batch_disconnect_resets_running_state() {
+    use std::sync::mpsc;
+
+    let mut app = ui_test_app("", "", Vec::new());
+    app.editor.document.source_path = None;
+    app.view.active_tab = ActiveTab::BookCutter;
+    app.splitter
+        .batch_queue
+        .add_files([std::env::temp_dir().join("demagog-knigorez-disconnect.txt")]);
+    app.splitter.batch_queue.running = true;
+    app.splitter.batch_queue.warning = Some("старое предупреждение".to_string());
+    app.splitter.batch_queue.error = Some("старая ошибка".to_string());
+    app.splitter.batch_queue.statuses[0] = splitter::BatchSplitStatus::Running;
+    app.worker.is_busy = true;
+    let (tx, rx) = mpsc::channel();
+    app.worker.rx = Some(rx);
+    drop(tx);
+
+    app.poll_worker();
+
+    assert!(!app.splitter.batch_queue.running);
+    assert!(matches!(
+        app.splitter.batch_queue.statuses[0],
+        splitter::BatchSplitStatus::Queued
+    ));
+    assert!(!app.worker.is_busy);
+    assert_eq!(app.worker.progress_ratio, 0.0);
+    assert!(app.splitter.batch_queue.warning.is_none());
+    assert!(app.splitter.batch_queue.error.is_none());
+}
+
+#[test]
+fn knigorez_batch_cancel_button_shows_requested_state() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::{NodeT, Queryable};
+
+    let mut app = ui_test_app("", "", Vec::new());
+    app.editor.document.source_path = None;
+    app.view.active_tab = ActiveTab::BookCutter;
+    app.splitter
+        .batch_queue
+        .add_files([std::env::temp_dir().join("demagog-knigorez-cancel-button.txt")]);
+    app.splitter.batch_queue.running = true;
+    app.worker.is_busy = true;
+    app.worker.cancel_flag = Some(Arc::new(AtomicBool::new(false)));
+    let cancel_flag = Arc::clone(app.worker.cancel_flag.as_ref().unwrap());
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1100.0, 800.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+    harness.run_steps(2);
+
+    harness.get_by_label("⏹ Отмена").click();
+    harness.run_steps(2);
+
+    assert!(cancel_flag.load(Ordering::Relaxed));
+    assert!(
+        harness
+            .get_by_label("⏹ Отмена…")
+            .accesskit_node()
+            .is_disabled()
+    );
+}
+
+#[test]
 fn knigorez_batch_cancellation_resets_running_and_renders_service_counts() {
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
@@ -1727,6 +1881,7 @@ fn knigorez_batch_cancellation_resets_running_and_renders_service_counts() {
         std::env::temp_dir().join("demagog-knigorez-cancel-b.txt"),
     ]);
     app.splitter.batch_queue.running = true;
+    app.splitter.batch_queue.warning = Some("Ожидаем остановки".to_string());
     app.worker.is_busy = true;
     app.worker.cancel_flag = Some(Arc::new(AtomicBool::new(false)));
 
@@ -1740,7 +1895,10 @@ fn knigorez_batch_cancellation_resets_running_and_renders_service_counts() {
     .unwrap();
     tx.send(WorkerMessage::BookSplit(BatchSplitProgress::FileFinished {
         index: 0,
-        outcome: Ok(2),
+        result: BatchSplitFileResult {
+            saved: 2,
+            errors: Vec::new(),
+        },
     }))
     .unwrap();
     tx.send(WorkerMessage::BookSplit(BatchSplitProgress::FileStarted {
@@ -1773,9 +1931,13 @@ fn knigorez_batch_cancellation_resets_running_and_renders_service_counts() {
     assert!(!app.worker.is_busy);
     assert!(app.worker.cancel_flag.is_none());
     assert_eq!(app.splitter.batch_queue.summary, Some(outcome));
-    assert_eq!(app.worker.progress_ratio, 1.0);
-    assert_eq!(app.view.status_line, "Отменено: нарезано 1, ошибок 0");
-    assert_eq!(app.view.status_level, StatusLevel::Success);
+    assert!(app.splitter.batch_queue.warning.is_none());
+    assert_eq!(app.worker.progress_ratio, 0.5);
+    assert_eq!(
+        app.view.status_line,
+        "Отменено: книг 1, ошибок 0, сохранено частей 2"
+    );
+    assert_eq!(app.view.status_level, StatusLevel::Warning);
     app.view.status_line.clear();
 
     let mut harness = Harness::builder()
@@ -1784,7 +1946,7 @@ fn knigorez_batch_cancellation_resets_running_and_renders_service_counts() {
     harness.run();
     assert_eq!(
         harness
-            .get_all_by_label("Отменено: нарезано 1, ошибок 0")
+            .get_all_by_label("Отменено: книг 1, ошибок 0")
             .count(),
         1
     );
@@ -1811,12 +1973,18 @@ fn knigorez_batch_completion_uses_service_counts_and_renders_summary() {
     app.worker.rx = Some(rx);
     tx.send(WorkerMessage::BookSplit(BatchSplitProgress::FileFinished {
         index: 0,
-        outcome: Ok(2),
+        result: BatchSplitFileResult {
+            saved: 2,
+            errors: Vec::new(),
+        },
     }))
     .unwrap();
     tx.send(WorkerMessage::BookSplit(BatchSplitProgress::FileFinished {
         index: 1,
-        outcome: Err("ошибка".to_string()),
+        result: BatchSplitFileResult {
+            saved: 0,
+            errors: vec![crate::domain::AppError::io("ошибка".to_string())],
+        },
     }))
     .unwrap();
     let outcome = BatchOutcome::Completed(BatchCounts {
@@ -1837,7 +2005,7 @@ fn knigorez_batch_completion_uses_service_counts_and_renders_summary() {
     ));
     assert!(matches!(
         app.splitter.batch_queue.statuses[1],
-        splitter::BatchSplitStatus::Failed(_)
+        splitter::BatchSplitStatus::Partial { saved: 0, .. }
     ));
     assert!(!app.splitter.batch_queue.running);
     assert!(!app.worker.is_busy);
@@ -1846,7 +2014,7 @@ fn knigorez_batch_completion_uses_service_counts_and_renders_summary() {
     assert_eq!(app.worker.progress_ratio, 1.0);
     assert_eq!(
         app.view.status_line,
-        "Пакетный книгорез: 3 частей, ошибок 2"
+        "Пакетный книгорез: книг 3, ошибок 2, сохранено частей 2"
     );
     assert_eq!(app.view.status_level, StatusLevel::Warning);
 
@@ -1854,7 +2022,47 @@ fn knigorez_batch_completion_uses_service_counts_and_renders_summary() {
         .with_size(egui::vec2(1100.0, 800.0))
         .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
     harness.run();
-    assert_eq!(harness.get_all_by_label("Готово: 3, ошибок: 2").count(), 1);
+    assert_eq!(
+        harness
+            .get_all_by_label("Готово: книг 3, ошибок: 2")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn knigorez_batch_large_export_confirmation_replies_for_each_book() {
+    use std::sync::mpsc;
+
+    let mut app = ui_test_app("", "", Vec::new());
+    app.editor.document.source_path = None;
+    app.view.active_tab = ActiveTab::BookCutter;
+    app.splitter.batch_queue.add_files([
+        std::env::temp_dir().join("demagog-knigorez-large-a.txt"),
+        std::env::temp_dir().join("demagog-knigorez-large-b.txt"),
+    ]);
+    app.splitter.batch_queue.running = true;
+    app.worker.is_busy = true;
+    app.worker.cancel_flag = Some(Arc::new(AtomicBool::new(false)));
+    let (confirm_tx, confirm_rx) = mpsc::channel();
+    app.worker.split_confirm_tx = Some(confirm_tx);
+    let (tx, rx) = mpsc::channel();
+    app.worker.rx = Some(rx);
+    for _ in 0..2 {
+        tx.send(WorkerMessage::BookSplit(
+            BatchSplitProgress::ConfirmLargeExport { parts: 201 },
+        ))
+        .unwrap();
+    }
+
+    app.poll_worker();
+
+    assert_eq!(confirm_rx.try_recv(), Ok(true));
+    assert_eq!(confirm_rx.try_recv(), Ok(true));
+    assert_eq!(confirm_rx.try_recv(), Err(mpsc::TryRecvError::Empty));
+    assert!(app.worker.split_confirm_tx.is_some());
+    assert!(app.splitter.batch_queue.running);
+    assert!(app.worker.is_busy);
 }
 
 #[test]

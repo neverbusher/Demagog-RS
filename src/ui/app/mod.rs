@@ -992,17 +992,24 @@ impl DemagogApp {
             .add_filter("Текстовый файл UTF-8", &["txt"])
             .save_file()
         {
-            match std::fs::write(&path, &self.editor.document.raw_text) {
-                Ok(_) => {
-                    self.editor.document.source_path = Some(path.clone());
-                    self.editor.source_dirty = false;
-                    self.set_status(
-                        StatusLevel::Success,
-                        format!("Исходный текст сохранён в {}", path.display()),
-                    );
+            self.save_source_to(path);
+        }
+    }
+
+    fn save_source_to(&mut self, path: PathBuf) {
+        match std::fs::write(&path, &self.editor.document.raw_text) {
+            Ok(()) => {
+                self.editor.document.source_path = Some(path.clone());
+                self.editor.source_dirty = false;
+                if self.splitter.has_preview {
+                    self.splitter.stale = true;
                 }
-                Err(e) => self.set_status(StatusLevel::Error, format!("Ошибка сохранения: {e}")),
+                self.set_status(
+                    StatusLevel::Success,
+                    format!("Исходный текст сохранён в {}", path.display()),
+                );
             }
+            Err(e) => self.set_status(StatusLevel::Error, format!("Ошибка сохранения: {e}")),
         }
     }
 

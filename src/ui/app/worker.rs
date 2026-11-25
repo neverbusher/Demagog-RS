@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 
 use super::splitter::BatchSplitStatus;
 use super::{
@@ -11,8 +11,13 @@ use crate::domain::{AppError, BookDocument, PipelineProgress};
 use crate::engine::loader::CompiledDictionary;
 use crate::ports::is_cancelled;
 use crate::services::batch::BatchProgress;
-use crate::services::book_splitter::BatchSplitProgress;
+use crate::services::book_splitter::{BatchSplitProgress, BookPart, ExportSummary};
 use crate::services::dictionary_check::{self, CheckReport};
+
+pub(super) struct SingleSplitExport {
+    pub(super) parts: Vec<BookPart>,
+    pub(super) summary: ExportSummary,
+}
 
 pub(super) enum WorkerMessage {
     DictionariesCompiled {
@@ -25,6 +30,8 @@ pub(super) enum WorkerMessage {
     DictionaryCheckFinished(Result<CheckReport, String>),
     Batch(BatchProgress),
     BookSplit(BatchSplitProgress),
+    SplitPreview(Result<Vec<BookPart>, AppError>),
+    SplitExport(Result<SingleSplitExport, AppError>),
     BatchSetupError(String),
 }
 
@@ -55,6 +62,7 @@ pub(super) struct WorkerState {
     pub(super) progress_ratio: f32,
     pub(super) rx: Option<Receiver<WorkerMessage>>,
     pub(super) cancel_flag: Option<Arc<AtomicBool>>,
+    pub(super) split_confirm_tx: Option<Sender<bool>>,
     pub(super) dic_load_errors: Vec<String>,
 }
 
@@ -97,8 +105,20 @@ impl DemagogApp {
                     "Рабочий поток завершился неожиданно — попробуйте ещё раз",
                 );
                 self.worker.cancel_flag = None;
+                self.worker.split_confirm_tx = None;
                 self.worker.is_busy = false;
                 self.worker.progress_ratio = 0.0;
+                if self.splitter.batch_queue.running {
+                    self.splitter.batch_queue.running = false;
+                    self.splitter.batch_queue.cancel_requested = false;
+                    self.splitter.batch_queue.warning = None;
+                    self.splitter.batch_queue.error = None;
+                    for status in &mut self.splitter.batch_queue.statuses {
+                        if matches!(status, BatchSplitStatus::Running) {
+                            *status = BatchSplitStatus::Queued;
+                        }
+                    }
+                }
             }
             drop(rx);
         } else {
@@ -124,6 +144,10 @@ impl DemagogApp {
             WorkerMessage::Pipeline(progress) => self.handle_pipeline(progress, pending_status),
             WorkerMessage::Batch(progress) => self.handle_batch(progress, pending_status),
             WorkerMessage::BookSplit(progress) => self.handle_book_split(progress, pending_status),
+            WorkerMessage::SplitPreview(result) => {
+                self.handle_split_preview(result, pending_status)
+            }
+            WorkerMessage::SplitExport(result) => self.handle_split_export(result, pending_status),
             WorkerMessage::BatchSetupError(error) => {
                 self.handle_batch_setup_error(error, pending_status)
             }
@@ -428,6 +452,58 @@ impl DemagogApp {
         }
     }
 
+    fn handle_split_preview(
+        &mut self,
+        result: Result<Vec<BookPart>, AppError>,
+        pending_status: &mut PendingStatus,
+    ) -> bool {
+        self.worker.cancel_flag = None;
+        self.worker.is_busy = false;
+        self.worker.progress_ratio = 1.0;
+        match result {
+            Ok(parts) => {
+                let count = parts.len();
+                self.store_split_preview(parts);
+                *pending_status =
+                    Some((StatusLevel::Info, format!("Превью готово: {count} частей")));
+            }
+            Err(error) => {
+                let level = if error.is_cancelled() {
+                    StatusLevel::Warning
+                } else {
+                    StatusLevel::Error
+                };
+                *pending_status = Some((level, error.to_string()));
+            }
+        }
+        true
+    }
+
+    fn handle_split_export(
+        &mut self,
+        result: Result<SingleSplitExport, AppError>,
+        pending_status: &mut PendingStatus,
+    ) -> bool {
+        self.worker.cancel_flag = None;
+        self.worker.split_confirm_tx = None;
+        self.worker.is_busy = false;
+        self.worker.progress_ratio = 1.0;
+        match result {
+            Ok(result) => {
+                self.apply_split_export(result.parts, result.summary, pending_status);
+            }
+            Err(error) => {
+                let level = if error.is_cancelled() {
+                    StatusLevel::Warning
+                } else {
+                    StatusLevel::Error
+                };
+                *pending_status = Some((level, error.to_string()));
+            }
+        }
+        true
+    }
+
     fn handle_book_split(
         &mut self,
         progress: BatchSplitProgress,
@@ -445,11 +521,29 @@ impl DemagogApp {
                 ));
                 false
             }
-            BatchSplitProgress::FileFinished { index, outcome } => {
+            BatchSplitProgress::ConfirmLargeExport { parts } => {
+                let approved = super::confirm_destructive(&format!(
+                    "Будет создано {parts} файлов в папке назначения. Продолжить?"
+                ));
+                if let Some(tx) = self.worker.split_confirm_tx.as_ref() {
+                    let _ = tx.send(approved);
+                }
+                false
+            }
+            BatchSplitProgress::FileFinished { index, result } => {
                 if let Some(status) = self.splitter.batch_queue.statuses.get_mut(index) {
-                    *status = match outcome {
-                        Ok(parts) => BatchSplitStatus::Done(parts),
-                        Err(error) => BatchSplitStatus::Failed(error),
+                    *status = if result.errors.is_empty() {
+                        BatchSplitStatus::Done(result.saved)
+                    } else {
+                        BatchSplitStatus::Partial {
+                            saved: result.saved,
+                            error: result
+                                .errors
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join("; "),
+                        }
                     };
                 }
                 let total = self.splitter.batch_queue.statuses.len().max(1);
@@ -458,6 +552,9 @@ impl DemagogApp {
             }
             BatchSplitProgress::Finished(outcome) => {
                 self.splitter.batch_queue.running = false;
+                self.splitter.batch_queue.cancel_requested = false;
+                self.splitter.batch_queue.warning = None;
+                self.splitter.batch_queue.error = None;
                 for status in &mut self.splitter.batch_queue.statuses {
                     if matches!(status, BatchSplitStatus::Running) {
                         *status = BatchSplitStatus::Queued;
@@ -465,23 +562,32 @@ impl DemagogApp {
                 }
                 self.splitter.batch_queue.summary = Some(outcome);
                 self.worker.cancel_flag = None;
+                self.worker.split_confirm_tx = None;
                 self.worker.is_busy = false;
-                self.worker.progress_ratio = 1.0;
                 let counts = outcome.counts();
-                let level = if counts.failed > 0 {
+                let total = self.splitter.batch_queue.statuses.len().max(1);
+                let finished = self.splitter.batch_queue.done_count()
+                    + self.splitter.batch_queue.failed_count();
+                self.worker.progress_ratio = if outcome.is_cancelled() {
+                    finished as f32 / total as f32
+                } else {
+                    1.0
+                };
+                let level = if outcome.is_cancelled() || counts.failed > 0 {
                     StatusLevel::Warning
                 } else {
                     StatusLevel::Success
                 };
+                let saved = self.splitter.batch_queue.saved_count();
                 let text = if outcome.is_cancelled() {
                     format!(
-                        "Отменено: нарезано {}, ошибок {}",
-                        counts.succeeded, counts.failed
+                        "Отменено: книг {}, ошибок {}, сохранено частей {}",
+                        counts.succeeded, counts.failed, saved
                     )
                 } else {
                     format!(
-                        "Пакетный книгорез: {} частей, ошибок {}",
-                        counts.succeeded, counts.failed
+                        "Пакетный книгорез: книг {}, ошибок {}, сохранено частей {}",
+                        counts.succeeded, counts.failed, saved
                     )
                 };
                 *pending_status = Some((level, text));
