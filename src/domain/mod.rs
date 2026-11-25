@@ -404,7 +404,7 @@ impl AppSettings {
         settings.editor_font_size = settings.editor_font_size.clamp(12.0, 36.0);
         settings.split.max_chars = settings.split.max_chars.clamp(1_000, 500_000);
         settings.split.min_chars = settings.split.min_chars.min(100_000);
-        settings.split.start_number = settings.split.start_number.max(1);
+        settings.split.start_number = settings.split.start_number.clamp(1, 999);
         Ok(settings)
     }
 
@@ -747,6 +747,17 @@ mod tests {
         assert_eq!(restored.split.max_chars, 1_000);
         assert_eq!(restored.split.start_number, 1);
         assert_eq!(restored.split.min_chars, 100_000);
+    }
+
+    #[test]
+    fn split_config_start_number_is_clamped_to_ui_range_on_load() {
+        let mut settings = AppSettings::default();
+        settings.split.start_number = usize::MAX;
+        let json = serde_json::to_string(&settings).unwrap();
+
+        let restored = AppSettings::from_json(json.as_bytes()).unwrap();
+
+        assert_eq!(restored.split.start_number, 999);
     }
 
     #[test]

@@ -1,14 +1,24 @@
 //! Пакетный режим вкладки «Книгорез»: очередь, статусы, запуск нарезки.
 
+use std::collections::HashSet;
+
 use super::splitter::BatchSplitStatus;
 use super::*;
-use crate::services::book_splitter::{self, run_split_batch, validate_config};
+use crate::services::book_splitter::{
+    self, BatchSplitProgress, run_split_batch_with_confirmation, validate_config,
+};
 
 impl DemagogApp {
     /// Пакетное меню — очередь книг, статусы, запуск пакетной нарезки.
     pub(super) fn show_splitter_batch_menu(&mut self, ui: &mut egui::Ui, theme: ThemeMode) {
         let changed = self.show_splitter_settings(ui);
         self.persist_split_change(ui, changed);
+        if changed {
+            self.splitter.batch_queue.warning = None;
+            if validate_config(&self.settings.split).is_ok() {
+                self.splitter.batch_queue.error = None;
+            }
+        }
         self.show_batch_queue_section(ui, theme);
     }
 
@@ -33,7 +43,8 @@ impl DemagogApp {
             }
             if ui
                 .add_enabled(
-                    !self.splitter.batch_queue.files.is_empty(),
+                    !self.splitter.batch_queue.running
+                        && !self.splitter.batch_queue.files.is_empty(),
                     egui::Button::new("🗑 Очистить"),
                 )
                 .clicked()
@@ -42,7 +53,12 @@ impl DemagogApp {
             }
         });
         if self.splitter.batch_queue.files.is_empty() {
-            ui.label("Добавьте книги — каждая будет нарезана в папке «ИмяКниги».");
+            let hint = if self.settings.split.subfolder {
+                "Добавьте книги — каждая будет нарезана в папке «ИмяКниги»."
+            } else {
+                "Добавьте книги — части будут записаны в выбранную папку."
+            };
+            ui.label(hint);
         }
         ScrollArea::vertical()
             .id_salt("splitter_batch_queue")
@@ -53,7 +69,9 @@ impl DemagogApp {
                         BatchSplitStatus::Queued => ("⏳", String::new()),
                         BatchSplitStatus::Running => ("⚙", "нарезка…".to_string()),
                         BatchSplitStatus::Done(parts) => ("✅", format!("{parts} частей")),
-                        BatchSplitStatus::Failed(error) => ("❌", error.clone()),
+                        BatchSplitStatus::Partial { saved, error } => {
+                            ("⚠", format!("сохранено {saved} частей; {error}"))
+                        }
                     };
                     let name = self.splitter.batch_queue.display_name(index);
                     ui.horizontal_wrapped(|ui| {
@@ -75,10 +93,24 @@ impl DemagogApp {
         }
         ui.horizontal_wrapped(|ui| {
             if self.splitter.batch_queue.running {
-                if ui.button("⏹ Отмена").clicked()
-                    && let Some(flag) = &self.worker.cancel_flag
+                let label = if self.splitter.batch_queue.cancel_requested {
+                    "⏹ Отмена…"
+                } else {
+                    "⏹ Отмена"
+                };
+                if ui
+                    .add_enabled(
+                        !self.splitter.batch_queue.cancel_requested,
+                        egui::Button::new(label),
+                    )
+                    .clicked()
                 {
-                    flag.store(true, Ordering::Relaxed);
+                    self.splitter.batch_queue.cancel_requested = true;
+                    self.splitter.batch_queue.warning =
+                        Some("Отмена запрошена; ожидаем безопасной остановки…".to_string());
+                    if let Some(flag) = &self.worker.cancel_flag {
+                        flag.store(true, Ordering::Relaxed);
+                    }
                 }
             } else if ui
                 .add_enabled(
@@ -97,11 +129,14 @@ impl DemagogApp {
                 let counts = outcome.counts();
                 let text = if outcome.is_cancelled() {
                     format!(
-                        "Отменено: нарезано {}, ошибок {}",
+                        "Отменено: книг {}, ошибок {}",
                         counts.succeeded, counts.failed
                     )
                 } else {
-                    format!("Готово: {}, ошибок: {}", counts.succeeded, counts.failed)
+                    format!(
+                        "Готово: книг {}, ошибок: {}",
+                        counts.succeeded, counts.failed
+                    )
                 };
                 ui.label(RichText::new(text).strong());
             }
@@ -119,18 +154,32 @@ impl DemagogApp {
         let Some(base) = self.settings.split.output_dir.as_ref() else {
             return Vec::new();
         };
-        self.splitter
+        if !self.settings.split.overwrite {
+            return Vec::new();
+        }
+        if !self.settings.split.subfolder {
+            return if base.exists() {
+                vec![base.display().to_string()]
+            } else {
+                Vec::new()
+            };
+        }
+        let mut used_dirs = HashSet::new();
+        let mut dirs: Vec<String> = self
+            .splitter
             .batch_queue
             .files
             .iter()
             .map(|file| {
-                base.join(book_splitter::sanitize_file_name(
-                    &crate::services::batch::output_stem(&file.path),
-                ))
+                let source_name = crate::services::batch::output_stem(&file.path);
+                book_splitter::unique_book_dir(base, &source_name, &mut used_dirs)
             })
             .filter(|dir| dir.exists())
             .map(|dir| dir.display().to_string())
-            .collect()
+            .collect();
+        dirs.sort();
+        dirs.dedup();
+        dirs
     }
 
     fn start_batch_split(&mut self, ctx: egui::Context) {
@@ -161,6 +210,7 @@ impl DemagogApp {
             .statuses
             .fill(BatchSplitStatus::Queued);
         self.splitter.batch_queue.summary = None;
+        self.splitter.batch_queue.cancel_requested = false;
         self.splitter.batch_queue.error = None;
         self.splitter.batch_queue.running = true;
         self.worker.is_busy = true;
@@ -172,6 +222,8 @@ impl DemagogApp {
         self.worker.cancel_flag = Some(Arc::clone(&cancel));
         let (tx, rx) = mpsc::channel();
         self.worker.rx = Some(rx);
+        let (confirm_tx, confirm_rx) = mpsc::channel();
+        self.worker.split_confirm_tx = Some(confirm_tx);
 
         std::thread::spawn(move || {
             let (btx, brx) = mpsc::channel();
@@ -183,10 +235,118 @@ impl DemagogApp {
                     ctx_forward.request_repaint();
                 }
             });
+            let confirm_tx = btx.clone();
+            let confirm = move |parts: usize| {
+                if confirm_tx
+                    .send(BatchSplitProgress::ConfirmLargeExport { parts })
+                    .is_err()
+                {
+                    return false;
+                }
+                confirm_rx.recv().unwrap_or(false)
+            };
             let reader = CompositeBookReader::new();
-            run_split_batch(&files, &reader, &config, Some(cancel.as_ref()), Some(&btx));
+            run_split_batch_with_confirmation(
+                &files,
+                &reader,
+                &config,
+                Some(cancel.as_ref()),
+                Some(&btx),
+                Some(&confirm),
+            );
+            drop(confirm);
             drop(btx);
             let _ = forwarder.join();
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "demagog-split-ui-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn changing_settings_clears_stale_batch_messages() {
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable;
+
+        let root = temp_dir("stale-messages");
+        let mut app = DemagogApp::from_parts(AppSettings::default(), BookDocument::default());
+        app.settings.split.output_dir = Some(root.clone());
+        app.settings.split.by_size = false;
+        app.splitter.batch_queue.add_files([root.join("book.txt")]);
+        app.splitter.batch_queue.error = Some("старая ошибка".to_string());
+        app.splitter.batch_queue.warning = Some("старое предупреждение".to_string());
+        app.view.active_tab = ActiveTab::BookCutter;
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1100.0, 800.0))
+            .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+
+        harness.get_by_label("По размеру").click();
+        harness.run_steps(1);
+
+        assert!(harness.state().splitter.batch_queue.error.is_none());
+        assert!(harness.state().splitter.batch_queue.warning.is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn flat_batch_warning_checks_the_real_output_directory() {
+        let root = temp_dir("flat-warning");
+        let mut app = DemagogApp::from_parts(AppSettings::default(), BookDocument::default());
+        app.settings.split.output_dir = Some(root.clone());
+        app.settings.split.subfolder = false;
+        app.settings.split.overwrite = true;
+        app.splitter.batch_queue.add_files([root.join("book.txt")]);
+
+        assert_eq!(app.batch_existing_dirs(), vec![root.display().to_string()]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn batch_warning_accounts_for_same_stem_suffix_folder() {
+        let root = temp_dir("suffix-warning");
+        std::fs::create_dir_all(root.join("book (2)")).unwrap();
+        let mut app = DemagogApp::from_parts(AppSettings::default(), BookDocument::default());
+        app.settings.split.output_dir = Some(root.clone());
+        app.settings.split.subfolder = true;
+        app.settings.split.overwrite = true;
+        app.splitter.batch_queue.add_files([
+            root.join("first").join("book.txt"),
+            root.join("second").join("book.txt"),
+        ]);
+
+        assert_eq!(
+            app.batch_existing_dirs(),
+            vec![root.join("book (2)").display().to_string()]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn batch_warning_is_empty_when_overwrite_is_disabled() {
+        let root = temp_dir("no-overwrite-warning");
+        std::fs::create_dir_all(root.join("book")).unwrap();
+        let mut app = DemagogApp::from_parts(AppSettings::default(), BookDocument::default());
+        app.settings.split.output_dir = Some(root.clone());
+        app.settings.split.subfolder = true;
+        app.settings.split.overwrite = false;
+        app.splitter.batch_queue.add_files([root.join("book.txt")]);
+
+        assert!(app.batch_existing_dirs().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

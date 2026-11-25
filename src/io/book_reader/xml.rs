@@ -48,7 +48,10 @@ pub(super) fn extract_xml_paragraphs(
     let mut skip_depth = 0usize;
     let mut in_body = !xml_str.contains("<body");
     let mut section_depth = 0usize;
-    let mut title_start: Option<usize> = None;
+    let mut heading_active = false;
+    let mut heading_offset: Option<usize> = None;
+    let mut heading_title = String::new();
+    let mut pending_space = false;
 
     loop {
         if book_cancelled(cancel) {
@@ -63,11 +66,28 @@ pub(super) fn extract_xml_paragraphs(
                 if local == "body" {
                     in_body = true;
                 }
+                let is_block = matches!(local.as_str(), "body" | "section" | "html")
+                    || block_tags.iter().any(|&t| t == local);
+                let is_br = local == "br";
+                if pending_space {
+                    if skip_depth == 0 && in_body && !is_block && !is_br {
+                        out.push(' ');
+                        if heading_active {
+                            heading_title.push(' ');
+                        }
+                    }
+                    pending_space = false;
+                }
                 if skip_tags.iter().any(|&t| t == local) {
                     skip_depth += 1;
+                } else if skip_depth == 0 && in_body && is_br {
+                    out.push('\n');
+                    if heading_active {
+                        heading_title.push('\n');
+                    }
                 } else if skip_depth == 0
                     && in_body
-                    && block_tags.iter().any(|&t| t == local)
+                    && is_block
                     && !out.is_empty()
                     && !out.ends_with('\n')
                 {
@@ -77,8 +97,13 @@ pub(super) fn extract_xml_paragraphs(
                     if local == "section" {
                         section_depth += 1;
                     }
-                    if local == "title" && section_depth > 0 && headings.is_some() {
-                        title_start = Some(out.len());
+                    let is_fb2_title = local == "title" && section_depth > 0;
+                    let is_xhtml_heading =
+                        matches!(local.as_str(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6");
+                    if headings.is_some() && (is_fb2_title || is_xhtml_heading) && !heading_active {
+                        heading_active = true;
+                        heading_offset = None;
+                        heading_title.clear();
                     }
                 }
             }
@@ -87,36 +112,83 @@ pub(super) fn extract_xml_paragraphs(
                 let local = std::str::from_utf8(local_bytes.as_ref())
                     .unwrap_or("")
                     .to_ascii_lowercase();
+                let is_block = matches!(local.as_str(), "body" | "section" | "html")
+                    || block_tags.iter().any(|&t| t == local);
+                if pending_space && skip_depth == 0 && in_body && is_block {
+                    pending_space = false;
+                }
                 if skip_tags.iter().any(|&t| t == local) {
                     skip_depth = skip_depth.saturating_sub(1);
-                } else if skip_depth == 0
-                    && in_body
-                    && block_tags.iter().any(|&t| t == local)
-                    && !out.ends_with('\n')
-                {
+                } else if skip_depth == 0 && in_body && is_block && !out.ends_with('\n') {
                     out.push('\n');
                 }
                 if skip_depth == 0 && in_body {
                     if local == "section" {
                         section_depth = section_depth.saturating_sub(1);
                     }
-                    if local == "title"
-                        && let (Some(start), Some(headings)) =
-                            (title_start.take(), headings.as_mut())
-                        && let Some(title) =
-                            out[start..].lines().map(str::trim).find(|l| !l.is_empty())
-                    {
-                        headings.push(BookHeading {
-                            offset: start,
-                            title: title.to_string(),
-                        });
+                    let is_heading_end = local == "title"
+                        || matches!(local.as_str(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6");
+                    if heading_active && is_heading_end {
+                        if let (Some(offset), Some(headings)) = (heading_offset, headings.as_mut())
+                            && let Some(title) = heading_title
+                                .lines()
+                                .map(str::trim)
+                                .find(|line| !line.is_empty())
+                        {
+                            headings.push(BookHeading {
+                                offset,
+                                title: title.to_string(),
+                            });
+                        }
+                        heading_active = false;
+                        heading_offset = None;
+                        heading_title.clear();
+                    }
+                }
+            }
+            Ok(Event::Empty(e)) if skip_depth == 0 && in_body => {
+                let local = e.local_name();
+                if local.as_ref() == b"br" {
+                    pending_space = false;
+                    out.push('\n');
+                    if heading_active {
+                        heading_title.push('\n');
                     }
                 }
             }
             Ok(Event::Text(t)) if skip_depth == 0 && in_body => {
-                match t.unescape_with(resolve_html_entity) {
-                    Ok(unescaped) => out.push_str(&unescaped),
-                    Err(_) => out.push_str(&String::from_utf8_lossy(&t)),
+                let decoded = decode_xml_entities(&t);
+                let core = decoded.trim();
+                let has_leading = decoded.len() != decoded.trim_start().len();
+                let has_trailing = decoded.len() != decoded.trim_end().len();
+                if core.is_empty() {
+                    if !out.is_empty() && !out.chars().last().is_some_and(char::is_whitespace) {
+                        pending_space = true;
+                    }
+                    continue;
+                }
+                if (pending_space || has_leading)
+                    && !out.is_empty()
+                    && !out.chars().last().is_some_and(char::is_whitespace)
+                {
+                    pending_space = true;
+                }
+                if pending_space {
+                    out.push(' ');
+                    if heading_active {
+                        heading_title.push(' ');
+                    }
+                    pending_space = false;
+                }
+                if heading_active {
+                    if heading_offset.is_none() {
+                        heading_offset = Some(out.len());
+                    }
+                    heading_title.push_str(core);
+                }
+                out.push_str(core);
+                if has_trailing {
+                    pending_space = true;
                 }
             }
             Ok(Event::Eof) => break,
@@ -132,6 +204,52 @@ pub(super) fn extract_xml_paragraphs(
         }
     }
     Ok(out.trim().to_string())
+}
+
+fn decode_xml_entities(text: &quick_xml::events::BytesText<'_>) -> String {
+    let bytes = text.as_ref();
+    let mut out = String::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'&' {
+            let start = i;
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'&' {
+                i += 1;
+            }
+            out.push_str(&String::from_utf8_lossy(&bytes[start..i]));
+            continue;
+        }
+        let semicolon = bytes[i + 1..]
+            .iter()
+            .position(|byte| *byte == b';')
+            .map(|pos| i + 1 + pos);
+        if let Some(end) = semicolon {
+            let name = std::str::from_utf8(&bytes[i + 1..end]).unwrap_or("");
+            let decoded: Option<String> = if let Some(hex) = name.strip_prefix("#x") {
+                u32::from_str_radix(hex, 16)
+                    .ok()
+                    .and_then(char::from_u32)
+                    .map(|ch| ch.to_string())
+            } else if let Some(decimal) = name.strip_prefix('#') {
+                decimal
+                    .parse::<u32>()
+                    .ok()
+                    .and_then(char::from_u32)
+                    .map(|ch| ch.to_string())
+            } else {
+                resolve_html_entity(name).map(str::to_string)
+            };
+            if let Some(decoded) = decoded {
+                out.push_str(&decoded);
+                i = end + 1;
+                continue;
+            }
+        }
+        out.push('&');
+        i += 1;
+    }
+    out
 }
 
 /// Resolves XML predefined entities plus the HTML named entities common in
@@ -251,6 +369,57 @@ mod tests {
             text.contains("продолжение"),
             "text after entity lost: {text}"
         );
+    }
+
+    #[test]
+    fn xhtml_br_preserves_line_break() {
+        let xml = "<html><body><h1>Глава<br/>1</h1><p>First<br/>Second</p></body></html>";
+
+        let text = extract_xml_paragraphs(xml, &["p", "h1"], &["head"], None, None)
+            .expect("well-formed XHTML");
+
+        assert_eq!(text, "Глава\n1\nFirst\nSecond");
+    }
+
+    #[test]
+    fn inline_formatting_whitespace_separates_words() {
+        let xml =
+            "<html><body><p>Алёна\n     <em>и</em>\n     <strong>Пётр</strong></p></body></html>";
+
+        let text =
+            extract_xml_paragraphs(xml, &["p"], &["head"], None, None).expect("well-formed XHTML");
+
+        assert_eq!(text, "Алёна и Пётр");
+    }
+
+    #[test]
+    fn repeated_br_preserves_an_empty_line() {
+        let xml = "<html><body><p>A<br/><br/>B</p></body></html>";
+
+        let text =
+            extract_xml_paragraphs(xml, &["p"], &["head"], None, None).expect("well-formed XHTML");
+
+        assert_eq!(text, "A\n\nB");
+    }
+
+    #[test]
+    fn unknown_html_entity_does_not_block_known_entity_decoding() {
+        let xml = "<html><body><p>A&nbsp;B &shy; C &#169; D.</p></body></html>";
+
+        let text =
+            extract_xml_paragraphs(xml, &["p"], &["head"], None, None).expect("well-formed XHTML");
+
+        assert_eq!(text, "A\u{00A0}B &shy; C © D.");
+    }
+
+    #[test]
+    fn formatting_whitespace_between_block_tags_is_ignored() {
+        let xml = "<html>\n<body>\n  <p>Первый.</p>\n  <p>Второй.</p>\n</body>\n</html>";
+
+        let text =
+            extract_xml_paragraphs(xml, &["p"], &["head"], None, None).expect("well-formed XHTML");
+
+        assert_eq!(text, "Первый.\nВторой.");
     }
 
     #[test]

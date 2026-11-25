@@ -1,6 +1,9 @@
 //! Чистая нарезка текста книги на части (без ввода-вывода).
 
+use std::sync::atomic::AtomicBool;
+
 use crate::domain::{AppError, AppResult, BookHeading, SplitConfig};
+use crate::ports::is_cancelled;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BookPart {
@@ -33,16 +36,36 @@ pub fn validate_config(config: &SplitConfig) -> AppResult<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub fn split_book(text: &str, headings: &[BookHeading], config: &SplitConfig) -> Vec<BookPart> {
-    if text.trim().is_empty() {
-        return Vec::new();
+    split_book_with_cancel(text, headings, config, None).unwrap_or_default()
+}
+
+pub(crate) fn split_book_with_cancel(
+    text: &str,
+    headings: &[BookHeading],
+    config: &SplitConfig,
+    cancel: Option<&AtomicBool>,
+) -> AppResult<Vec<BookPart>> {
+    if is_cancelled(cancel) {
+        return Err(AppError::cancelled("Нарезка книги отменена"));
     }
-    let boundaries = collect_boundaries(text, headings, config);
-    let parts = form_parts(text, &boundaries, config);
-    if config.by_size {
-        apply_size_cap(parts, config.max_chars)
+    if text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let boundaries = collect_boundaries(text, headings, config, cancel)?;
+    let parts = if boundaries.is_empty() {
+        vec![BookPart {
+            title: None,
+            text: text.to_string(),
+        }]
     } else {
-        parts
+        form_parts(text, &boundaries, config, cancel)?
+    };
+    if config.by_size {
+        apply_size_cap(parts, config.max_chars, cancel)
+    } else {
+        Ok(parts)
     }
 }
 
@@ -66,12 +89,23 @@ fn is_all_caps(line: &str) -> bool {
     has_cased
 }
 
-fn collect_boundaries(text: &str, headings: &[BookHeading], config: &SplitConfig) -> Vec<Boundary> {
+fn collect_boundaries(
+    text: &str,
+    headings: &[BookHeading],
+    config: &SplitConfig,
+    cancel: Option<&AtomicBool>,
+) -> AppResult<Vec<Boundary>> {
+    if is_cancelled(cancel) {
+        return Err(AppError::cancelled("Нарезка книги отменена"));
+    }
     let mut boundaries: Vec<Boundary> = Vec::new();
     let keywords = parse_keywords(&config.keywords);
     let mut blank_run = 0usize;
     let mut offset = 0usize;
     for line in text.split_inclusive('\n') {
+        if is_cancelled(cancel) {
+            return Err(AppError::cancelled("Нарезка книги отменена"));
+        }
         let line_body = line.trim_end_matches(['\n', '\r']);
         let trimmed = line_body.trim();
         if trimmed.is_empty() {
@@ -106,6 +140,9 @@ fn collect_boundaries(text: &str, headings: &[BookHeading], config: &SplitConfig
     }
     if config.by_toc {
         for heading in headings {
+            if is_cancelled(cancel) {
+                return Err(AppError::cancelled("Нарезка книги отменена"));
+            }
             if heading.offset <= text.len() && text.is_char_boundary(heading.offset) {
                 boundaries.push(Boundary {
                     offset: heading.offset,
@@ -117,7 +154,7 @@ fn collect_boundaries(text: &str, headings: &[BookHeading], config: &SplitConfig
     }
     boundaries.sort_by(|a, b| a.offset.cmp(&b.offset).then(b.rank.cmp(&a.rank)));
     boundaries.dedup_by_key(|b| b.offset);
-    boundaries
+    Ok(boundaries)
 }
 
 fn part_text(piece: &str, strip_heading: bool) -> &str {
@@ -132,12 +169,20 @@ fn part_text(piece: &str, strip_heading: bool) -> &str {
     }
 }
 
-fn form_parts(text: &str, boundaries: &[Boundary], config: &SplitConfig) -> Vec<BookPart> {
+fn form_parts(
+    text: &str,
+    boundaries: &[Boundary],
+    config: &SplitConfig,
+    cancel: Option<&AtomicBool>,
+) -> AppResult<Vec<BookPart>> {
     let mut parts: Vec<BookPart> = Vec::new();
     let mut start = 0usize;
     let mut current_title: Option<String> = None;
     let mut strip_heading = false;
     for boundary in boundaries {
+        if is_cancelled(cancel) {
+            return Err(AppError::cancelled("Нарезка книги отменена"));
+        }
         if boundary.offset == 0 {
             current_title = boundary.title.clone();
             strip_heading = boundary.title.is_some();
@@ -150,18 +195,25 @@ fn form_parts(text: &str, boundaries: &[Boundary], config: &SplitConfig) -> Vec<
             &text[start..boundary.offset],
             strip_heading && config.remove_heading,
         );
+        if candidate.is_empty() {
+            start = boundary.offset;
+            current_title = boundary.title.clone();
+            strip_heading = boundary.title.is_some();
+            continue;
+        }
         if config.min_chars > 0 && candidate.chars().count() < config.min_chars {
             continue;
         }
-        if !candidate.is_empty() {
-            parts.push(BookPart {
-                title: current_title.take(),
-                text: candidate.to_string(),
-            });
-        }
+        parts.push(BookPart {
+            title: current_title.take(),
+            text: candidate.to_string(),
+        });
         start = boundary.offset;
         current_title = boundary.title.clone();
         strip_heading = boundary.title.is_some();
+    }
+    if is_cancelled(cancel) {
+        return Err(AppError::cancelled("Нарезка книги отменена"));
     }
     let tail = part_text(&text[start..], strip_heading && config.remove_heading);
     if !tail.is_empty() {
@@ -170,18 +222,25 @@ fn form_parts(text: &str, boundaries: &[Boundary], config: &SplitConfig) -> Vec<
             text: tail.to_string(),
         });
     }
-    parts
+    Ok(parts)
 }
 
-fn apply_size_cap(parts: Vec<BookPart>, max_chars: usize) -> Vec<BookPart> {
+fn apply_size_cap(
+    parts: Vec<BookPart>,
+    max_chars: usize,
+    cancel: Option<&AtomicBool>,
+) -> AppResult<Vec<BookPart>> {
     let max_chars = max_chars.max(1);
     let mut out = Vec::new();
     for part in parts {
+        if is_cancelled(cancel) {
+            return Err(AppError::cancelled("Нарезка книги отменена"));
+        }
         if part.text.chars().count() <= max_chars {
             out.push(part);
             continue;
         }
-        for (index, sub) in split_text_by_size(&part.text, max_chars)
+        for (index, sub) in split_text_by_size(&part.text, max_chars, cancel)?
             .into_iter()
             .enumerate()
         {
@@ -191,57 +250,220 @@ fn apply_size_cap(parts: Vec<BookPart>, max_chars: usize) -> Vec<BookPart> {
             });
         }
     }
-    out
+    Ok(out)
 }
 
-fn split_text_by_size(text: &str, max_chars: usize) -> Vec<String> {
-    use crate::services::chunker::{split_into_sentences, split_long_sentence};
+fn split_text_by_size(
+    text: &str,
+    max_chars: usize,
+    cancel: Option<&AtomicBool>,
+) -> AppResult<Vec<String>> {
     let mut chunks: Vec<String> = Vec::new();
-    let mut current = String::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            // Пустые строки не теряем: добавляем в текущий чанк, если места позволяет.
-            if !current.is_empty() {
-                if current.chars().count() + 1 > max_chars {
-                    chunks.push(std::mem::take(&mut current));
-                } else {
-                    current.push('\n');
-                }
-            }
-            continue;
+    let mut start = 0;
+    // Preserve exact whitespace with adjacent content; only whitespace may exceed the cap.
+    let mut pending = String::new();
+    let mut pending_chars = 0;
+    while start < text.len() {
+        if is_cancelled(cancel) {
+            return Err(AppError::cancelled("Нарезка книги отменена"));
         }
-        if line.chars().count() > max_chars {
-            if !current.is_empty() {
-                chunks.push(std::mem::take(&mut current));
-            }
-            for sentence in split_into_sentences(line) {
-                if sentence.chars().count() > max_chars {
-                    if !current.is_empty() {
-                        chunks.push(std::mem::take(&mut current));
+        let available = max_chars.saturating_sub(pending_chars).max(1);
+        let end = text[start..]
+            .char_indices()
+            .nth(available)
+            .map(|(offset, _)| start + offset)
+            .unwrap_or(text.len());
+        let mut cut = end;
+        if end < text.len() {
+            let window = &text[start..end];
+            if let Some(paragraph) = last_paragraph_boundary(window) {
+                cut = start + paragraph;
+            } else if let Some(sentence) = last_sentence_boundary(window, Some(&text[end..])) {
+                cut = start + sentence;
+            } else if let Some(space) = window.rfind(char::is_whitespace) {
+                let whitespace = window[space..].chars().next().unwrap();
+                if whitespace == '\r' {
+                    if window[space..].starts_with("\r\n") {
+                        cut = start + space + 2;
+                    } else if text[end..].starts_with('\n') {
+                        cut = start + space;
+                    } else {
+                        cut = start + space + 1;
                     }
-                    chunks.extend(split_long_sentence(&sentence, max_chars));
                 } else {
-                    push_line(&mut chunks, &mut current, &sentence, max_chars);
+                    cut = start + space + whitespace.len_utf8();
                 }
             }
-            continue;
         }
-        push_line(&mut chunks, &mut current, line, max_chars);
+        if cut <= start {
+            cut = end;
+        }
+        if cut == end && end < text.len() {
+            let window = &text[start..end];
+            if let Some(safe) = sentence_unit_crossing_window(window, &text[end..]) {
+                let candidate = start + safe;
+                if candidate > start {
+                    cut = candidate;
+                } else {
+                    let mut extended = end;
+                    while let Some(ch) = text[extended..].chars().next() {
+                        if !is_closing_quote(ch) {
+                            break;
+                        }
+                        extended += ch.len_utf8();
+                    }
+                    cut = extended;
+                }
+            }
+        }
+        let piece = &text[start..cut];
+        let mut combined = std::mem::take(&mut pending);
+        combined.push_str(piece);
+        if piece.trim().is_empty() {
+            pending = combined;
+            pending_chars += piece.chars().count();
+        } else {
+            let rebalanced = if combined.chars().count() > max_chars {
+                chunks
+                    .last()
+                    .and_then(|last| try_split_balanced(last, &combined, max_chars))
+            } else {
+                None
+            };
+            if let Some((prefix, suffix)) = rebalanced {
+                *chunks.last_mut().expect("last chunk exists") = prefix;
+                chunks.push(suffix);
+            } else {
+                chunks.push(combined);
+            }
+            pending_chars = 0;
+        }
+        start = cut;
     }
-    if !current.is_empty() {
-        chunks.push(current);
+    if !pending.is_empty() {
+        let rebalanced = chunks
+            .last()
+            .and_then(|last| try_split_balanced(last, &pending, max_chars));
+        if let Some((prefix, suffix)) = rebalanced {
+            *chunks.last_mut().expect("last chunk exists") = prefix;
+            chunks.push(suffix);
+        } else if let Some(last) = chunks.last_mut() {
+            last.push_str(&pending);
+        } else {
+            chunks.push(pending);
+        }
     }
-    chunks
+    Ok(chunks)
 }
 
-fn push_line(chunks: &mut Vec<String>, current: &mut String, line: &str, max_chars: usize) {
-    let sep = if current.is_empty() { 0 } else { 1 };
-    if !current.is_empty() && current.chars().count() + sep + line.chars().count() > max_chars {
-        chunks.push(std::mem::take(current));
+fn try_split_balanced(left: &str, right: &str, max_chars: usize) -> Option<(String, String)> {
+    let mut combined = String::with_capacity(left.len().saturating_add(right.len()));
+    combined.push_str(left);
+    combined.push_str(right);
+    let total_chars = combined.chars().count();
+    if total_chars <= max_chars {
+        return None;
     }
-    if !current.is_empty() {
-        current.push('\n');
+    let leading_whitespace = combined.chars().take_while(|ch| ch.is_whitespace()).count();
+    let trailing_whitespace = combined
+        .chars()
+        .rev()
+        .take_while(|ch| ch.is_whitespace())
+        .count();
+    if leading_whitespace == total_chars {
+        return None;
     }
-    current.push_str(line);
+    let first_content = leading_whitespace;
+    let last_content = total_chars - trailing_whitespace - 1;
+    let min_split = total_chars.saturating_sub(max_chars);
+    let max_split = max_chars.min(total_chars - 1);
+    for (char_index, (split_at, next)) in combined.char_indices().enumerate() {
+        if char_index < min_split {
+            continue;
+        }
+        if char_index > max_split {
+            break;
+        }
+        if char_index <= first_content || char_index > last_content {
+            continue;
+        }
+        let previous = combined[..split_at].chars().next_back();
+        if previous == Some('\r') && next == '\n' {
+            continue;
+        }
+        if is_closing_quote(next)
+            && previous.is_some_and(|ch| is_sentence_punctuation(ch) || is_closing_quote(ch))
+        {
+            continue;
+        }
+        return Some((
+            combined[..split_at].to_string(),
+            combined[split_at..].to_string(),
+        ));
+    }
+    None
+}
+
+fn sentence_unit_crossing_window(window: &str, following: &str) -> Option<usize> {
+    if !following.chars().next().is_some_and(is_closing_quote) {
+        return None;
+    }
+    let mut end = window.len();
+    while let Some(ch) = window[..end].chars().next_back() {
+        if !is_closing_quote(ch) {
+            break;
+        }
+        end -= ch.len_utf8();
+    }
+    let punctuation = window[..end].chars().next_back()?;
+    is_sentence_punctuation(punctuation).then_some(end - punctuation.len_utf8())
+}
+
+fn is_sentence_punctuation(ch: char) -> bool {
+    matches!(ch, '.' | '!' | '?' | '…')
+}
+
+fn is_closing_quote(ch: char) -> bool {
+    matches!(ch, '»' | '”' | '’' | '"' | '\'' | ')' | ']' | '}')
+}
+
+fn last_paragraph_boundary(text: &str) -> Option<usize> {
+    [
+        text.rfind("\n\n").map(|pos| pos + 2),
+        text.rfind("\r\n\r\n").map(|pos| pos + 4),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+}
+
+fn last_sentence_boundary(text: &str, following: Option<&str>) -> Option<usize> {
+    text.char_indices().rev().find_map(|(offset, ch)| {
+        if !is_sentence_punctuation(ch) {
+            return None;
+        }
+        let mut end = offset + ch.len_utf8();
+        let mut rest = &text[end..];
+        while let Some(closing) = rest.chars().next() {
+            if !is_closing_quote(closing) {
+                break;
+            }
+            end += closing.len_utf8();
+            rest = &text[end..];
+        }
+        if end == text.len() {
+            return match following {
+                None => Some(end),
+                Some(next) => next
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_whitespace)
+                    .then_some(end),
+            };
+        }
+        rest.chars()
+            .next()
+            .is_some_and(char::is_whitespace)
+            .then_some(end)
+    })
 }

@@ -57,12 +57,13 @@ impl DocumentReader for EpubDocumentReader {
             total_bytes = total_bytes.saturating_add(bytes.len() as u64);
             check_epub_total_size(total_bytes)?;
             let chapter_xml = decode_xml_with_declared_encoding(&bytes);
+            let mut chapter_headings = Vec::new();
             let part = match extract_xml_paragraphs(
                 &chapter_xml,
-                &["p", "h1", "h2", "h3", "h4", "li", "div"],
+                &["p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "div"],
                 &["head", "style", "script"],
                 cancel,
-                None,
+                Some(&mut chapter_headings),
             ) {
                 Ok(part) => part,
                 Err(error) if book_cancelled(cancel) || error.is_cancelled() => {
@@ -75,13 +76,18 @@ impl DocumentReader for EpubDocumentReader {
                 }
             };
             if !part.trim().is_empty() {
-                let offset = full_text.len() + if full_text.is_empty() { 0 } else { 2 };
-                let title = part.trim().lines().next().unwrap_or("").trim().to_string();
-                headings.push(BookHeading { offset, title });
+                let part = part.trim();
+                let base = full_text.len() + if full_text.is_empty() { 0 } else { 2 };
+                for heading in chapter_headings {
+                    headings.push(BookHeading {
+                        offset: base + heading.offset,
+                        title: heading.title,
+                    });
+                }
                 if !full_text.is_empty() {
                     full_text.push_str("\n\n");
                 }
-                full_text.push_str(part.trim());
+                full_text.push_str(part);
             }
         }
 
@@ -188,7 +194,7 @@ fn epub_rootfile_path(bytes: &[u8]) -> AppResult<Option<String>> {
                 if let Some(path) = xml_attribute(&e, b"full-path")? {
                     let path = path.trim();
                     if !path.is_empty() {
-                        return Ok(Some(path.to_string()));
+                        return Ok(Some(percent_decode(path)));
                     }
                 }
             }
@@ -243,7 +249,7 @@ fn epub_spine_paths(bytes: &[u8], opf_path: &str) -> AppResult<Vec<String>> {
         let (path, is_document) = manifest.get(&idref).ok_or_else(|| {
             AppError::invalid_data(format!("В spine указан отсутствующий id «{idref}»"))
         })?;
-        if *is_document && !is_epub_navigation(path) {
+        if *is_document {
             entries.push(path.clone());
         }
     }
@@ -448,6 +454,15 @@ mod tests {
     }
 
     #[test]
+    fn epub_spine_keeps_toc_named_content_when_explicitly_in_spine() {
+        let opf = r#"<package><manifest><item id="toc" href="Text/toc.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="toc"/></spine></package>"#;
+
+        let entries = epub_spine_paths(opf.as_bytes(), "OEBPS/content.opf").expect("spine");
+
+        assert_eq!(entries, vec!["OEBPS/Text/toc.xhtml".to_string()]);
+    }
+
+    #[test]
     fn epub_spine_skips_item_with_nav_properties() {
         let opf = r#"<?xml version="1.0" encoding="utf-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0">
@@ -485,6 +500,18 @@ mod tests {
                 .expect("valid container")
                 .as_deref(),
             Some("OEBPS/content.opf")
+        );
+    }
+
+    #[test]
+    fn decodes_percent_encoded_epub_rootfile_path() {
+        let container = r#"<container><rootfiles><rootfile full-path="OEBPS/content%20file.opf"/></rootfiles></container>"#;
+
+        assert_eq!(
+            epub_rootfile_path(container.as_bytes())
+                .expect("valid container")
+                .as_deref(),
+            Some("OEBPS/content file.opf")
         );
     }
 
@@ -832,6 +859,49 @@ mod tests {
                 .starts_with("В EPUB не найден файл «OEBPS/Text/missing.xhtml»: "),
             "{error}"
         );
+    }
+
+    #[test]
+    fn epub_captures_structural_headings_inside_spine_document() {
+        let opf = r#"<package><manifest><item id="c1" href="Text/c1.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>"#;
+        let epub = write_test_epub(&[
+            ("META-INF/container.xml", TEST_EPUB_CONTAINER),
+            ("OEBPS/content.opf", opf),
+            (
+                "OEBPS/Text/c1.xhtml",
+                "<html><body><h1>Глава 1</h1><p>Первый текст.</p><h1>Глава 2</h1><p>Второй текст.</p></body></html>",
+            ),
+        ]);
+
+        let document = EpubDocumentReader
+            .read_document(&epub.0)
+            .expect("read EPUB");
+
+        assert_eq!(document.headings.len(), 2);
+        assert_eq!(document.headings[0].title, "Глава 1");
+        assert_eq!(document.headings[1].title, "Глава 2");
+        assert!(document.raw_text[document.headings[0].offset..].starts_with("Глава 1"));
+        assert!(document.raw_text[document.headings[1].offset..].starts_with("Глава 2"));
+    }
+
+    #[test]
+    fn epub_does_not_treat_first_paragraph_as_heading() {
+        let opf = r#"<package><manifest><item id="c1" href="Text/c1.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>"#;
+        let epub = write_test_epub(&[
+            ("META-INF/container.xml", TEST_EPUB_CONTAINER),
+            ("OEBPS/content.opf", opf),
+            (
+                "OEBPS/Text/c1.xhtml",
+                "<html><body><p>Обычный первый абзац.</p><p>Второй абзац.</p></body></html>",
+            ),
+        ]);
+
+        let document = EpubDocumentReader
+            .read_document(&epub.0)
+            .expect("read EPUB");
+
+        assert!(document.headings.is_empty());
+        assert_eq!(document.raw_text, "Обычный первый абзац.\nВторой абзац.");
     }
 
     #[test]
