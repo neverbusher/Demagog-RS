@@ -88,7 +88,10 @@ if (-not (Test-Path -LiteralPath $manifestSource)) {
     throw "Missing dictionary manifest: $manifestSource. Run Demagog-RS.exe --manifest-dictionaries first."
 }
 New-Item -ItemType Directory -Path (Join-Path $staging "assets") -Force | Out-Null
-Copy-Item -LiteralPath $manifestSource -Destination (Join-Path $staging "assets\dictionaries.sha256")
+$manifestTarget = Join-Path $staging "assets\dictionaries.sha256"
+$manifestLines = [System.IO.File]::ReadAllLines($manifestSource, [System.Text.Encoding]::UTF8) |
+    Where-Object { $_ -notmatch '^[0-9a-fA-F]{64}\s+35_' }
+[System.IO.File]::WriteAllLines($manifestTarget, [string[]]$manifestLines, [System.Text.UTF8Encoding]::new($false))
 
 # Personal user dictionaries (35_ prefix) are never shipped.
 $dictionaries = @(Get-ChildItem -LiteralPath $dicSource -File | Where-Object {
@@ -107,7 +110,7 @@ Compress-Archive -Path $staging -DestinationPath $zipPath -CompressionLevel Opti
 
 $hash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $hashPath = "$zipPath.sha256"
-Set-Content -LiteralPath $hashPath -Value ("{0}  {1}" -f $hash, (Split-Path -Leaf $zipPath)) -Encoding ASCII
+[System.IO.File]::WriteAllText($hashPath, ("{0}  {1}`n" -f $hash, (Split-Path -Leaf $zipPath)), [System.Text.UTF8Encoding]::new($false))
 
 # Keep the repo-root run artifacts in sync with the packaged binaries.
 Copy-Item -LiteralPath $glowExe -Destination (Join-Path $root "Demagog-RS.exe") -Force
