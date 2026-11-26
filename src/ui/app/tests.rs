@@ -2147,12 +2147,41 @@ fn reset_button_returns_app_to_launch_state() {
 }
 
 #[test]
+fn reset_app_keeps_compiled_dictionaries_without_reloading() {
+    let mut app = ui_test_app("Текст", "Результат", Vec::new());
+    app.dictionaries = vec![LoadedDictionary {
+        meta: DictionaryMeta {
+            name: "loaded.dic".to_string(),
+            kind: DictionaryKind::DicStandard,
+            tag: DictionaryTag::CleanupAndTranslit,
+            description: String::new(),
+            outputs_plus_stress: false,
+            enabled: true,
+            rule_count: 0,
+            encoding: "UTF-8",
+            warnings: Vec::new(),
+            last_ms: Some(12),
+            last_replacements: Some(34),
+        },
+        processor: Arc::new(NoopProcessor),
+    }];
+
+    app.reset_app();
+
+    assert_eq!(app.dictionaries.len(), 1);
+    assert_eq!(app.dictionaries[0].meta.last_ms, None);
+    assert_eq!(app.dictionaries[0].meta.last_replacements, None);
+    assert!(!app.worker.is_busy);
+    assert!(app.worker.rx.is_none());
+}
+
+#[test]
 fn reset_app_preserves_window_title_and_icon() {
     let mut app = ui_test_app("Текст", "Результат", Vec::new());
     app.view.last_window_title = "Demagog-RS — Текст".to_string();
     app.view.window_icon_applied = true;
 
-    app.reset_app(egui::Context::default());
+    app.reset_app();
 
     assert_eq!(app.view.last_window_title, "Demagog-RS — Текст");
     assert!(app.view.window_icon_applied);

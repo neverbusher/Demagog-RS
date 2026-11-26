@@ -175,7 +175,7 @@ impl DemagogApp {
 
     /// Сброс приложения в состояние свежего запуска: пример текста, пустая очередь,
     /// все состояния на начальные значения.
-    pub(crate) fn reset_app(&mut self, ctx: egui::Context) {
+    pub(crate) fn reset_app(&mut self) {
         self.editor.reset_document(Self::sample_book_document());
         self.view.reset_document_state();
         self.processing = ProcessingState::default();
@@ -184,12 +184,11 @@ impl DemagogApp {
         self.search.reset();
         self.splitter = splitter::SplitterState::default();
         self.batch = batch::BatchState::default();
-        self.dictionaries.clear();
-        self.set_status(
-            StatusLevel::Info,
-            "Загрузка и компиляция словарей на всех ядрах CPU...",
-        );
-        self.reload_dictionaries_async(ctx);
+        for dictionary in &mut self.dictionaries {
+            dictionary.meta.last_ms = None;
+            dictionary.meta.last_replacements = None;
+        }
+        self.set_status(StatusLevel::Success, "Состояние сброшено");
     }
 
     fn reload_dictionaries_async(&mut self, ctx: egui::Context) {

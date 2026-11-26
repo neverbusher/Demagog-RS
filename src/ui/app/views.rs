@@ -40,7 +40,7 @@ impl DemagogApp {
                         .on_hover_text("Сбросить состояние?")
                         .clicked()
                     {
-                        self.reset_app(ctx.clone());
+                        self.reset_app();
                     }
 
                     if ui
@@ -203,7 +203,7 @@ impl DemagogApp {
                         .on_hover_text("Сбросить состояние")
                         .clicked()
                     {
-                        self.reset_app(ctx.clone());
+                        self.reset_app();
                     }
                     let enabled_dictionaries =
                         self.dictionaries.iter().filter(|d| d.meta.enabled).count();
