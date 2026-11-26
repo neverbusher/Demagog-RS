@@ -39,7 +39,7 @@ impl DemagogApp {
                     )
                     .pick_files()
             {
-                self.splitter.batch_queue.add_files(paths);
+                self.splitter.add_batch_files(paths);
             }
             if ui
                 .add_enabled(
@@ -287,7 +287,7 @@ mod tests {
         let mut app = DemagogApp::from_parts(AppSettings::default(), BookDocument::default());
         app.settings.split.output_dir = Some(root.clone());
         app.settings.split.by_size = false;
-        app.splitter.batch_queue.add_files([root.join("book.txt")]);
+        app.splitter.add_batch_files([root.join("book.txt")]);
         app.splitter.batch_queue.error = Some("старая ошибка".to_string());
         app.splitter.batch_queue.warning = Some("старое предупреждение".to_string());
         app.view.active_tab = ActiveTab::BookCutter;
@@ -310,7 +310,7 @@ mod tests {
         app.settings.split.output_dir = Some(root.clone());
         app.settings.split.subfolder = false;
         app.settings.split.overwrite = true;
-        app.splitter.batch_queue.add_files([root.join("book.txt")]);
+        app.splitter.add_batch_files([root.join("book.txt")]);
 
         assert_eq!(app.batch_existing_dirs(), vec![root.display().to_string()]);
         let _ = std::fs::remove_dir_all(&root);
@@ -344,7 +344,7 @@ mod tests {
         app.settings.split.output_dir = Some(root.clone());
         app.settings.split.subfolder = true;
         app.settings.split.overwrite = false;
-        app.splitter.batch_queue.add_files([root.join("book.txt")]);
+        app.splitter.add_batch_files([root.join("book.txt")]);
 
         assert!(app.batch_existing_dirs().is_empty());
         let _ = std::fs::remove_dir_all(&root);

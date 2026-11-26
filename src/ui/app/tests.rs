@@ -1,7 +1,7 @@
 use super::*;
 use crate::domain::{DictionaryKind, ProcessOutput};
 use crate::services::batch::{BatchCounts, BatchOutcome, BatchProgress};
-use crate::services::book_splitter::{BatchSplitFileResult, BatchSplitProgress};
+use crate::services::book_splitter::{BatchSplitFileResult, BatchSplitProgress, BookPart};
 
 #[test]
 fn text_would_be_lost_for_non_empty_text() {
@@ -558,6 +558,52 @@ fn finished_worker_messages_clear_cancel_flag() {
 
     assert!(app.worker.cancel_flag.is_none());
     assert!(!app.worker.is_busy);
+}
+
+#[test]
+fn book_load_preserves_knigorez_batch_queue_and_clears_preview() {
+    use std::sync::mpsc;
+
+    let mut app = ui_test_app("Старый текст", "", Vec::new());
+    let max_chars = app.settings.split.max_chars;
+    app.splitter.add_batch_files([PathBuf::from("queued.fb2")]);
+    app.splitter.has_preview = true;
+    app.splitter.preview.push(BookPart {
+        title: Some("Глава 1".to_string()),
+        text: "Старый текст".to_string(),
+    });
+    app.splitter.names.push("старое превью".to_string());
+    app.splitter.mode = splitter::SplitterMode::Batch;
+
+    let (tx, rx) = mpsc::channel();
+    tx.send(WorkerMessage::BookLoaded(Ok(BookDocument {
+        title: "Новая книга".to_string(),
+        source_path: Some(PathBuf::from("new.fb2")),
+        raw_text: "Новый текст".to_string(),
+        processed_text: String::new(),
+        chunks: Vec::new(),
+        headings: Vec::new(),
+    })))
+    .unwrap();
+    app.worker.rx = Some(rx);
+    app.worker.is_busy = true;
+
+    app.poll_worker();
+
+    assert_eq!(app.splitter.batch_queue.files.len(), 1);
+    assert_eq!(
+        app.splitter.batch_queue.files[0].path,
+        PathBuf::from("queued.fb2")
+    );
+    assert!(matches!(
+        app.splitter.batch_queue.statuses[0],
+        splitter::BatchSplitStatus::Queued
+    ));
+    assert_eq!(app.settings.split.max_chars, max_chars);
+    assert_eq!(app.splitter.mode, splitter::SplitterMode::Single);
+    assert!(!app.splitter.has_preview);
+    assert!(app.splitter.preview.is_empty());
+    assert!(app.splitter.names.is_empty());
 }
 
 #[test]
@@ -1676,6 +1722,186 @@ fn knigorez_tab_previews_parts_on_open() {
 }
 
 #[test]
+fn knigorez_mode_switch_changes_visible_section_without_losing_state() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = ui_test_app("Глава 1\nТекст.", "", Vec::new());
+    let max_chars = app.settings.split.max_chars;
+    app.splitter.has_preview = true;
+    app.splitter.preview.push(BookPart {
+        title: Some("Глава 1".to_string()),
+        text: "Глава 1\nТекст.".to_string(),
+    });
+    app.splitter.names.push("01 Глава 1".to_string());
+    app.splitter.add_batch_files([PathBuf::from("queued.fb2")]);
+    app.splitter.mode = splitter::SplitterMode::Single;
+    app.view.active_tab = ActiveTab::BookCutter;
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1100.0, 800.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+
+    harness.run_steps(2);
+    assert_eq!(harness.get_all_by_label_contains("Частей:").count(), 1);
+    assert_eq!(
+        harness
+            .query_all_by_label_contains("Пакетная нарезка")
+            .count(),
+        0
+    );
+
+    harness.get_by_label("Пакет").click();
+    harness.run_steps(2);
+
+    assert_eq!(harness.state().splitter.mode, splitter::SplitterMode::Batch);
+    assert_eq!(
+        harness
+            .get_all_by_label_contains("Пакетная нарезка")
+            .count(),
+        1
+    );
+    assert_eq!(harness.query_all_by_label_contains("Частей:").count(), 0);
+    assert_eq!(harness.state().splitter.batch_queue.files.len(), 1);
+    assert_eq!(
+        harness.state().splitter.batch_queue.files[0].path,
+        PathBuf::from("queued.fb2")
+    );
+    assert!(harness.state().splitter.has_preview);
+    assert_eq!(harness.state().splitter.preview.len(), 1);
+    assert_eq!(
+        harness.state().splitter.preview[0].title.as_deref(),
+        Some("Глава 1")
+    );
+    assert_eq!(harness.state().splitter.preview[0].text, "Глава 1\nТекст.");
+    assert_eq!(harness.state().splitter.names, ["01 Глава 1"]);
+    assert_eq!(harness.state().settings.split.max_chars, max_chars);
+
+    harness.get_by_label("Одна книга").click();
+    harness.run_steps(1);
+
+    assert_eq!(harness.get_all_by_label_contains("Частей:").count(), 1);
+    assert_eq!(harness.state().splitter.batch_queue.files.len(), 1);
+}
+
+#[test]
+fn knigorez_mode_switch_exposes_selected_radio_state() {
+    use egui::accesskit::{Role, Toggled};
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::{NodeT, Queryable};
+
+    let mut app = ui_test_app("Глава 1\nТекст.", "", Vec::new());
+    app.splitter.has_preview = true;
+    app.view.active_tab = ActiveTab::BookCutter;
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1100.0, 800.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+
+    harness.run_steps(2);
+    let single = harness.get_by_label("Одна книга").accesskit_node();
+    let batch = harness.get_by_label("Пакет").accesskit_node();
+    assert_eq!(single.role(), Role::RadioButton);
+    assert_eq!(batch.role(), Role::RadioButton);
+    assert_eq!(single.toggled(), Some(Toggled::True));
+    assert_eq!(batch.toggled(), Some(Toggled::False));
+
+    harness.get_by_label("Пакет").click();
+    harness.run_steps(2);
+
+    let single = harness.get_by_label("Одна книга").accesskit_node();
+    let batch = harness.get_by_label("Пакет").accesskit_node();
+    assert_eq!(single.toggled(), Some(Toggled::False));
+    assert_eq!(batch.toggled(), Some(Toggled::True));
+}
+
+#[test]
+fn knigorez_mode_switch_is_disabled_while_busy() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::{NodeT, Queryable};
+
+    let mut app = ui_test_app("Глава 1\nТекст.", "", Vec::new());
+    app.splitter.has_preview = true;
+    app.worker.is_busy = true;
+    app.view.active_tab = ActiveTab::BookCutter;
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1100.0, 800.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+
+    harness.run_steps(2);
+    for label in ["Одна книга", "Пакет"] {
+        assert!(
+            harness.get_by_label(label).accesskit_node().is_disabled(),
+            "{label} must be disabled while busy"
+        );
+    }
+    assert_eq!(
+        harness
+            .get_all_by_label_contains("после завершения работы")
+            .count(),
+        1
+    );
+
+    harness.get_by_label("Пакет").click();
+    harness.run_steps(2);
+
+    assert_eq!(
+        harness.state().splitter.mode,
+        splitter::SplitterMode::Single
+    );
+
+    harness.state_mut().worker.is_busy = false;
+    harness.run_steps(1);
+    assert!(!harness.get_by_label("Пакет").accesskit_node().is_disabled());
+    harness.get_by_label("Пакет").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().splitter.mode, splitter::SplitterMode::Batch);
+}
+
+#[test]
+fn resetting_knigorez_preview_preserves_pending_settings_save() {
+    let mut app = ui_test_app("Глава 1\nТекст.", "", Vec::new());
+    app.splitter.save_pending = true;
+
+    app.splitter.reset_preview();
+
+    assert!(app.splitter.save_pending);
+}
+
+#[test]
+fn adding_knigorez_batch_files_selects_batch_and_clear_keeps_mode() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = ui_test_app("Глава 1\nТекст.", "", Vec::new());
+    app.splitter.add_batch_files([PathBuf::from("queued.fb2")]);
+    app.view.active_tab = ActiveTab::BookCutter;
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1100.0, 800.0))
+        .build_ui_state(|ui, app: &mut DemagogApp| app.update_ui(ui), app);
+
+    harness.run_steps(2);
+    assert_eq!(harness.state().splitter.mode, splitter::SplitterMode::Batch);
+    assert_eq!(harness.state().splitter.batch_queue.files.len(), 1);
+    assert_eq!(
+        harness
+            .get_all_by_label_contains("Пакетная нарезка")
+            .count(),
+        1
+    );
+
+    harness.get_by_label("🗑 Очистить").click();
+    harness.run_steps(2);
+
+    assert_eq!(harness.state().splitter.mode, splitter::SplitterMode::Batch);
+    assert!(harness.state().splitter.batch_queue.files.is_empty());
+    assert_eq!(
+        harness
+            .get_all_by_label_contains("Пакетная нарезка")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn knigorez_empty_keywords_show_validation_error() {
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
@@ -1752,6 +1978,7 @@ fn knigorez_tab_has_batch_queue_section() {
 
     let mut app = ui_test_app("Глава 1\nТекст.", "", Vec::new());
     app.editor.document.source_path = None;
+    app.splitter.mode = splitter::SplitterMode::Batch;
     app.view.active_tab = ActiveTab::BookCutter;
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1100.0, 800.0))
@@ -1786,8 +2013,7 @@ fn knigorez_batch_clear_is_disabled_while_running() {
     app.editor.document.source_path = None;
     app.view.active_tab = ActiveTab::BookCutter;
     app.splitter
-        .batch_queue
-        .add_files([std::env::temp_dir().join("demagog-knigorez-clear.txt")]);
+        .add_batch_files([std::env::temp_dir().join("demagog-knigorez-clear.txt")]);
     app.splitter.batch_queue.running = true;
     app.worker.is_busy = true;
     let mut harness = Harness::builder()
@@ -1811,8 +2037,7 @@ fn knigorez_batch_disconnect_resets_running_state() {
     app.editor.document.source_path = None;
     app.view.active_tab = ActiveTab::BookCutter;
     app.splitter
-        .batch_queue
-        .add_files([std::env::temp_dir().join("demagog-knigorez-disconnect.txt")]);
+        .add_batch_files([std::env::temp_dir().join("demagog-knigorez-disconnect.txt")]);
     app.splitter.batch_queue.running = true;
     app.splitter.batch_queue.warning = Some("старое предупреждение".to_string());
     app.splitter.batch_queue.error = Some("старая ошибка".to_string());
@@ -1844,8 +2069,7 @@ fn knigorez_batch_cancel_button_shows_requested_state() {
     app.editor.document.source_path = None;
     app.view.active_tab = ActiveTab::BookCutter;
     app.splitter
-        .batch_queue
-        .add_files([std::env::temp_dir().join("demagog-knigorez-cancel-button.txt")]);
+        .add_batch_files([std::env::temp_dir().join("demagog-knigorez-cancel-button.txt")]);
     app.splitter.batch_queue.running = true;
     app.worker.is_busy = true;
     app.worker.cancel_flag = Some(Arc::new(AtomicBool::new(false)));
@@ -1876,7 +2100,7 @@ fn knigorez_batch_cancellation_resets_running_and_renders_service_counts() {
     let mut app = ui_test_app("", "", Vec::new());
     app.editor.document.source_path = None;
     app.view.active_tab = ActiveTab::BookCutter;
-    app.splitter.batch_queue.add_files([
+    app.splitter.add_batch_files([
         std::env::temp_dir().join("demagog-knigorez-cancel-a.txt"),
         std::env::temp_dir().join("demagog-knigorez-cancel-b.txt"),
     ]);
@@ -1961,7 +2185,7 @@ fn knigorez_batch_completion_uses_service_counts_and_renders_summary() {
     let mut app = ui_test_app("", "", Vec::new());
     app.editor.document.source_path = None;
     app.view.active_tab = ActiveTab::BookCutter;
-    app.splitter.batch_queue.add_files([
+    app.splitter.add_batch_files([
         std::env::temp_dir().join("demagog-knigorez-done-a.txt"),
         std::env::temp_dir().join("demagog-knigorez-done-b.txt"),
     ]);
@@ -2037,7 +2261,7 @@ fn knigorez_batch_large_export_confirmation_replies_for_each_book() {
     let mut app = ui_test_app("", "", Vec::new());
     app.editor.document.source_path = None;
     app.view.active_tab = ActiveTab::BookCutter;
-    app.splitter.batch_queue.add_files([
+    app.splitter.add_batch_files([
         std::env::temp_dir().join("demagog-knigorez-large-a.txt"),
         std::env::temp_dir().join("demagog-knigorez-large-b.txt"),
     ]);
@@ -2105,8 +2329,7 @@ fn reset_button_returns_app_to_launch_state() {
     app.processing.processing_snapshot = Some(ProcessingSnapshot::capture("Текст"));
     app.processing.capture_diff_on_run = true;
     app.splitter
-        .batch_queue
-        .add_files([std::env::temp_dir().join("demagog-reset-test.txt")]);
+        .add_batch_files([std::env::temp_dir().join("demagog-reset-test.txt")]);
     app.view.active_tab = ActiveTab::DiffAndStats;
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1280.0, 900.0))
@@ -2144,6 +2367,7 @@ fn reset_button_returns_app_to_launch_state() {
     assert!(!state.processing.capture_diff_on_run);
     assert_eq!(state.view.active_tab, ActiveTab::RawText);
     assert!(state.splitter.batch_queue.files.is_empty());
+    assert_eq!(state.splitter.mode, splitter::SplitterMode::Single);
 }
 
 #[test]

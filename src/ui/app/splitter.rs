@@ -4,6 +4,13 @@ use crate::io::book_reader::can_read_book;
 use crate::services::batch::{BatchInput, BatchOutcome};
 use crate::services::book_splitter::{self, BookPart};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum SplitterMode {
+    #[default]
+    Single,
+    Batch,
+}
+
 #[derive(Debug, Clone)]
 pub(super) enum BatchSplitStatus {
     Queued,
@@ -84,6 +91,7 @@ impl BatchQueueState {
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct SplitterState {
+    pub mode: SplitterMode,
     pub preview: Vec<BookPart>,
     pub names: Vec<String>,
     pub has_preview: bool,
@@ -92,15 +100,43 @@ pub(super) struct SplitterState {
     pub batch_queue: BatchQueueState,
 }
 
+impl SplitterState {
+    pub(super) fn add_batch_files(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
+        self.batch_queue.add_files(paths);
+        self.mode = SplitterMode::Batch;
+    }
+
+    pub(super) fn reset_preview(&mut self) {
+        self.preview.clear();
+        self.names.clear();
+        self.has_preview = false;
+        self.stale = false;
+    }
+}
+
 impl DemagogApp {
     pub(super) fn show_splitter_tab(&mut self, ui: &mut egui::Ui, theme: ThemeMode) {
-        // Одиночный режим — когда выбрана одна книга через Открыть книгу
-        // и пакетная очередь пуста; пакетное меню в остальных случаях.
-        if self.editor.document.source_path.is_some() && self.splitter.batch_queue.files.is_empty()
-        {
-            self.show_splitter_single(ui, theme);
-        } else {
-            self.show_splitter_batch_menu(ui, theme);
+        self.show_splitter_mode_switch(ui);
+        match self.splitter.mode {
+            SplitterMode::Single => self.show_splitter_single(ui, theme),
+            SplitterMode::Batch => self.show_splitter_batch_menu(ui, theme),
+        }
+    }
+
+    fn show_splitter_mode_switch(&mut self, ui: &mut egui::Ui) {
+        let mut selected = self.splitter.mode;
+        ui.horizontal(|ui| {
+            ui.label("Режим:");
+            ui.add_enabled_ui(!self.worker.is_busy, |ui| {
+                ui.radio_value(&mut selected, SplitterMode::Single, "Одна книга");
+                ui.radio_value(&mut selected, SplitterMode::Batch, "Пакет");
+            });
+        });
+        if self.worker.is_busy {
+            ui.weak("Переключение режима доступно после завершения работы.");
+        }
+        if selected != self.splitter.mode {
+            self.splitter.mode = selected;
         }
     }
 

@@ -2,10 +2,9 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use super::splitter::BatchSplitStatus;
+use super::splitter::{BatchSplitStatus, SplitterMode};
 use super::{
     ActiveTab, DemagogApp, LoadedDictionary, PipelineReport, StatusLevel, batch, format_num,
-    splitter,
 };
 use crate::domain::{AppError, BookDocument, PipelineProgress};
 use crate::engine::loader::CompiledDictionary;
@@ -284,7 +283,8 @@ impl DemagogApp {
                 }
                 self.editor.source_dirty = false;
                 self.editor.result_state.reset();
-                self.splitter = splitter::SplitterState::default();
+                self.splitter.reset_preview();
+                self.splitter.mode = SplitterMode::Single;
                 self.search.find_dirty = true;
             }
             Err(err) => {
