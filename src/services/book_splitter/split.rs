@@ -1,5 +1,6 @@
 //! Чистая нарезка текста книги на части (без ввода-вывода).
 
+use regex::Regex;
 use std::sync::atomic::AtomicBool;
 
 use crate::domain::{AppError, AppResult, BookHeading, SplitConfig};
@@ -100,6 +101,19 @@ fn collect_boundaries(
     }
     let mut boundaries: Vec<Boundary> = Vec::new();
     let keywords = parse_keywords(&config.keywords);
+    let keyword_pattern = if config.by_keywords && !keywords.is_empty() {
+        let alternatives = keywords
+            .iter()
+            .map(|keyword| regex::escape(keyword))
+            .collect::<Vec<_>>()
+            .join("|");
+        Some(
+            Regex::new(&format!(r"^(?:{alternatives})(?:$|\p{{N}}|\W)"))
+                .map_err(|_| AppError::invalid_data("Слишком длинный список ключевых слов"))?,
+        )
+    } else {
+        None
+    };
     let mut blank_run = 0usize;
     let mut offset = 0usize;
     for line in text.split_inclusive('\n') {
@@ -120,7 +134,10 @@ fn collect_boundaries(
                 });
             }
             let lower = trimmed.to_lowercase();
-            if config.by_keywords && keywords.iter().any(|k| lower.starts_with(k.as_str())) {
+            if keyword_pattern
+                .as_ref()
+                .is_some_and(|pattern| pattern.is_match(&lower))
+            {
                 boundaries.push(Boundary {
                     offset: line_start,
                     title: Some(trimmed.to_string()),
@@ -143,7 +160,10 @@ fn collect_boundaries(
             if is_cancelled(cancel) {
                 return Err(AppError::cancelled("Нарезка книги отменена"));
             }
-            if heading.offset <= text.len() && text.is_char_boundary(heading.offset) {
+            if heading.offset <= text.len()
+                && text.is_char_boundary(heading.offset)
+                && (heading.offset == 0 || text[..heading.offset].ends_with('\n'))
+            {
                 boundaries.push(Boundary {
                     offset: heading.offset,
                     title: Some(heading.title.clone()),
@@ -169,6 +189,13 @@ fn part_text(piece: &str, strip_heading: bool) -> &str {
     }
 }
 
+fn content_after_heading(text: &str, offset: usize) -> usize {
+    text[offset..]
+        .find('\n')
+        .map(|relative| offset + relative + 1)
+        .unwrap_or(text.len())
+}
+
 fn form_parts(
     text: &str,
     boundaries: &[Boundary],
@@ -177,6 +204,7 @@ fn form_parts(
 ) -> AppResult<Vec<BookPart>> {
     let mut parts: Vec<BookPart> = Vec::new();
     let mut start = 0usize;
+    let mut content_start = 0usize;
     let mut current_title: Option<String> = None;
     let mut strip_heading = false;
     for boundary in boundaries {
@@ -186,9 +214,29 @@ fn form_parts(
         if boundary.offset == 0 {
             current_title = boundary.title.clone();
             strip_heading = boundary.title.is_some();
+            content_start = if boundary.title.is_some() {
+                content_after_heading(text, boundary.offset)
+            } else {
+                boundary.offset
+            };
             continue;
         }
         if boundary.offset <= start {
+            continue;
+        }
+        if text[content_start..boundary.offset].trim().is_empty() {
+            if config.remove_heading {
+                start = boundary.offset;
+            }
+            if config.remove_heading || boundary.title.is_some() {
+                current_title = boundary.title.clone();
+            }
+            strip_heading = boundary.title.is_some();
+            content_start = if boundary.title.is_some() {
+                content_after_heading(text, boundary.offset)
+            } else {
+                boundary.offset
+            };
             continue;
         }
         let candidate = part_text(
@@ -199,6 +247,11 @@ fn form_parts(
             start = boundary.offset;
             current_title = boundary.title.clone();
             strip_heading = boundary.title.is_some();
+            content_start = if boundary.title.is_some() {
+                content_after_heading(text, boundary.offset)
+            } else {
+                boundary.offset
+            };
             continue;
         }
         if config.min_chars > 0 && candidate.chars().count() < config.min_chars {
@@ -211,16 +264,34 @@ fn form_parts(
         start = boundary.offset;
         current_title = boundary.title.clone();
         strip_heading = boundary.title.is_some();
+        content_start = if boundary.title.is_some() {
+            content_after_heading(text, boundary.offset)
+        } else {
+            boundary.offset
+        };
     }
     if is_cancelled(cancel) {
         return Err(AppError::cancelled("Нарезка книги отменена"));
     }
     let tail = part_text(&text[start..], strip_heading && config.remove_heading);
     if !tail.is_empty() {
-        parts.push(BookPart {
-            title: current_title,
-            text: tail.to_string(),
-        });
+        if text[content_start..].trim().is_empty()
+            && !config.remove_heading
+            && let Some(previous) = parts.last_mut()
+        {
+            let separator = if text[..start].ends_with("\r\n") {
+                "\r\n"
+            } else {
+                "\n"
+            };
+            previous.text.push_str(separator);
+            previous.text.push_str(tail);
+        } else {
+            parts.push(BookPart {
+                title: current_title,
+                text: tail.to_string(),
+            });
+        }
     }
     Ok(parts)
 }

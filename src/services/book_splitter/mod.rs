@@ -92,6 +92,83 @@ mod tests {
     }
 
     #[test]
+    fn keywords_do_not_match_extended_words_at_line_start() {
+        let config = SplitConfig {
+            by_keywords: true,
+            keywords: "Глава, Часть, Пролог, Эпилог".to_string(),
+            ..cfg()
+        };
+        let valid_headings = [
+            "Глава",
+            "глава 1",
+            "ГЛАВА\u{00A0}2",
+            "Глава1",
+            "Глава—начало",
+            "Часть 2",
+            "Пролог",
+            "Эпилог",
+        ];
+        for heading in valid_headings {
+            let text = format!("Вступление.\n{heading}\nТекст.");
+            let parts = split_book(&text, &[], &config);
+            assert_eq!(parts.len(), 2, "heading {heading:?} must split");
+            assert_eq!(parts[1].title.as_deref(), Some(heading));
+        }
+
+        let extended_words = [
+            "Главарь бандитской троицы потянулся к пистолету.",
+            "Главари покинули комнату.",
+            "Глава_2",
+            "Глава\u{0301}рь",
+            "Частью этого решения стало примирение.",
+            "Прологом к путешествию стала встреча.",
+            "Эпилогом стало возвращение домой.",
+        ];
+        for line in extended_words {
+            let text = format!("Вступление.\n{line}\nТекст.");
+            let parts = split_book(&text, &[], &config);
+            assert_eq!(parts.len(), 1, "line {line:?} must not split");
+            assert_eq!(parts[0].text, text);
+        }
+    }
+
+    #[test]
+    fn custom_keywords_are_matched_literally() {
+        let config = SplitConfig {
+            by_keywords: true,
+            keywords: "Глава (1), Пролог*".to_string(),
+            ..cfg()
+        };
+        let text = "Вступление.\nГлава (1)\nТекст.\nГлава X1\nПродолжение.";
+        let parts = split_book(text, &[], &config);
+
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[1].title.as_deref(), Some("Глава (1)"));
+        assert_eq!(parts[1].text, "Глава (1)\nТекст.\nГлава X1\nПродолжение.");
+    }
+
+    #[test]
+    fn punctuation_ending_keywords_require_a_separator() {
+        let config = SplitConfig {
+            by_keywords: true,
+            keywords: "Глава (1), Пролог*".to_string(),
+            ..cfg()
+        };
+        for heading in ["Пролог*", "Пролог* начало", "Глава (1) начало"]
+        {
+            let text = format!("Вступление.\n{heading}\nТекст.");
+            let parts = split_book(&text, &[], &config);
+            assert_eq!(parts.len(), 2, "heading {heading:?} must split");
+            assert_eq!(parts[1].title.as_deref(), Some(heading));
+        }
+        for line in ["Пролог*текст", "Глава (1)продолжение"] {
+            let text = format!("Вступление.\n{line}\nТекст.");
+            let parts = split_book(&text, &[], &config);
+            assert_eq!(parts.len(), 1, "line {line:?} must not split");
+        }
+    }
+
+    #[test]
     fn remove_heading_strips_first_line() {
         let config = SplitConfig {
             by_keywords: true,
@@ -156,6 +233,262 @@ mod tests {
         assert_eq!(parts[0].text, "Преамбула.");
         assert_eq!(parts[1].title.as_deref(), Some("Глава 1"));
         assert_eq!(parts[2].text, "Глава 2\nТекст два.");
+    }
+
+    #[test]
+    fn toc_heading_inside_line_is_skipped() {
+        let config = SplitConfig {
+            by_toc: true,
+            ..cfg()
+        };
+        let text = "Abc\nBody.";
+        let headings = vec![
+            BookHeading {
+                offset: 0,
+                title: "Abc".to_string(),
+            },
+            BookHeading {
+                offset: 1,
+                title: "b".to_string(),
+            },
+        ];
+
+        let parts = split_book(text, &headings, &config);
+
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].title.as_deref(), Some("Abc"));
+        assert_eq!(parts[0].text, text);
+    }
+
+    #[test]
+    fn toc_container_heading_is_folded_into_next_part() {
+        let config = SplitConfig {
+            by_toc: true,
+            ..cfg()
+        };
+        let text = "Вступление.\nДзюро\nПролог\nТекст.";
+        let headings = vec![
+            BookHeading {
+                offset: text.find("Дзюро").unwrap(),
+                title: "Дзюро".to_string(),
+            },
+            BookHeading {
+                offset: text.find("Пролог").unwrap(),
+                title: "Пролог".to_string(),
+            },
+        ];
+
+        let parts = split_book(text, &headings, &config);
+
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].text, "Вступление.");
+        assert_eq!(parts[1].title.as_deref(), Some("Пролог"));
+        assert_eq!(parts[1].text, "Дзюро\nПролог\nТекст.");
+    }
+
+    #[test]
+    fn toc_heading_chain_is_preserved_in_following_part() {
+        let config = SplitConfig {
+            by_toc: true,
+            ..cfg()
+        };
+        let text = "Дзюро\nПролог\nГлава 1\nТекст.";
+        let headings: Vec<_> = ["Дзюро", "Пролог", "Глава 1"]
+            .into_iter()
+            .map(|title| BookHeading {
+                offset: text.find(title).unwrap(),
+                title: title.to_string(),
+            })
+            .collect();
+
+        let parts = split_book(text, &headings, &config);
+
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].title.as_deref(), Some("Глава 1"));
+        assert_eq!(parts[0].text, text);
+    }
+
+    #[test]
+    fn remove_heading_drops_empty_container_heading() {
+        let config = SplitConfig {
+            by_toc: true,
+            remove_heading: true,
+            ..cfg()
+        };
+        let text = "Вступление.\nДзюро\nПролог\nТекст.";
+        let headings = vec![
+            BookHeading {
+                offset: text.find("Дзюро").unwrap(),
+                title: "Дзюро".to_string(),
+            },
+            BookHeading {
+                offset: text.find("Пролог").unwrap(),
+                title: "Пролог".to_string(),
+            },
+        ];
+
+        let parts = split_book(text, &headings, &config);
+
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].text, "Вступление.");
+        assert_eq!(parts[1].title.as_deref(), Some("Пролог"));
+        assert_eq!(parts[1].text, "Текст.");
+    }
+
+    #[test]
+    fn trailing_container_heading_is_merged_with_previous_part() {
+        let config = SplitConfig {
+            by_toc: true,
+            ..cfg()
+        };
+        let text = "Глава 1\nТекст.\nДзюро";
+        let headings = vec![
+            BookHeading {
+                offset: text.find("Глава 1").unwrap(),
+                title: "Глава 1".to_string(),
+            },
+            BookHeading {
+                offset: text.find("Дзюро").unwrap(),
+                title: "Дзюро".to_string(),
+            },
+        ];
+
+        let parts = split_book(text, &headings, &config);
+
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].title.as_deref(), Some("Глава 1"));
+        assert_eq!(parts[0].text, text);
+    }
+
+    #[test]
+    fn heading_only_document_stays_single_part() {
+        let config = SplitConfig {
+            by_toc: true,
+            ..cfg()
+        };
+        let text = "Дзюро\nПролог";
+        let headings = vec![
+            BookHeading {
+                offset: text.find("Дзюро").unwrap(),
+                title: "Дзюро".to_string(),
+            },
+            BookHeading {
+                offset: text.find("Пролог").unwrap(),
+                title: "Пролог".to_string(),
+            },
+        ];
+
+        let parts = split_book(text, &headings, &config);
+
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].title.as_deref(), Some("Пролог"));
+        assert_eq!(parts[0].text, text);
+    }
+
+    #[test]
+    fn keyword_heading_chain_is_folded_into_next_part() {
+        let config = SplitConfig {
+            by_keywords: true,
+            keywords: "Глава".to_string(),
+            ..cfg()
+        };
+        let text = "Глава\nГлава 1\nТекст.";
+
+        let parts = split_book(text, &[], &config);
+
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].title.as_deref(), Some("Глава 1"));
+        assert_eq!(parts[0].text, text);
+    }
+
+    #[test]
+    fn trailing_container_heading_preserves_crlf() {
+        let config = SplitConfig {
+            by_toc: true,
+            ..cfg()
+        };
+        let text = "Глава 1\r\nТекст.\r\nДзюро";
+        let headings = vec![
+            BookHeading {
+                offset: text.find("Глава 1").unwrap(),
+                title: "Глава 1".to_string(),
+            },
+            BookHeading {
+                offset: text.find("Дзюро").unwrap(),
+                title: "Дзюро".to_string(),
+            },
+        ];
+
+        let parts = split_book(text, &headings, &config);
+
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].text, text);
+    }
+
+    #[test]
+    fn untitled_boundary_keeps_deferred_heading_title() {
+        let config = SplitConfig {
+            by_toc: true,
+            by_blank_lines: true,
+            ..cfg()
+        };
+        let text = "Дзюро\n\n\nТекст.";
+        let headings = vec![BookHeading {
+            offset: 0,
+            title: "Дзюро".to_string(),
+        }];
+
+        let parts = split_book(text, &headings, &config);
+
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].title.as_deref(), Some("Дзюро"));
+        assert_eq!(parts[0].text, text);
+    }
+
+    #[test]
+    fn all_caps_heading_chain_is_folded_into_next_part() {
+        let config = SplitConfig {
+            by_all_caps: true,
+            ..cfg()
+        };
+        let text = "ДЗЮРО\nПРОЛОГ\nТекст.";
+
+        let parts = split_book(text, &[], &config);
+
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].title.as_deref(), Some("ПРОЛОГ"));
+        assert_eq!(parts[0].text, text);
+    }
+
+    #[test]
+    fn min_chars_keeps_container_heading_inside_accumulated_part() {
+        let text = "Глава 1\nКоротко.\nДзюро\nПролог\nДлинный текст второй главы.";
+        let headings = ["Глава 1", "Дзюро", "Пролог"]
+            .into_iter()
+            .map(|title| BookHeading {
+                offset: text.find(title).unwrap(),
+                title: title.to_string(),
+            })
+            .collect::<Vec<_>>();
+
+        for remove_heading in [false, true] {
+            let config = SplitConfig {
+                by_toc: true,
+                min_chars: 50,
+                remove_heading,
+                ..cfg()
+            };
+            let parts = split_book(text, &headings, &config);
+
+            assert_eq!(parts.len(), 1);
+            assert!(parts.iter().all(|part| part.text.trim() != "Дзюро"));
+            if remove_heading {
+                assert!(parts[0].text.contains("Коротко."));
+                assert!(parts[0].text.contains("Пролог"));
+            } else {
+                assert_eq!(parts[0].text, text);
+            }
+        }
     }
 
     #[test]
